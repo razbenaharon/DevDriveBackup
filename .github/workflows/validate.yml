@@ -1,0 +1,38 @@
+name: Validate source
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse all PowerShell sources
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Path . -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') } | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors) { $errors | ForEach-Object { Write-Error $_ }; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+      - name: Compile native helper and report generator
+        shell: pwsh
+        run: |
+          Add-Type -Path ./Backup.Process.cs
+          python -m py_compile ./Build-BackupReport.py
+      - name: Check example configuration
+        shell: pwsh
+        run: |
+          $config = Get-Content ./config.example.json -Raw | ConvertFrom-Json
+          if ($config.MemoryMiB -lt 512 -or $config.Include.Count -eq 0) { throw 'Invalid example' }
+      - name: Verify concurrent status access
+        shell: pwsh
+        run: ./Test-BackupStatus.ps1
+      - name: Verify history selection safeguards
+        shell: pwsh
+        run: ./Test-BackupHistory.ps1
+      - name: Verify private credential file safeguards
+        shell: pwsh
+        run: ./Test-BackupSecuritySafety.ps1

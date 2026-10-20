@@ -1,0 +1,22 @@
+{
+  "Source": "X:\\",
+  "SourceVolumeId": "REPLACE_WITH_GET_VOLUME_UNIQUEID",
+  "DestinationVolumeId": "REPLACE_WITH_DESTINATION_VOLUME_UNIQUEID",
+  "RepositoryFolder": "DevDrive-Backup",
+  "PasswordDpapiPath": "C:\\Users\\YOUR_USER\\AppData\\Local\\DevDriveMirror\\repository-password.dpapi",
+  "RecoveryKeyPath": "C:\\Users\\YOUR_USER\\Backup Center recovery keys\\recovery-key.txt",
+  "Profile": "Balanced",
+  "RateMBps": 45,
+  "MemoryMiB": 1024,
+  "CpuThreads": 2,
+  "ReadConcurrency": 2,
+  "PackMiB": 16,
+  "Include": ["Projects", "Tools"],
+  "Exclude": ["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".next", ".turbo", ".pnpm-store", ".mypy_cache", ".ruff_cache", "pytest-of-*"],
+  "RecommendedExclude": ["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".next", ".turbo", ".pnpm-store", ".mypy_cache", ".ruff_cache", "pytest-of-*"],
+  "DefaultMode": "Mirror",
+  "Choices": [
+    {"Path": "Projects", "Mode": "Both", "Reason": "Source, local changes, Git history, assets and data"},
+    {"Path": "Tools", "Mode": "Both", "Reason": "Custom scripts, configuration and offline tools"}
+  ]
+}
