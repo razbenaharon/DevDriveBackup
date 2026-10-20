@@ -6,7 +6,10 @@ $folder=if($Where -eq 'Desktop'){[Environment]::GetFolderPath('Desktop')}else{Jo
 $path=Join-Path $folder 'Backup Center.lnk'
 $shell=New-Object -ComObject WScript.Shell
 $link=$shell.CreateShortcut($path)
-$link.TargetPath=(Get-Process -Id $PID).Path
+# The command name, not this process's path: a Store install keeps its version in the path, which
+# changes with every update.
+$pwsh=(Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1).Source
+$link.TargetPath=if($pwsh){$pwsh}else{(Get-Process -Id $PID).Path}
 $link.Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $PSScriptRoot 'Backup-Center.ps1')+'"'
 $link.WorkingDirectory=$PSScriptRoot
 $link.IconLocation=(Join-Path $PSScriptRoot 'BackupCenter.ico')+',0'
