@@ -1,0 +1,4 @@
+#!/bin/sh
+# Blocks a commit that would publish private backup details (see Test-PrivacyGuard.ps1).
+# Turn on once per clone: git config core.hooksPath .githooks
+exec pwsh -NoProfile -File "$(git rev-parse --show-toplevel)/Test-PrivacyGuard.ps1" -Staged

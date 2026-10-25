@@ -8,3 +8,4 @@
 *.json text eol=lf
 *.yml text eol=lf
 .gitignore text eol=lf
+.githooks/* text eol=lf

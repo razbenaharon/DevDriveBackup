@@ -116,6 +116,15 @@ pwsh -NoProfile -File ./Test-BackupSecurity.ps1 -DestinationDrive Y    # passwor
 
 `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
 
+### Keeping your own details out of a fork
+
+`Test-PrivacyGuard.ps1` refuses volume identifiers, user-profile paths, personal email addresses and force-added git-ignored files. On your computer it also reads your git-ignored `*.local.json` files and `%LOCALAPPDATA%\DevDriveMirror\hardware.json` and refuses their specific values (drive models and labels, key identifiers, folder names, computer name), without ever storing them in the repository. CI runs it on every push; to run it before every commit and on every commit message, turn on the hooks once per clone:
+
+```powershell
+git config core.hooksPath .githooks
+pwsh -NoProfile -File ./Test-PrivacyGuard.ps1 -ListTerms   # show the private values it protects
+```
+
 ## Limitations
 
 - Windows only. The window and messages are in English; file names in any language are preserved.

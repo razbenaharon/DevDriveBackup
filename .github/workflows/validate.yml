@@ -7,6 +7,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check for private backup details
+        shell: pwsh
+        run: ./Test-PrivacyGuard.ps1
       - name: Parse all PowerShell sources
         shell: pwsh
         run: |

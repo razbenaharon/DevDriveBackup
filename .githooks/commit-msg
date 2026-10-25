@@ -1,0 +1,3 @@
+#!/bin/sh
+# Blocks a commit message that names private backup details (see Test-PrivacyGuard.ps1).
+exec pwsh -NoProfile -File "$(git rev-parse --show-toplevel)/Test-PrivacyGuard.ps1" -MessageFile "$1"
