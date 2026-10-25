@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `Test-PrivacyGuard.ps1` blocks private backup details (volume identifiers, profile paths, personal email, drive models and labels, folder names from your `*.local.json`) from commits, commit messages and pushes; hooks in `.githooks`, also run in CI.
+- Plain copy no longer stops after copying when robocopy writes two "extra" records on one line during multi-threaded listing.
 
 ## 0.1.0 — first public release
 

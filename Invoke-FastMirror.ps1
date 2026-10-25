@@ -135,7 +135,9 @@ foreach($c in @($copied|Where-Object {$_.IsFolder -and -not $VerifyOnly})){
  $extrasLog=Join-Path $run ('extras-'+(Get-LogName $c.Region.Path).Substring(5))
  # Directory names must be listed here (no /NDL) so extra directories are reported too.
  & robocopy.exe @(@(Get-RoboArgs (Join-Rel $src $c.Region.Path) (Join-Rel $dst $c.Region.Path) $extrasLog $c.Region.Excluded @('/L','/PURGE','/NJH','/NJS'))|Where-Object {$_ -ne '/NDL'})|Out-Null
- $extras+=@(Get-Content -LiteralPath $extrasLog -Encoding Unicode|Where-Object {$_ -match '\*EXTRA (File|Dir)'}|ForEach-Object {($_ -split "`t")[-1].Trim()}|Where-Object {$_})
+ # With /MT, robocopy can write two records on one line ("*EXTRA Dir ... *EXTRA File ... <dir><file>"),
+ # so the path field is split again wherever a new mirror path starts.
+ $extras+=@(Get-Content -LiteralPath $extrasLog -Encoding Unicode|Where-Object {$_ -match '\*EXTRA (File|Dir)'}|ForEach-Object {($_ -split "`t")[-1].Trim() -split ('(?='+[regex]::Escape($dst)+')')}|ForEach-Object {$_.Trim()}|Where-Object {$_.StartsWith($dst,[StringComparison]::OrdinalIgnoreCase)})
 }
 # Only selected paths count as extras; old copies of unselected folders are reported separately below.
 $extras=@($extras|Sort-Object -Unique|Where-Object {
