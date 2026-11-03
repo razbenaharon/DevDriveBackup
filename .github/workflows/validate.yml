@@ -18,12 +18,15 @@ jobs:
             $tokens = $null; $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
             if ($errors) { $errors | ForEach-Object { Write-Error $_ }; $failed = $true }
+            # A stray control character (an escape mangled by an editing tool) parses fine but breaks paths.
+            if ([IO.File]::ReadAllText($_.FullName) -match '[\x00-\x08\x0B\x0C\x0E-\x1F]') { Write-Error "Control character in $($_.Name)"; $failed = $true }
           }
           if ($failed) { exit 1 }
       - name: Compile native helper and report generator
         shell: pwsh
         run: |
           Add-Type -Path ./Backup.Process.cs
+          Add-Type -Path ./Backup.MirrorVerifier.cs
           python -m py_compile ./Build-BackupReport.py
       - name: Check example configuration
         shell: pwsh
@@ -42,3 +45,6 @@ jobs:
       - name: Verify private credential file safeguards
         shell: pwsh
         run: ./Test-BackupSecuritySafety.ps1
+      - name: Verify plain copy rules
+        shell: pwsh
+        run: ./Test-BackupCopyRules.ps1

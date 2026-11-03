@@ -48,7 +48,7 @@ The first plain copy is verified automatically, file by file. After that, back u
 
 ## How it works
 
-**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`). Verification hashes both sides in parallel.
+**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`). Verification hashes both sides in parallel and counts selected files missing from the copy. Backup Center's own password, recovery-key and state folders are never copied by either engine.
 
 **Versions** (`Backup-Worker.ps1`) run restic with a random 256-bit password stored for your Windows account (DPAPI) plus a portable recovery key file, a hard memory cap (Windows Job Object), CPU and I/O limits, and a structural `restic check` after every backup. Restore always goes to a new folder and verifies restored content.
 
@@ -69,7 +69,7 @@ The first plain copy is verified automatically, file by file. After that, back u
 |---|---|
 | `BackupCenter.cmd`, `Backup-Center.ps1` | The main window |
 | `BackupCenter.Data.psm1` | Profiles, sources, history, freshness, load levels |
-| `Invoke-FastMirror.ps1` | Plain copy and verification |
+| `Invoke-FastMirror.ps1`, `Backup.MirrorVerifier.cs` | Plain copy and verification |
 | `Backup-Worker.ps1` | Versioned backup, check, restore, history, keys |
 | `Backup-History.ps1`, `Backup-Security.ps1` | Versions and restore; password and recovery key windows |
 | `BackupCenter-Advanced.cmd`, `Backup-Manager.ps1` | Advanced window for one versioned source |
@@ -120,7 +120,7 @@ pwsh -NoProfile -File ./Test-BackupSystem.ps1 -DestinationDrive Y      # version
 pwsh -NoProfile -File ./Test-BackupSecurity.ps1 -DestinationDrive Y    # password change and recovery keys
 ```
 
-`Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
+`Test-BackupCopyRules.ps1`, `Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
 
 ### Keeping your own details out of a fork
 

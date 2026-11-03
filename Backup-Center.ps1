@@ -107,6 +107,8 @@ $ui=@{
  Muted=[Drawing.Color]::FromArgb(94,107,112);Line=[Drawing.Color]::FromArgb(206,214,216);Select=[Drawing.Color]::FromArgb(220,229,233)
 }
 $stateColor=@{Fresh=[Drawing.Color]::FromArgb(46,139,87);OK=[Drawing.Color]::FromArgb(92,124,143);Stale=[Drawing.Color]::FromArgb(199,130,42);Never=[Drawing.Color]::FromArgb(154,163,168);'Nothing selected'=[Drawing.Color]::FromArgb(154,163,168);Error=[Drawing.Color]::FromArgb(178,34,34)}
+# The same states as small text: darker, so they stay readable (4.5:1) on white, paper and selection.
+$stateInk=@{Fresh=[Drawing.Color]::FromArgb(30,110,66);OK=[Drawing.Color]::FromArgb(66,94,110);Stale=[Drawing.Color]::FromArgb(138,82,10);Never=[Drawing.Color]::FromArgb(90,100,105);'Nothing selected'=[Drawing.Color]::FromArgb(90,100,105);Error=[Drawing.Color]::FromArgb(178,34,34)}
 function Get-Face([string]$Name,[double]$Size,[Drawing.FontStyle]$Style=[Drawing.FontStyle]::Regular){
  $f=[Drawing.Font]::new($Name,[single]$Size,$Style);if($f.Name -ne $Name){$f=[Drawing.Font]::new('Segoe UI',[single]$Size,$Style)};$f
 }
@@ -128,12 +130,17 @@ function Set-Button($b,[switch]$Primary){
  $b.FlatStyle='Flat';$b.Cursor='Hand';$b.FlatAppearance.BorderSize=1
  if($Primary){$b.BackColor=$ui.Ink;$b.ForeColor=[Drawing.Color]::White;$b.FlatAppearance.BorderColor=$ui.Ink;$b.FlatAppearance.MouseOverBackColor=[Drawing.Color]::FromArgb(55,70,76);$b.Font=Get-Face 'Segoe UI Semibold' 9.75}
  else{$b.BackColor=$ui.Surface;$b.ForeColor=$ui.Ink;$b.FlatAppearance.BorderColor=$ui.Line;$b.FlatAppearance.MouseOverBackColor=$ui.Select}
- $b.Add_EnabledChanged({param($s,$e)$s.ForeColor=if($s.Enabled){if($s.BackColor -eq $ui.Ink){[Drawing.Color]::White}else{$ui.Ink}}else{$ui.Muted}})
+ # A disabled dark button turns light: Windows draws disabled text grey, unreadable on the dark fill.
+ $b.Tag=if($Primary){'Primary'}else{''}
+ $b.Add_EnabledChanged({param($s,$e)
+  if($s.Tag -eq 'Primary'){$s.BackColor=if($s.Enabled){$ui.Ink}else{$ui.Line};$s.FlatAppearance.BorderColor=$s.BackColor}
+  $s.ForeColor=if($s.Enabled){if($s.Tag -eq 'Primary'){[Drawing.Color]::White}else{$ui.Ink}}else{$ui.Muted}
+ })
  $b
 }
 function New-Button($Parent,[int]$X,[int]$Y,[int]$W,[int]$H,[string]$Text,[switch]$Primary){Set-Button (New-Control Button $Parent $X $Y $W $H $Text) -Primary:$Primary}
 function New-Link($Parent,[int]$X,[int]$Y,[int]$W,[string]$Text){
- $l=New-Control LinkLabel $Parent $X $Y $W 22 $Text;$l.LinkColor=$ui.Ink;$l.ActiveLinkColor=$ui.Ink;$l.DisabledLinkColor=$ui.Muted;$l.LinkBehavior='HoverUnderline';$l
+ $l=New-Control LinkLabel $Parent $X $Y $W 22 $Text;$l.LinkColor=$ui.Ink;$l.ActiveLinkColor=$ui.Ink;$l.DisabledLinkColor=$ui.Muted;$l.LinkBehavior='AlwaysUnderline';$l
 }
 function Set-Grid($g){
  $g.BorderStyle='None';$g.BackgroundColor=$ui.Surface;$g.GridColor=$ui.Line;$g.CellBorderStyle='SingleHorizontal';$g.RowHeadersVisible=$false;$g.AllowUserToAddRows=$false;$g.AllowUserToResizeRows=$false
@@ -158,9 +165,12 @@ $driveList.Add_DrawItem({param($s,$e)
  $selected=($e.State -band [Windows.Forms.DrawItemState]::Selected) -ne 0
  $bg=if($selected){$ui.Select}else{$ui.Surface};$g.FillRectangle([Drawing.SolidBrush]::new($bg),$e.Bounds)
  $g.FillRectangle([Drawing.SolidBrush]::new($stateColor[$r.State]),$e.Bounds.X+12,$e.Bounds.Y+12,4,$e.Bounds.Height-24)
- $g.DrawString($r.Name,$bold,[Drawing.SolidBrush]::new($ui.Ink),$e.Bounds.X+28,$e.Bounds.Y+11)
- $g.DrawString($r.Where,$small,[Drawing.SolidBrush]::new($ui.Muted),$e.Bounds.X+29,$e.Bounds.Y+36)
- $g.DrawString($r.When,$small,[Drawing.SolidBrush]::new($stateColor[$r.State]),$e.Bounds.X+29,$e.Bounds.Y+54)
+ # Long names end in "..." inside the row instead of being cut mid-word at the edge.
+ $fit=[Drawing.StringFormat]::new();$fit.Trimming='EllipsisCharacter';$fit.FormatFlags='NoWrap'
+ $w=[single]($e.Bounds.Width-44)
+ $g.DrawString($r.Name,$bold,[Drawing.SolidBrush]::new($ui.Ink),[Drawing.RectangleF]::new($e.Bounds.X+28,$e.Bounds.Y+11,$w,22),$fit)
+ $g.DrawString($r.Where,$small,[Drawing.SolidBrush]::new($ui.Muted),[Drawing.RectangleF]::new($e.Bounds.X+29,$e.Bounds.Y+36,$w,18),$fit)
+ $g.DrawString($r.When,$small,[Drawing.SolidBrush]::new($stateInk[$r.State]),[Drawing.RectangleF]::new($e.Bounds.X+29,$e.Bounds.Y+54,$w,18),$fit)
  $g.DrawLine([Drawing.Pen]::new($ui.Line),$e.Bounds.X+12,$e.Bounds.Bottom-1,$e.Bounds.Right-12,$e.Bounds.Bottom-1)
 })
 $newProfile=New-Button $rail 16 414 140 34 'New profile...'
@@ -188,8 +198,10 @@ for($i=0;$i -lt $navButtons.Count;$i++){$idx=$i;$navButtons[$i].Add_Click({Show-
 $tOverview,$tSources,$tSpeed,$tCheck,$tHelp=$pages
 
 # Overview
-$ovTitle=New-Control Label $tOverview 24 20 520 30 '';$ovTitle.Font=Get-Face 'Bahnschrift SemiBold' 15
-$ovDrive=New-Control Label $tOverview 25 52 520 20 '';$ovDrive.ForeColor=$ui.Muted
+$ovTitle=New-Control Label $tOverview 24 20 520 30 '';$ovTitle.Font=Get-Face 'Bahnschrift SemiBold' 15;$ovTitle.AutoEllipsis=$true
+$ovDrive=New-Control Label $tOverview 25 52 520 20 '';$ovDrive.ForeColor=$ui.Muted;$ovDrive.AutoEllipsis=$true
+# The last drive check in one line; it opens the Drive check page.
+$ovCheck=New-Link $tOverview 472 174 320 'Drive check: not checked yet';$ovCheck.Font=$small;$ovCheck.TextAlign='TopRight'
 $ageNumber=New-Control Label $tOverview 18 80 200 76 '';$ageNumber.Font=Get-Face 'Bahnschrift SemiBold' 44;$ageNumber.AutoSize=$true
 $ageUnit=New-Control Label $tOverview 140 96 640 26 '';$ageUnit.Font=Get-Face 'Bahnschrift' 15
 $ageWhen=New-Control Label $tOverview 140 124 640 20 '';$ageWhen.ForeColor=$ui.Muted
@@ -200,7 +212,7 @@ $oldDays=New-Control NumericUpDown $tOverview 682 22 52 26;$oldDays.Minimum=1;$o
 $loadPick=New-Control ComboBox $tOverview 682 54 110 26;$loadPick.DropDownStyle='DropDownList';$loadPick.FlatStyle='Flat';[void]$loadPick.Items.AddRange([object[]]@('Light','Balanced','Strong','Maximum','Custom'))
 $meter=New-Control Panel $tOverview 24 166 768 6;$meter.BackColor=$ui.Line
 $meterFill=New-Control Panel $meter 0 0 0 6
-$meterNote=New-Control Label $tOverview 24 176 768 20 '';$meterNote.ForeColor=$ui.Muted;$meterNote.Font=$small
+$meterNote=New-Control Label $tOverview 24 176 440 20 '';$meterNote.ForeColor=$ui.Muted;$meterNote.Font=$small;$meterNote.AutoEllipsis=$true
 $ovGrid=New-Control DataGridView $tOverview 24 206 768 162;Set-Grid $ovGrid;$ovGrid.ReadOnly=$true
 foreach($c in @(@('Source',20),@('Folder',28),@('Plain copy',17),@('Versions',17),@('Status',18))){$i=$ovGrid.Columns.Add($c[0],$c[0]);$ovGrid.Columns[$i].FillWeight=$c[1]}
 $btnBackup=New-Button $tOverview 24 384 180 38 'Back up now' -Primary
@@ -235,8 +247,8 @@ $btnSaveModes=New-Button $tSources 682 342 110 32 'Save changes' -Primary
 [void](New-Note $tSources 304 390 488 248 $Help.Modes)
 
 # Drive and speed
-$driveInfo=New-Control Label $tSpeed 24 20 768 24 '';$driveInfo.Font=$bold
-$driveFacts=New-Control Label $tSpeed 25 48 768 20 '';$driveFacts.ForeColor=$ui.Muted
+$driveInfo=New-Control Label $tSpeed 24 20 768 24 '';$driveInfo.Font=$bold;$driveInfo.AutoEllipsis=$true
+$driveFacts=New-Control Label $tSpeed 25 48 768 20 '';$driveFacts.ForeColor=$ui.Muted;$driveFacts.AutoEllipsis=$true
 $btnSpeed=New-Button $tSpeed 24 84 160 36 'Run speed test' -Primary
 $speedWrite=New-Control Label $tSpeed 206 78 180 44 '';$speedWrite.Font=Get-Face 'Bahnschrift SemiBold' 22
 $speedRead=New-Control Label $tSpeed 396 78 180 44 '';$speedRead.Font=Get-Face 'Bahnschrift SemiBold' 22
@@ -263,7 +275,7 @@ foreach($c in @(@('When',14),@('Source',14),@('Type',12),@('Duration',10),@('Cop
 
 # Drive check: one card per layer, from what the drive says about itself to the file system.
 $checkSummary=New-Control Label $tCheck 24 20 768 30 '';$checkSummary.Font=Get-Face 'Bahnschrift SemiBold' 15
-$checkWhen=New-Control Label $tCheck 25 52 768 20 '';$checkWhen.ForeColor=$ui.Muted
+$checkWhen=New-Control Label $tCheck 25 52 768 20 '';$checkWhen.ForeColor=$ui.Muted;$checkWhen.AutoEllipsis=$true
 $btnCheckQuick=New-Button $tCheck 24 84 150 36 'Quick check' -Primary
 $btnCheckScan=New-Button $tCheck 184 84 220 36 'Full surface scan'
 $btnCheckLong=New-Button $tCheck 414 84 140 36 'Long self-test'
@@ -272,26 +284,35 @@ $btnCheckStop=New-Button $tCheck 692 84 100 36 'Stop';$btnCheckStop.Enabled=$fal
 $checkProgress=New-Control ProgressBar $tCheck 24 132 768 6;$checkProgress.Style='Continuous'
 $checkStatus=New-Control Label $tCheck 24 144 768 38 '';$checkStatus.ForeColor=$ui.Muted
 $checkCards=[ordered]@{}
-foreach($c in @(@('Health','What the drive reports about itself',24,190),@('Surface','Reading the disk',416,190),@('Connection','The connection to the computer',24,352),@('FileSystem','The file system',416,352))){
- $card=New-Control Panel $tCheck $c[2] $c[3] 376 150;$card.BackColor=$ui.Paper
- $stripe=New-Control Panel $card 0 0 4 150;$stripe.BackColor=$ui.Line
+# The findings get the room; the full explanation is on the Help page.
+foreach($c in @(@('Health','What the drive reports about itself',24,190),@('Surface','Reading the disk',416,190),@('Connection','The connection to the computer',24,392),@('FileSystem','The file system',416,392))){
+ $card=New-Control Panel $tCheck $c[2] $c[3] 376 190;$card.BackColor=$ui.Paper
+ $stripe=New-Control Panel $card 0 0 4 190;$stripe.BackColor=$ui.Line
  (New-Control Label $card 16 10 250 22 $c[1]).Font=$labelFace
  $state=New-Control Label $card 266 11 100 22 '';$state.TextAlign='TopRight';$state.Font=Get-Face 'Segoe UI Semibold' 9
- $lines=New-Note $card 16 38 352 106 ' ';$lines.ForeColor=$ui.Ink;$lines.Font=$small;$lines.ScrollBars='None'
+ # A RichTextBox shows its scroll bar only when the findings do not fit.
+ $lines=New-Control RichTextBox $card 16 38 352 146;$lines.ReadOnly=$true;$lines.BorderStyle='None';$lines.BackColor=$card.BackColor;$lines.ForeColor=$ui.Ink;$lines.Font=$small;$lines.TabStop=$false;$lines.DetectUrls=$false;$lines.ScrollBars='Vertical'
  $checkCards[$c[0]]=[pscustomobject]@{Stripe=$stripe;State=$state;Lines=$lines}
 }
-[void](New-Note $tCheck 24 516 640 122 $Help.DriveCheck)
+$checkNote=New-Note $tCheck 24 594 640 44 'Quick check: a few minutes. Full surface scan: hours, can stop and continue. Long self-test: the drive reads itself. Every check only reads; the Help page explains each one.';$checkNote.ScrollBars='None'
 
 # Help
-[void](New-Note $tHelp 24 20 640 618 ("How Backup Center works`n`n"+$Help.General+"`n`n`nHow each folder can be backed up`n`n"+$Help.Modes+"`n`n`nStatus colours`n`n"+$Help.Freshness+"`n`n`nComputer load`n`n"+$Help.Load+"`n`n`nDrive speed`n`n"+$Help.Speed+"`n`n`nDrive check`n`n"+$Help.DriveCheck))
+# Headings in ink and bold so the page can be scanned; a line length that stays readable.
+$helpText=New-Control RichTextBox $tHelp 24 20 660 618;$helpText.ReadOnly=$true;$helpText.BorderStyle='None';$helpText.BackColor=$tHelp.BackColor;$helpText.TabStop=$false;$helpText.DetectUrls=$false;$helpText.ScrollBars='Vertical'
+foreach($sec in @(@('How Backup Center works',$Help.General),@('How each folder can be backed up',$Help.Modes),@('Status colours',$Help.Freshness),@('Computer load',$Help.Load),@('Drive speed',$Help.Speed),@('Drive check',$Help.DriveCheck))){
+ $helpText.SelectionFont=$bold;$helpText.SelectionColor=$ui.Ink;$helpText.AppendText($sec[0]+"`n`n")
+ $helpText.SelectionFont=$font;$helpText.SelectionColor=$ui.Muted;$helpText.AppendText($sec[1].Trim().Replace("`r`n","`n")+"`n`n`n")
+}
+$helpText.Select(0,0)
 
 # --- State and refresh -------------------------------------------------------------------
 $script:data=Read-CenterProfiles
 $script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0
 $script:lastFree=$null;$script:lastTick=$null;$script:loadingModes=$false
 $script:check=$null;$script:install=$null
-$smartTool=Join-Path $PSScriptRoot 'bin\smartmontoolsin\smartctl.exe'
+$smartTool=Join-Path $PSScriptRoot 'bin\smartmontools\bin\smartctl.exe'
 $checkColor=@{OK=$stateColor.Fresh;Warning=$stateColor.Stale;Problem=$stateColor.Error;Unavailable=$stateColor.Never;NotRun=$stateColor.Never}
+$checkInk=@{OK=$stateInk.Fresh;Warning=$stateInk.Stale;Problem=$stateInk.Error;Unavailable=$stateInk.Never;NotRun=$stateInk.Never}
 $checkWord=@{OK='No problems';Warning='Worth a look';Problem='Problem';Unavailable='Not available';NotRun='Not checked'}
 $stateText=@{Fresh='Fresh';OK='OK';Stale='Needs a backup';Never='Never backed up';'Nothing selected'='Nothing selected';Error='Settings cannot be read'}
 
@@ -362,7 +383,7 @@ function Update-Details {
   $mirror=if($r.Mirror){Format-CenterAge $r.LastMirror}else{'not used'}
   $vers=if($r.Versioned){Format-CenterAge $r.LastVersioned}else{'not used'}
   $i=$ovGrid.Rows.Add($r.Source.Label,$r.Source.Path,$mirror,$vers,$stateText[$r.State]);$ovGrid.Rows[$i].Tag=$r.Source.Id
-  $ovGrid.Rows[$i].Cells[4].Style.ForeColor=$stateColor[$r.State];$ovGrid.Rows[$i].Cells[4].Style.SelectionForeColor=$stateColor[$r.State]
+  $ovGrid.Rows[$i].Cells[4].Style.ForeColor=$stateInk[$r.State];$ovGrid.Rows[$i].Cells[4].Style.SelectionForeColor=$stateInk[$r.State]
  }
  $ovGrid.ClearSelection()
  if($p.PSObject.Properties['LastSpeedTest'] -and $p.LastSpeedTest){
@@ -372,8 +393,12 @@ function Update-Details {
  }else{$speedWrite.Text='';$speedRead.Text='';$speedResult.Text='No speed test yet. It takes about half a minute and leaves nothing behind.'}
  $speedResult.Top=if($speedWrite.Text){122}else{93}
  if(-not $d.Connected){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnOpen.Enabled=$false;$btnRestore.Enabled=$false;$btnSpeed.Enabled=$false}
+ # Say why the buttons are off; a connected drive keeps the result of its last run.
+ $offline='Connect this drive to back up, check the backup or restore.'
+ if(-not $script:current){if(-not $d.Connected){$runStatus.Text=$offline}elseif($runStatus.Text -eq $offline){$runStatus.Text='Ready.'}}
  # A backup and a drive check of the same drive would compete for it and slow each other down.
- if($script:check -and $script:check.ProfileId -eq $p.Id){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnSpeed.Enabled=$false}
+ if($script:check -and $script:check.ProfileId -eq $p.Id){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnSpeed.Enabled=$false;$removeProfile.Enabled=$false}
+ if($script:speedRun){$btnSpeed.Enabled=$false;if($script:speedProfile.Id -eq $p.Id){$removeProfile.Enabled=$false}}
  Update-DriveCheck $p $d
  foreach($s in $p.Sources){[void]$srcList.Items.Add($s.Label+'   ('+$s.Path+')')}
  if($srcList.Items.Count){$srcList.SelectedIndex=0}else{Update-Modes}
@@ -399,17 +424,17 @@ function Update-DriveCheck($P,$D){
  $ready=$P -and $D.Connected -and -not $running -and -not $backingUp -and -not $script:install
  $btnCheckQuick.Enabled=$ready;$btnCheckScan.Enabled=$ready;$btnCheckLong.Enabled=$ready -and (Test-Path -LiteralPath $smartTool);$btnCheckStop.Enabled=$here
  $btnInstallTool.Visible=-not (Test-Path -LiteralPath $smartTool);$btnInstallTool.Enabled=-not $script:install
- if(-not $P){$checkSummary.Text='';$checkWhen.Text='';$checkStatus.Text='';foreach($k in $checkCards.Keys){$checkCards[$k].State.Text='';$checkCards[$k].Lines.Text='';$checkCards[$k].Stripe.BackColor=$ui.Line};return}
+ if(-not $P){$checkSummary.Text='';$checkWhen.Text='';$checkStatus.Text='';$ovCheck.Text='';foreach($k in $checkCards.Keys){$checkCards[$k].State.Text='';$checkCards[$k].Lines.Text='';$checkCards[$k].Stripe.BackColor=$ui.Line};return}
  $dir=Get-CheckFolder $P
  $report=Read-CheckFile $dir 'report.json';$scan=Read-CheckFile $dir 'surface.json'
  $view=Get-DriveCheckView $report $scan
  foreach($k in $checkCards.Keys){
   $g=$view.Groups[$k];$c=$checkCards[$k]
-  $c.State.Text=$checkWord[$g.Status];$c.State.ForeColor=$checkColor[$g.Status];$c.Stripe.BackColor=$checkColor[$g.Status]
-  $c.Lines.Text=(@($g.Lines) -join "`r`n")
-  $high=[Windows.Forms.TextRenderer]::MeasureText($c.Lines.Text,$small,[Drawing.Size]::new($c.Lines.Width-20,0),[Windows.Forms.TextFormatFlags]::WordBreak).Height
-  $c.Lines.ScrollBars=if($high -gt $c.Lines.Height){'Vertical'}else{'None'}
+  $c.State.Text=$checkWord[$g.Status];$c.State.ForeColor=$checkInk[$g.Status];$c.Stripe.BackColor=$checkColor[$g.Status]
+  $c.Lines.Text=(@($g.Lines) -join "`n")
  }
+ $ovCheck.Text='Drive check: '+$(switch($view.Overall){'Problem'{'problem found'}'Warning'{'worth a look'}'OK'{'no problems'}default{'not checked yet'}})+$(if($report){', '+(Format-CenterAge $report.Finished)}else{''})
+ $ovCheck.LinkColor=if($view.Overall -in 'NotRun','Unavailable'){$ui.Ink}else{$checkInk[$view.Overall]}
  $partial=@($view.Groups.Values|Where-Object {$_.Status -in 'Unavailable','NotRun'}).Count
  $checkSummary.Text=switch($view.Overall){'Problem'{'Problem found'}'Warning'{'Worth a look'}'OK'{if($partial){'No problems found in what could be checked'}else{'No problems found'}}default{'Not checked yet'}}
  $checkSummary.ForeColor=if($view.Overall -in 'NotRun','Unavailable'){$ui.Ink}else{$checkColor[$view.Overall]}
@@ -429,7 +454,9 @@ function Start-DriveCheck([string]$Mode){
  }
  if($Mode -eq 'LongSelfTest' -and [Windows.Forms.MessageBox]::Show("Ask the drive to read itself completely?`n`nThe drive does this on its own and it takes hours. Keep it connected and the computer awake; a USB box that goes to sleep stops the test. Run a quick check afterwards to see the result.",'Backup Center','YesNo','Question') -ne 'Yes'){return}
  $dir=Get-CheckFolder $p;New-Item -ItemType Directory -Path $dir -Force|Out-Null
- foreach($n in 'stop.request','progress.json','run.json'){Remove-Item -LiteralPath (Join-Path $dir $n) -ErrorAction SilentlyContinue}
+ # A check keeps check.lock open while it runs, also one started by an earlier window that was closed.
+ try{([IO.File]::Open((Join-Path $dir 'check.lock'),'OpenOrCreate','ReadWrite','None')).Dispose()}catch{throw 'A drive check of this drive is still running or finishing. Try again in a minute.'}
+ foreach($n in 'progress.json','run.json'){Remove-Item -LiteralPath (Join-Path $dir $n) -ErrorAction SilentlyContinue}
  # The command name rather than this process's path, which changes with every Store update of PowerShell.
  $pwsh=(Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1).Source;if(-not $pwsh){$pwsh=(Get-Process -Id $PID).Path}
  $arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $PSScriptRoot 'Invoke-DriveCheck.ps1')+'" -Drive '+$d.Letter+' -Mode '+$Mode+' -OutputDirectory "'+$dir+'"'
@@ -490,7 +517,7 @@ function Update-Modes {
 
 # --- Running -------------------------------------------------------------------------------
 function Start-Run($Profile,[string[]]$SourceIds,[string]$Purpose){
- foreach($s in $Profile.Sources){Sync-CenterJob $Profile $s}
+ foreach($s in @($Profile.Sources|Where-Object {-not $SourceIds.Count -or $_.Id -in $SourceIds})){Sync-CenterJob $Profile $s}
  $steps=@(Get-CenterSteps $Profile $SourceIds $Purpose)
  if(-not $steps.Count){[void][Windows.Forms.MessageBox]::Show('Nothing is selected for backup in these sources. Choose folders on the "What to back up" tab.','Backup Center');return}
  $script:queue.Clear();foreach($s in $steps){$script:queue.Enqueue($s)}
@@ -501,11 +528,21 @@ function Start-Run($Profile,[string[]]$SourceIds,[string]$Purpose){
 function Start-NextStep {
  if($script:queue.Count -eq 0){Finish-Run;return}
  $step=$script:queue.Dequeue()
- $out=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\center\step-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.log')
- New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($out)) -Force|Out-Null
- $script:current=Start-CenterStep $step $out
+ # The load chosen now applies to this step, also when it was changed during the run.
+ $fresh=@($script:data.Profiles|Where-Object {$_.Id -eq $script:runProfile.Id})[0];if($fresh){$script:runProfile=$fresh}
+ $L=Get-CenterLoad $script:runProfile;$step.Priority=$L.Priority
+ $i=[array]::IndexOf($step.Arguments,'-Threads');if($i -ge 0){$step.Arguments[$i+1]=[string]$L.CopyThreads}
+ $out=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\center\step-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,6)+'.log')
+ try{
+  if($step.Kind -eq 'Versioned'){$src=@($script:runProfile.Sources|Where-Object {$_.Id -eq $step.SourceId})[0];if($src){Sync-CenterJob $script:runProfile $src $L}}
+  New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($out)) -Force|Out-Null
+  $script:current=Start-CenterStep $step $out
+ }catch{
+  $script:runResults+=[pscustomobject]@{SourceId=$step.SourceId;Label=$step.Label;Kind=$step.Kind;Started=(Get-Date).ToString('o');Success=$false;Error='Could not start: '+$_.Exception.Message}
+  Start-NextStep;return
+ }
  $script:lastFree=$null
- Update-Details;$timer.Start()
+ $timer.Start();Update-Details
 }
 function Update-RunStatus {
  $c=$script:current;if(-not $c){return}
@@ -549,8 +586,9 @@ $timer.Add_Tick({
  try{
   if(-not $script:current){$timer.Stop();return}
   if($script:current.Process.HasExited){
-   $r=Complete-CenterStep $script:current $script:runProfile.Id
-   $script:runResults+=$r;$script:current=$null
+   $done=$script:current;$script:current=$null
+   try{$script:runResults+=Complete-CenterStep $done $script:runProfile.Id}
+   catch{$script:runResults+=[pscustomobject]@{SourceId=$done.Step.SourceId;Label=$done.Step.Label;Kind=$done.Step.Kind;Started=$done.Started.ToString('o');Success=$false;Error='The step finished, but its result could not be recorded: '+$_.Exception.Message}}
    Start-NextStep
   }else{try{Update-RunStatus}catch{$runStatus.Text='Running. (Progress is not available right now.)'}}
  }catch{
@@ -686,6 +724,7 @@ $btnKeys.Add_Click({try{
  Start-Process (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-File',(Join-Path $PSScriptRoot 'Backup-Security.ps1'),'-ConfigPath',$s.ConfigPath)
 }catch{Show-Error $_}})
 $btnRefresh.Add_Click({$script:data=Read-CenterProfiles;Update-ProfileList})
+$ovCheck.Add_Click({Show-Page 3})
 $btnSpeed.Add_Click({try{
  $p=Get-SelectedProfile;$d=Get-CenterDrive $p.DestinationVolumeId;if(-not $d.Connected){throw 'Connect the drive first.'}
  $speedResult.Text='Testing... this takes about half a minute. You can keep using the window.';$btnSpeed.Enabled=$false
@@ -693,7 +732,7 @@ $btnSpeed.Add_Click({try{
  if(@($p.Sources).Count){$args+=@('-ConfigPath',@($p.Sources)[0].ConfigPath)}
  $script:speedRun=Start-CenterStep ([pscustomobject]@{FilePath=(Get-Process -Id $PID).Path;Arguments=$args;Priority=$null}) $null
  $script:speedProfile=$p;$speedTimer.Start()
-}catch{$speedResult.Text='Speed test failed: '+$_.Exception.Message;$btnSpeed.Enabled=$true}})
+}catch{$script:speedRun=$null;Update-Details;$speedResult.Text='Speed test failed: '+$_.Exception.Message}})
 $speedTimer=[Windows.Forms.Timer]::new();$speedTimer.Interval=1000
 $speedTimer.Add_Tick({
  if(-not $script:speedRun -or -not $script:speedRun.Process.HasExited){return}
@@ -704,9 +743,10 @@ $speedTimer.Add_Tick({
   if($start -lt 0 -or $end -lt 0){throw ($out.Trim())}
   $r=$out.Substring($start,$end-$start+2)|ConvertFrom-Json
   $notes=@(@($r.Warnings)+@($r.Blockers)|Where-Object {$_}) -join ' '
-  $script:speedProfile|Add-Member -NotePropertyName LastSpeedTest -NotePropertyValue ([pscustomobject]@{When=(Get-Date).ToString('o');Link=$r.Link;WriteMBps=$r.WriteMBps;ReadMBps=$r.ReadMBps;Notes=$notes}) -Force
+  $target=@($script:data.Profiles|Where-Object {$_.Id -eq $script:speedProfile.Id})[0];if(-not $target){throw 'The profile was removed during the test.'}
+  $target|Add-Member -NotePropertyName LastSpeedTest -NotePropertyValue ([pscustomobject]@{When=(Get-Date).ToString('o');Link=$r.Link;WriteMBps=$r.WriteMBps;ReadMBps=$r.ReadMBps;Notes=$notes}) -Force
   Save-CenterProfiles $script:data;Update-Details
- }catch{$speedResult.Text='Speed test failed: '+$_.Exception.Message}finally{$btnSpeed.Enabled=$true}
+ }catch{$script:speedRun=$null;Update-Details;$speedResult.Text='Speed test failed: '+$_.Exception.Message}
 })
 $btnCheckQuick.Add_Click({try{Start-DriveCheck 'Quick'}catch{Show-Error $_;Update-Details}})
 $btnCheckScan.Add_Click({try{Start-DriveCheck 'Surface'}catch{Show-Error $_;Update-Details}})
@@ -761,12 +801,11 @@ $oldDays.Add_ValueChanged({try{
  $p.ReminderDays=[int]$oldDays.Value;Save-CenterProfiles $script:data;Update-ProfileList $p.Id
 }catch{Show-Error $_}})
 $form.Add_FormClosing({param($s,$e)
+ # Ask about everything first; stop nothing unless the window really closes.
  if($script:current -and [Windows.Forms.MessageBox]::Show('A backup is running. Stop it and close?','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
+ if($script:check -and [Windows.Forms.MessageBox]::Show('A drive check is running. Stop it and close? A full scan continues later from where it stopped.','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
  if($script:current){$script:queue.Clear();try{$script:current.Process.Kill($true)}catch{}}
- if($script:check){
-  if([Windows.Forms.MessageBox]::Show('A drive check is running. Stop it and close? A full scan continues later from where it stopped.','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
-  New-Item -ItemType File -Path (Join-Path $script:check.Dir 'stop.request') -Force|Out-Null
- }
+ if($script:check){New-Item -ItemType File -Path (Join-Path $script:check.Dir 'stop.request') -Force|Out-Null}
 })
 
 $form.Add_Shown({

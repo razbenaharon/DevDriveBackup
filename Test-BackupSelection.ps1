@@ -31,6 +31,17 @@ Assert (Throws {Get-BackupSelection (Config 'Mirror' @(,@('E:\Projects','Both'))
 Assert (Throws {Get-BackupSelection (Config 'Mirror' @(,@('Projects\..\Tools','Both')))} 'relative') 'a path that climbs out is refused'
 $legacy=Get-BackupSelection ([pscustomobject]@{Include=@('Projects','README.md');Choices=@([pscustomobject]@{Path='Projects';Reason='x'})})
 Assert (-not $legacy.HasModes -and (Get-BackupMode $legacy 'Projects\a') -eq 'Versioned' -and (Get-BackupMode $legacy 'Tools') -eq 'Skip') 'an older Include-only configuration keeps its versioned selection'
+$nested=Get-BackupSelection (Config 'Skip' @(@('credentials-folder\keys','Both'),@('Projects','Both')))
+Assert ((Get-BackupMode $nested 'credentials-folder\keys') -eq 'Skip' -and (Get-BackupMode $nested 'credentials-folder\keys\id.txt') -eq 'Skip') 'a choice inside a NeverBackUp folder is skipped too'
+Assert (-not @(@(Get-BackupRegions $nested 'Mirror')+@(Get-BackupRegions $nested 'Versioned')|Where-Object {$_.Path -like 'credentials-folder*'}).Count) 'neither tool copies a choice inside a NeverBackUp folder'
+# A source with no subfolders listed: an empty Choices list follows DefaultMode, also under strict mode.
+& {
+ Set-StrictMode -Version Latest
+ $empty=Get-BackupSelection ([pscustomobject]@{DefaultMode='Mirror';Choices=@()})
+ $roots=@(Get-BackupRegions $empty 'Mirror')
+ Assert ($empty.HasModes -and $roots.Count -eq 1 -and $roots[0].Path -eq '' -and @($roots[0].Excluded).Count -eq 0 -and (Get-BackupMode $empty 'any\folder') -eq 'Mirror') 'an empty Choices list mirrors the whole source'
+ Assert (@($empty.Entries|ForEach-Object {$_.Path}).Count -eq 0 -and @(Get-BackupRegions $empty 'Versioned').Count -eq 0) 'an empty Choices list gives the check an empty list, not an error'
+}
 $real=Join-Path $PSScriptRoot 'backup.local.json'
 if(Test-Path -LiteralPath $real){
  $realConfig=Get-Content -LiteralPath $real -Raw|ConvertFrom-Json
@@ -115,7 +126,7 @@ try{
  }else{
   # Remove only what this run created; every path carries this run's id.
   $remove=@($mirror,($mirror+'-recovery'),($DestinationDrive.ToUpperInvariant()+':\'+$config.RepositoryFolder),$root,$private,
-   (Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+$DestinationDrive.ToUpperInvariant()+'-'+$folder+'.json')))
+   (Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+((Get-Volume -DriveLetter $DestinationDrive).UniqueId -replace '[^A-Za-z0-9-]+','_').Trim('_')+'-'+$folder+'.json')))
   foreach($p in $remove){if(-not $p.Contains($id)){throw "Refusing to remove $p"};if(Test-Path -LiteralPath $p){Remove-Item -LiteralPath $p -Recurse -Force}}
   foreach($r in @($runFolders|Where-Object {$_})){if(Test-Path -LiteralPath (Join-Path $r 'summary.json')){if((Get-Content -LiteralPath (Join-Path $r 'summary.json') -Raw) -match [regex]::Escape($id)){Remove-Item -LiteralPath $r -Recurse -Force}}}
   Write-Output ('Removed the disposable source, mirror and repository for test '+$id)

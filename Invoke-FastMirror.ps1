@@ -8,7 +8,9 @@
 # deleted: with -MoveExtras they are moved to a dated recovery folder beside the mirror;
 # otherwise they are only reported. Folders that are no longer selected keep their old copy
 # in the mirror and are listed in the summary. -Verify (default on the first run) re-reads
-# both copies and compares SHA-256 for every selected mirrored file.
+# both copies and compares SHA-256 for every selected file; a selected source file missing from
+# the mirror is a difference. A selected folder that is missing or became a link fails the run.
+# Backup Center's own password, key and state folders are never copied.
 param(
  [string]$ConfigPath=(Join-Path $PSScriptRoot 'backup.local.json'),
  [string]$Source,
@@ -52,11 +54,21 @@ foreach($entry in @(if($config.PSObject.Properties['Exclude']){$config.Exclude})
  }
  if($e){$skipPaths+=$e.TrimStart('\')}
 }
+# Backup Center's private folders (protected passwords, run state, plaintext recovery keys) are never
+# copied, whatever the selection: the copy would not keep their private permissions. The job's own key
+# files count too, in case the configuration keeps them somewhere else.
+$privatePaths=@((Join-Path $env:LOCALAPPDATA 'DevDriveMirror'),(Join-Path $env:USERPROFILE 'Backup Center recovery keys'))+@('PasswordDpapiPath','RecoveryKeyPath'|Where-Object {$config.PSObject.Properties[$_] -and $config.$_}|ForEach-Object {[string]$config.$_})
+foreach($p in @($privatePaths|ForEach-Object {[IO.Path]::GetFullPath($_).TrimEnd('\')})){
+ if($srcRoot.StartsWith($p+'\',[StringComparison]::OrdinalIgnoreCase)){throw "The source is inside $p, which holds Backup Center's passwords and recovery keys and is never copied"}
+ if($p.StartsWith($srcRoot,[StringComparison]::OrdinalIgnoreCase)){$skipPaths+=$p.Substring($srcRoot.Length)}
+}
 
 $src=[IO.Path]::GetFullPath($Source).TrimEnd('\')+'\'
 $srcVolume=Get-Volume -DriveLetter $src.Substring(0,1)
 $dstVolume=Get-Volume -DriveLetter $DestinationDrive
 if($srcVolume.UniqueId -eq $dstVolume.UniqueId){throw 'Destination is the source volume'}
+# The copy goes only to the backup drive this configuration was made for, not another drive that took its letter.
+if($config.PSObject.Properties['DestinationVolumeId'] -and $config.DestinationVolumeId -and $dstVolume.UniqueId -ne $config.DestinationVolumeId){throw "Drive $($DestinationDrive.ToUpperInvariant()): is not the backup drive this configuration was made for (its volume identity differs). Check which drive has this letter now."}
 # The configured source must still be the same volume, not another drive that took its letter.
 $configured=if($config.PSObject.Properties['Source'] -and $config.Source){[IO.Path]::GetFullPath([string]$config.Source).TrimEnd('\')+'\'}else{''}
 if($config.PSObject.Properties['SourceVolumeId'] -and $config.SourceVolumeId -and $configured -and $src.StartsWith($configured,[StringComparison]::OrdinalIgnoreCase) -and $srcVolume.UniqueId -ne $config.SourceVolumeId){throw 'The source drive is not the one this configuration was made for (its volume identity changed). Check which drive has this letter now.'}
@@ -69,8 +81,11 @@ if($sourceDisk.BusType -eq 'File Backed Virtual' -and $sourceDisk.Location -matc
 $dst=$DestinationDrive.ToUpperInvariant()+':\'+$Folder
 $recoveryRoot=$DestinationDrive.ToUpperInvariant()+':\'+$Folder+'-recovery'
 $run=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
-New-Item -ItemType Directory -Path $run,$dst -Force|Out-Null
-$lastSuccess=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+$DestinationDrive.ToUpperInvariant()+'-'+($Folder -replace '\\','_')+'.json')
+New-Item -ItemType Directory -Path $run -Force|Out-Null
+# A content check compares an existing copy; it never creates one.
+if($VerifyOnly){if(-not(Test-Path -LiteralPath $dst -PathType Container)){throw "There is no plain copy at $dst to check. Back up first."}}else{New-Item -ItemType Directory -Path $dst -Force|Out-Null}
+# Keyed by the drive's volume identity, so another drive that takes this letter still gets its first full check.
+$lastSuccess=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+($dstVolume.UniqueId -replace '[^A-Za-z0-9-]+','_').Trim('_')+'-'+($Folder -replace '\\','_')+'.json')
 $firstRun=-not(Test-Path -LiteralPath $lastSuccess)
 if(($firstRun -and -not $SkipVerify) -or $VerifyOnly){$Verify=$true}
 
@@ -171,73 +186,45 @@ $summary.NotSelectedButInMirror=@($notSelected)
 
 # Files that still failed after the retry are counted from robocopy's totals; the ERROR lines
 # (one per attempt) are kept in copy-errors.txt for details.
-$errors=@($summary.Runs|ForEach-Object {Get-Content -LiteralPath $_.Log -Encoding Unicode|Where-Object {$_ -match '\sERROR \d+ '}})
+$errors=@($summary.Runs|ForEach-Object {Get-Content -LiteralPath $_.Log -Encoding Unicode|Where-Object {$_ -match '\sERROR \d+ ' -or $_ -match '\*MISMATCH'}})
 [IO.File]::WriteAllLines((Join-Path $run 'copy-errors.txt'),[string[]]$errors)
 $failed=[long]0
 foreach($r in $summary.Runs){
  $t=Get-RoboTotals $r.Log
  if($t){
   $r.Files='Files : '+($t.Files -join ' ');$r.Bytes='Bytes : '+($t.Bytes -join ' ')
-  $failed+=$t.Files[4]+$t.Dirs[4]
- }else{$r.Files='';$r.Bytes='';if($r.ExitCode -ge 8){$failed+=1}}
+  # Mismatch (a folder in the source where the copy has a file of that name, or the reverse): robocopy
+  # copies nothing there and still exits below 8, so it counts as not copied, like a failed file.
+  $failed+=$t.Files[3]+$t.Files[4]+$t.Dirs[3]+$t.Dirs[4]
+ }else{$r.Files='';$r.Bytes='';if($r.ExitCode -ge 8 -or ($r.ExitCode -band 4)){$failed+=1}}
 }
 $summary.CopyErrors=$failed
 
 if($Verify){
- Add-Type -TypeDefinition @'
-using System; using System.IO; using System.Linq; using System.Threading; using System.Threading.Tasks; using System.Security.Cryptography; using System.Collections.Concurrent; using System.Collections.Generic;
-public static class MirrorVerifier {
- static string Hash(string p){using(var s=new FileStream(p,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete,1<<20))using(var h=SHA256.Create())return Convert.ToHexString(h.ComputeHash(s));}
- static bool Under(string path,string parent){return path.StartsWith(parent+"\\",StringComparison.OrdinalIgnoreCase);}
- // Mirror mode of a relative path: the longest entry that equals or contains it, else the default.
- static bool IsOn(string rel,string[] paths,bool[] on,bool defaultOn){
-  int best=-1;
-  for(int i=0;i<paths.Length;i++)if((string.Equals(rel,paths[i],StringComparison.OrdinalIgnoreCase)||Under(rel,paths[i]))&&(best<0||paths[i].Length>paths[best].Length))best=i;
-  return best<0?defaultOn:on[best];
- }
- static IEnumerable<string> Files(string root,string[] paths,bool[] on,bool defaultOn){
-  var stack=new Stack<string>();stack.Push(root);
-  while(stack.Count>0){var d=stack.Pop();
-   foreach(var e in new DirectoryInfo(d).EnumerateFileSystemInfos()){
-    if((e.Attributes&FileAttributes.ReparsePoint)!=0)continue;
-    string rel=e.FullName.Substring(root.Length).TrimStart('\\');
-    if((e.Attributes&FileAttributes.Directory)!=0){
-     // Unselected folders are entered only when a selected entry lies inside them.
-     if(IsOn(rel,paths,on,defaultOn)||Enumerable.Range(0,paths.Length).Any(i=>on[i]&&Under(paths[i],rel)))stack.Push(e.FullName);
-    }else if(IsOn(rel,paths,on,defaultOn))yield return e.FullName;}}
- }
- public static string[] Compare(string mirror,string source,int threads,string[] paths,bool[] on,bool defaultOn,out long files,out long bytes){
-  var bad=new ConcurrentBag<string>();long f=0,b=0;
-  Parallel.ForEach(Files(mirror,paths,on,defaultOn),new ParallelOptions{MaxDegreeOfParallelism=threads},p=>{
-   string rel=p.Substring(mirror.Length).TrimStart('\\');string s=Path.Combine(source,rel);
-   try{
-    var mi=new FileInfo(p);var si=new FileInfo(s);
-    if(!si.Exists){bad.Add("MISSING-IN-SOURCE\t"+rel);return;}
-    if(mi.Length!=si.Length){bad.Add("SIZE\t"+rel);return;}
-    if(Hash(p)!=Hash(s))bad.Add("CONTENT\t"+rel);
-    Interlocked.Increment(ref f);Interlocked.Add(ref b,mi.Length);
-   }catch(Exception ex){bad.Add("ERROR\t"+rel+"\t"+ex.Message);}
-  });
-  files=f;bytes=b;return bad.OrderBy(x=>x).ToArray();
- }
-}
-'@
+ Add-Type -Path (Join-Path $PSScriptRoot 'Backup.MirrorVerifier.cs')
  $vf=[long]0;$vb=[long]0
- $paths=[string[]]@($selection.Entries.Path)
+ # ForEach-Object rather than $selection.Entries.Path: under strict mode an empty list (a source
+ # with no subfolders listed) has no Path property.
+ $paths=[string[]]@($selection.Entries|ForEach-Object {$_.Path})
  $on=[bool[]]@($selection.Entries|ForEach-Object {Test-BackupModeIncludes $_.Mode 'Mirror'})
- $bad=[MirrorVerifier]::Compare($dst,$src,[math]::Min(8,[Environment]::ProcessorCount),$paths,$on,(Test-BackupModeIncludes $selection.DefaultMode 'Mirror'),[ref]$vf,[ref]$vb)
+ # The same skips as the copy: names, personal names (files too), Exclude paths and the private folders.
+ $bad=[MirrorVerifier]::Compare($dst,$src,[math]::Min(8,[Environment]::ProcessorCount),$paths,$on,(Test-BackupModeIncludes $selection.DefaultMode 'Mirror'),[string[]]$skipNames,[string[]]$personalNames,[string[]]$skipPaths,[ref]$vf,[ref]$vb)
  [IO.File]::WriteAllLines((Join-Path $run 'verify-differences.txt'),[string[]]$bad)
  # Files only in the mirror (deleted from the source, or now skipped) are expected in a copy that
- # never deletes; they are reported, but are not differences in content.
+ # never deletes; they are reported, but are not differences. Selected files missing from the mirror are.
  $onlyInMirror=@($bad|Where-Object {$_.StartsWith("MISSING-IN-SOURCE`t")}).Count
- $summary.Verify=[ordered]@{FilesMatched=$vf;GiBMatched=[math]::Round($vb/1GB,2);Differences=($bad.Count-$onlyInMirror);OnlyInMirror=$onlyInMirror}
+ $summary.Verify=[ordered]@{FilesMatched=$vf;GiBMatched=[math]::Round($vb/1GB,2);Differences=($bad.Count-$onlyInMirror);MissingInMirror=@($bad|Where-Object {$_.StartsWith("MISSING-IN-MIRROR`t")}).Count;OnlyInMirror=$onlyInMirror}
 }
 
 $summary.Finished=(Get-Date).ToString('o')
 $summary.Minutes=[math]::Round(((Get-Date)-$started).TotalMinutes,1)
 $summary.RunFolder=$run
 $summary|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $run 'summary.json')
-if($summary.CopyErrors -eq 0 -and (-not $Verify -or $summary.Verify.Differences -eq 0)){
+# A selected folder that is missing or became a link was not copied, so the run fails, as the versioned
+# backup does. A content check only reads; it never marks the copy as complete.
+$notCopied=@(@($summary.SelectionsMissing|ForEach-Object {"$_ (missing)"})+@($summary.SelectionsSkippedAsLinks|ForEach-Object {"$_ (now a link or junction)"}))
+if(-not $VerifyOnly -and $summary.CopyErrors -eq 0 -and -not $notCopied.Count -and (-not $Verify -or $summary.Verify.Differences -eq 0)){
  Copy-Item -LiteralPath (Join-Path $run 'summary.json') -Destination $lastSuccess -Force
 }
+if($notCopied.Count){throw ('Selected folders were not copied: '+($notCopied -join ', ')+'. Choose them again on What to back up, or set them to Skip. Details: '+(Join-Path $run 'summary.json'))}
 $summary|ConvertTo-Json -Depth 6

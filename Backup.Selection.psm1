@@ -11,7 +11,8 @@
 $script:Modes=@('Mirror','Versioned','Both','Skip')
 # Never copied by either tool, whatever the configuration says.
 # Paths listed in the configuration's NeverBackUp (relative to the source root) are skipped by
-# both tools whatever their mode, for example a folder holding credentials.
+# both tools whatever their mode, for example a folder holding credentials. That includes
+# everything inside them, even a nested entry marked Mirror, Versioned or Both.
 
 function Get-BackupModeNames {$script:Modes}
 
@@ -52,6 +53,8 @@ function Get-BackupSelection($Config) {
   $hit=@($entries|Where-Object {$_.Path -ieq $never})
   if($hit.Count -and $hit[0].Mode -ne 'Skip'){throw "$never is listed in NeverBackUp; set its Mode to Skip"}
   if(-not $hit.Count){$entries.Add([pscustomobject]@{Path=$never;Mode='Skip'})}
+  # A choice inside a NeverBackUp folder cannot bring part of it back: it is skipped too.
+  foreach($e in @($entries|Where-Object {Test-IsUnder $_.Path $never})){$e.Mode='Skip'}
  }
  [pscustomobject]@{HasModes=$hasModes;DefaultMode=$default;Entries=@($entries)}
 }

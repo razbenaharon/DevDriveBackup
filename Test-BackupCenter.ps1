@@ -104,7 +104,7 @@ try{
  Write-Output 'All Backup Center tests passed.'
 }finally{
  foreach($c in $created){if(Test-Path -LiteralPath $c){Get-ChildItem -LiteralPath $c -Recurse -Force -File|ForEach-Object {$_.IsReadOnly=$false};[IO.Directory]::Delete($c,$true)}}
- $marker=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+$DestinationDrive.ToUpperInvariant()+'-'+$label+'-Mirror.json')
+ $marker=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+((Get-Volume -DriveLetter $DestinationDrive).UniqueId -replace '[^A-Za-z0-9-]+','_').Trim('_')+'-'+$label+'-Mirror.json')
  if(Test-Path -LiteralPath $marker){Remove-Item -LiteralPath $marker}
  $link=Join-Path $dataRoot 'link';if(Test-Path -LiteralPath $link){[IO.Directory]::Delete($link)}  # the junction only, never its target
  foreach($d in @($source,$dataRoot)){if(Test-Path -LiteralPath $d){Get-ChildItem -LiteralPath $d -Recurse -Force -File -ErrorAction SilentlyContinue|ForEach-Object {$_.IsReadOnly=$false};[IO.Directory]::Delete($d,$true)}}

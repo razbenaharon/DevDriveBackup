@@ -6,6 +6,22 @@
 - `Install-DriveTools.ps1` (and **Install health tool**) downloads smartmontools 7.5 with a pinned SHA-256 and installs only `smartctl` and its drive database into `bin\smartmontools`.
 - `Test-PrivacyGuard.ps1` blocks private backup details (volume identifiers, profile paths, personal email, drive models and labels, folder names from your `*.local.json`) from commits, commit messages and pushes; hooks in `.githooks`, also run in CI.
 - Plain copy no longer stops after copying when robocopy writes two "extra" records on one line during multi-threaded listing.
+- Plain copy and versions never copy Backup Center's own folders of passwords, recovery keys and state, even when the source holds them (for example a whole user folder or drive). Before, a plain copy could put the readable recovery keys on the backup drive.
+- *Check backup content* now also finds files that are missing from the plain copy, not only files that differ. It no longer creates an empty copy folder, and it no longer counts as a completed backup.
+- Plain copy refuses to run when the drive letter now belongs to a different drive than the profile's backup drive.
+- A folder inside a *NeverBackUp* folder is never backed up, even if it is marked for backup itself.
+- A selected folder that is missing or became a link now fails the plain copy with its name, instead of being skipped quietly.
+- A folder in the source where the copy has a file of the same name (or the reverse) now counts as a copy error instead of passing unnoticed.
+- Two sources never share one plain copy folder: a new source never reuses a copy folder already on the drive, and a folder added again keeps its own. Adding two folders with the same name no longer freezes the window.
+- A source with no subfolders can now be backed up and checked as a plain copy.
+- The first full check of a plain copy is remembered per drive rather than per drive letter, so a new drive with the same letter is checked in full. Each existing plain copy gets one full check after this update.
+- The content check skips the folders and names the copy skips, so a folder excluded later no longer shows up as a difference.
+- Saving a source's settings waits for, and never overwrites, a password change in progress; if a backup of that source is running, it says so instead.
+- **Install health tool** and **Long self-test** now see an installed smartctl (a stray character in its path made the window think it was missing).
+- A load level changed during a run now applies to the next step, threads, priority and versions settings alike. A step that cannot start or whose result cannot be recorded is reported as failed instead of leaving the run stuck. Step logs no longer overwrite each other. *Back up selected source* prepares only that source.
+- Closing the window asks about a running backup and a running drive check first, and stops nothing unless it really closes. A drive check cannot start while an earlier one (also from a closed window) still runs, and its stop request is kept. A profile that is being checked or speed-tested cannot be removed.
+- The speed test button stays off while a test runs, and the result is kept after **Refresh**.
+- Look and feel: disabled main buttons stay readable; small status text uses darker colours that meet 4.5:1 contrast; long names end in "…"; links are underlined; the Overview shows the last drive check and why buttons are off when the drive is not connected; drive check findings get more room and scroll only when needed; the Help page has headings.
 
 ## 0.1.0 — first public release
 

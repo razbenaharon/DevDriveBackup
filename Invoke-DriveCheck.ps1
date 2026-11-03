@@ -23,6 +23,10 @@ Import-Module (Join-Path $PSScriptRoot 'Backup.DriveCheck.psm1') -Force
 New-Item -ItemType Directory -Path $OutputDirectory -Force|Out-Null
 $stopFile=Join-Path $OutputDirectory 'stop.request'
 $started=Get-Date
+# One check per drive at a time. The lock is held until this process ends; a second check stops
+# here without touching the first one's files.
+try{$lock=[IO.File]::Open((Join-Path $OutputDirectory 'check.lock'),'OpenOrCreate','ReadWrite','None')}
+catch{[Console]::Error.WriteLine('Another drive check of this drive is running.');exit 1}
 
 Add-Type -TypeDefinition @'
 using System; using System.Collections.Generic; using System.ComponentModel; using System.Diagnostics; using System.Globalization; using System.Runtime.InteropServices; using System.Text; using Microsoft.Win32.SafeHandles;

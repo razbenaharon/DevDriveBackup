@@ -172,7 +172,7 @@ try {
  $script:repository=Join-Path ($volume[0].DriveLetter+':\') $folder;Assert-PlainAncestors $script:repository
  if($Action -in @('Backup','Preview') -and $volume[0].SizeRemaining -lt 5GB){throw 'Less than 5 GiB free on the backup volume'}
  # What to back up comes from the per-folder Mode shared with the plain mirror (Versioned or Both).
- $sources=@();$selectionExcludes=@()
+ $sources=@();$selectionExcludes=@();$privateExcludes=@()
  if($Action -in @('Backup','Preview')){
   $regions=@(Get-BackupRegions (Get-BackupSelection $script:config) 'Versioned')
   $sources=@($regions|ForEach-Object {
@@ -199,6 +199,11 @@ try {
   # shorthand counts as a missing property.
   $selectionExcludes=@($regions|ForEach-Object {$_.Excluded}|Where-Object {$_}|Sort-Object -Unique|ForEach-Object {Expand-Excluded $_}|ForEach-Object {
    [regex]::Replace([IO.Path]::GetFullPath((Join-Path $source $_)).Replace('\','/'),'[\[*?]',{param($m) '['+$m.Value+']'})
+  })
+  # Backup Center's private folders (protected passwords, run state, recovery keys of every source)
+  # are never backed up, whatever the selection, as in the plain copy.
+  $privateExcludes=@((Join-Path $env:LOCALAPPDATA 'DevDriveMirror'),(Join-Path $env:USERPROFILE 'Backup Center recovery keys')|ForEach-Object {
+   [regex]::Replace([IO.Path]::GetFullPath($_).TrimEnd('\').Replace('\','/'),'[\[*?]',{param($m) '['+$m.Value+']'})
   })
   $script:status.Sources=$sources;$script:status.SelectionExcludes=$selectionExcludes
  }
@@ -236,7 +241,7 @@ try {
  }
  $base=@('backup','--read-concurrency',[string]$script:config.ReadConcurrency,'--tag','devdrive')
  if($ForceRead){$base+='--force'}
- foreach($exclude in @($script:config.Exclude)+$selectionExcludes){if($exclude){$base+=@('--iexclude',[string]$exclude)}}
+ foreach($exclude in @($script:config.Exclude)+$selectionExcludes+$privateExcludes){if($exclude){$base+=@('--iexclude',[string]$exclude)}}
  switch($Action){
   {$_ -in @('ExportKey','ChangePassword','ResumePasswordChange')} {Invoke-KeyManagement}
   'Backup' {Run-Engine ($base+@('--')+$sources) 'BackingUp';Run-Engine @('check') 'CheckingStructure'}

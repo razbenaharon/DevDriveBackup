@@ -147,7 +147,12 @@ function Add-CenterSource {
  # Names that are not Latin letters all become "Source"; keep them apart.
  if($safe -eq 'Source'){$safe='Source-'+(New-ShortId).Substring(0,4)}
  $drive=Get-CenterDrive $profile.DestinationVolumeId
- $taken={param($n)@($profile.Sources|Where-Object {$_.MirrorFolder -ieq $n+'-Mirror' -or $_.Label -ieq $Label}).Count -or ($drive.Connected -and (Test-Path -LiteralPath ($drive.Letter+':\'+$n+'-Versions')))}
+ # A name is taken when another source of this drive has it, or its plain copy or versions folder
+ # is already on the drive (an earlier source's copy is never shared). The label is compared by its
+ # safe name, so a second folder with the same label gets a new name instead of looping forever.
+ $taken={param($n)@($profile.Sources|Where-Object {$_.MirrorFolder -ieq $n+'-Mirror' -or (Get-SafeName $_.Label) -ieq $n}).Count -or ($drive.Connected -and ((Test-Path -LiteralPath ($drive.Letter+':\'+$n+'-Versions')) -or (Test-Path -LiteralPath ($drive.Letter+':\'+$n+'-Mirror'))))}
+ $used={param($m)@($profile.Sources|Where-Object {$_.MirrorFolder -ieq $m}).Count -gt 0}
+ if($MirrorFolder -and (& $used $MirrorFolder)){throw "The plain copy folder $MirrorFolder is already used by another source of this drive"}
  $id=New-ShortId
  if(-not $ExistingConfigPath){
   # A source removed earlier keeps its job file (with its keys); adding the same folder again to
@@ -164,7 +169,14 @@ function Add-CenterSource {
   $config=[IO.Path]::GetFullPath($ExistingConfigPath)
   $c=Get-Content -LiteralPath $config -Raw|ConvertFrom-Json
   if(([IO.Path]::GetFullPath($c.Source).TrimEnd('\')+'\') -ine $root){throw 'That job file belongs to another source folder'}
+  # It keeps its own plain copy folder too (recorded in the job, or named like its repository) unless
+  # another source of this drive uses that name now; then it gets a name no folder on the drive has.
+  if(-not $MirrorFolder){
+   $MirrorFolder=if($c.PSObject.Properties['MirrorFolder'] -and $c.MirrorFolder){[string]$c.MirrorFolder}elseif($c.PSObject.Properties['RepositoryFolder'] -and [string]$c.RepositoryFolder -match '^(.+)-Versions$'){$Matches[1]+'-Mirror'}else{''}
+   if(-not $MirrorFolder -or (& $used $MirrorFolder)){while(& $taken $safe){$safe=(Get-SafeName $Label)+'-'+(New-ShortId).Substring(0,4)};$MirrorFolder=$safe+'-Mirror'}
+  }
  }else{
+  if(-not $MirrorFolder){$MirrorFolder=$safe+'-Mirror'}
   $jobs=(Get-CenterPaths).Jobs;New-Item -ItemType Directory -Path $jobs -Force|Out-Null
   $config=Join-Path $jobs ($profile.Id+'-'+$id+'.local.json')
   $keyId=[guid]::NewGuid().ToString('N')
@@ -172,10 +184,10 @@ function Add-CenterSource {
   $c=[ordered]@{Source=$root;SourceVolumeId=$volume.UniqueId;DestinationVolumeId=$profile.DestinationVolumeId
    RepositoryFolder=($safe+'-Versions');PasswordDpapiPath=(Join-Path (Get-CenterPaths).Keys ($keyId+'.dpapi'))
    RecoveryKeyPath=(Join-Path (Get-CenterPaths).Documents ('Backup-'+$safe+'-'+$keyId+'-recovery-key.txt'))
-   DefaultMode=$DefaultMode;Choices=$choices;Include=@();Exclude=$script:CacheNames;RecommendedExclude=$script:CacheNames}
+   DefaultMode=$DefaultMode;Choices=$choices;Include=@();Exclude=$script:CacheNames;RecommendedExclude=$script:CacheNames;MirrorFolder=$MirrorFolder}
   [void](Write-BackupStatus ([pscustomobject]$c) $config)
  }
- $source=[pscustomobject]@{Id=$id;Label=$Label.Trim();Path=$root;ConfigPath=$config;MirrorFolder=if($MirrorFolder){$MirrorFolder}else{$safe+'-Mirror'};Created=(Get-Date).ToString('o')}
+ $source=[pscustomobject]@{Id=$id;Label=$Label.Trim();Path=$root;ConfigPath=$config;MirrorFolder=$MirrorFolder;Created=(Get-Date).ToString('o')}
  $profile.Sources=@($profile.Sources)+$source
  $source
 }
@@ -186,7 +198,28 @@ function Remove-CenterSource($Data,[string]$ProfileId,[string]$SourceId) {
 }
 
 function Read-CenterJob([string]$ConfigPath) {Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json}
-function Save-CenterJob($Job,[string]$ConfigPath) {[void](Write-BackupStatus $Job $ConfigPath)}
+function Save-CenterJob($Job,[string]$ConfigPath,[scriptblock]$Update) {
+ # Writes under the job's run lock (as Backup-Worker.ps1 and Set-BackupDestination.ps1 take it) after
+ # reading the file again, so a password change running elsewhere keeps its new recovery-key location.
+ # With -Update the change is made to that fresh copy instead of writing $Job.
+ $key={param($j)if($j -and $j.PSObject.Properties['PasswordDpapiPath'] -and $j.PasswordDpapiPath){[IO.Path]::GetFullPath([string]$j.PasswordDpapiPath)}else{''}}
+ $keyPath=if(Test-Path -LiteralPath $ConfigPath){& $key (Read-CenterJob $ConfigPath)}else{& $key $Job}
+ $lock=$null
+ if($keyPath){
+  New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($keyPath)) -Force|Out-Null
+  for($i=0;-not $lock;$i++){try{$lock=[IO.File]::Open($keyPath+'.run.lock',[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch [IO.IOException]{if($i -ge 30){throw 'This source is busy: a backup, check, restore or password change is using it. Try again when it has finished.'};Start-Sleep -Milliseconds 100}}
+ }
+ try{
+  $fresh=if(Test-Path -LiteralPath $ConfigPath){Read-CenterJob $ConfigPath}else{$null}
+  if($fresh -and (& $key $fresh) -ine $keyPath){throw 'The password settings of this source changed while saving. Try again.'}
+  if($Update){if(-not $fresh){throw "Job file not found: $ConfigPath"};[void](& $Update $fresh);$Job=$fresh}
+  elseif($fresh){
+   if((& $key $Job) -ine $keyPath){throw 'The password settings of this source changed elsewhere. Close and reopen Backup Center.'}
+   if($fresh.PSObject.Properties['RecoveryKeyPath']){$Job|Add-Member -NotePropertyName RecoveryKeyPath -NotePropertyValue $fresh.RecoveryKeyPath -Force}
+  }
+  [void](Write-BackupStatus $Job $ConfigPath)
+ }finally{if($lock){$lock.Dispose()}}
+}
 
 function Get-CenterSourceKinds($Source) {
  # Which tools this source uses, from its per-folder modes.
@@ -198,17 +231,21 @@ function Get-CenterSourceKinds($Source) {
 }
 
 function Sync-CenterJob($Profile,$Source,$Load=(Get-CenterLoad $Profile)) {
- # Keeps a job file pointed at its profile's drive and the chosen load.
- $job=Read-CenterJob $Source.ConfigPath;$changed=$false
- if($job.DestinationVolumeId -ne $Profile.DestinationVolumeId){$job.DestinationVolumeId=$Profile.DestinationVolumeId;$changed=$true}
+ # Keeps a job file pointed at its profile's drive and the chosen load, and records its plain copy
+ # folder (so adding the folder again later finds the same copy).
  $light=$Load.Name -eq 'Light'
- $speed=[ordered]@{Profile=$Load.Name;CpuThreads=$Load.CpuThreads;MemoryMiB=$Load.MemoryMiB;ReadConcurrency=$Load.ReadConcurrency;Priority=$Load.Priority
+ $want=[ordered]@{DestinationVolumeId=$Profile.DestinationVolumeId;Profile=$Load.Name;CpuThreads=$Load.CpuThreads;MemoryMiB=$Load.MemoryMiB;ReadConcurrency=$Load.ReadConcurrency;Priority=$Load.Priority
   RateMBps=0;PackMiB=$(if($light){16}else{32});BackendConnections=$(if($Load.Name -in @('Light','Balanced')){2}else{4})}
- foreach($k in $speed.Keys){
-  if(-not $job.PSObject.Properties[$k]){$job|Add-Member -NotePropertyName $k -NotePropertyValue $speed[$k];$changed=$true}
-  elseif($job.$k -ne $speed[$k]){$job.$k=$speed[$k];$changed=$true}
- }
- if($changed){Save-CenterJob $job $Source.ConfigPath}
+ if($Source.PSObject.Properties['MirrorFolder'] -and $Source.MirrorFolder){$want.MirrorFolder=[string]$Source.MirrorFolder}
+ $apply={param($job)$changed=$false
+  foreach($k in $want.Keys){
+   if(-not $job.PSObject.Properties[$k]){$job|Add-Member -NotePropertyName $k -NotePropertyValue $want[$k];$changed=$true}
+   elseif($job.$k -ne $want[$k]){$job.$k=$want[$k];$changed=$true}
+  }
+  $changed}.GetNewClosure()
+ # Checked first without the lock: most calls change nothing and must not wait for a running backup.
+ # A change is made to a fresh copy under the job's lock.
+ if(& $apply (Read-CenterJob $Source.ConfigPath)){Save-CenterJob $null $Source.ConfigPath -Update $apply}
 }
 
 # --- History and freshness ----------------------------------------------------------------
@@ -332,8 +369,7 @@ function Complete-CenterStep($Running,[string]$ProfileId) {
  if(-not $e.Success -and -not $e.Error){$e.Error="The tool ended with exit code $($p.ExitCode)"}
  # A verification of an existing backup does not make the backup newer.
  if($s.Purpose -eq 'Verify'){$e.Kind=$s.Kind+'Check'}
- $p.Dispose()
- Add-CenterHistory ([pscustomobject]$e)
+ try{Add-CenterHistory ([pscustomobject]$e)}finally{$p.Dispose()}
  [pscustomobject]$e
 }
 
