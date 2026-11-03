@@ -99,6 +99,20 @@ python ./Build-BackupReport.py --audit ./audit --hardware ./audit/hardware.json 
 
 The report and application interface are English-only and compares the two provided measurements; it should only label them USB 2/USB 3 when those links were actually verified. Reports are snapshots, not live backup monitors. Live progress belongs to the manager and per-run `status.json`.
 
+## Drive check
+
+```powershell
+pwsh -NoProfile -File ./Install-DriveTools.ps1          # once: smartctl into bin\smartmontools (asks for administrator rights)
+# as administrator:
+pwsh -NoProfile -File ./Invoke-DriveCheck.ps1 -Drive Y -OutputDirectory ./audit/check -Mode Quick
+pwsh -NoProfile -File ./Invoke-DriveCheck.ps1 -Drive Y -OutputDirectory ./audit/check -Mode Surface
+pwsh -NoProfile -File ./Invoke-DriveCheck.ps1 -Drive Y -OutputDirectory ./audit/check -Mode LongSelfTest
+```
+
+The window runs these through a Windows administrator prompt and keeps the results per profile in `%LOCALAPPDATA%\DevDriveMirror\drive-check\<profile>`: `report.json` (last quick check), `surface.json` (full scan position and findings), `run.json` (last run), `progress.json` (live). An elevated process cannot be ended by the window, so *Stop* creates `stop.request` and the check stops itself after the current step; a full scan saves its position every 512 MiB and continues from there.
+
+Reads use `\.\PhysicalDriveN` with unbuffered aligned 4 MiB reads. A failing chunk is read again in 64 KiB pieces to locate the damaged place. A chunk over one second counts as very slow (the drive retried), over ten times the median and 250 ms as slow; many slow places (over 0.2% of what was read, at least 20) are a warning. Errors that mean the drive disappeared (not ready, no such device, disconnected) end the run instead of being recorded as bad areas. Nothing is written. The health report tries smartctl's own device-type detection, then standard SAT pass-through; vendor-specific USB bridge commands are not tried blindly. Windows log entries (warnings and errors of the last 30 days) name a disk by number, and numbers move between drives as they are plugged in. Each entry is matched to the drive that held that number at the time, using Windows' own record of drive arrivals (`Microsoft-Windows-Partition/Diagnostic`, event 1006: disk number, serial number, model, size), so another drive's errors are not held against this one. The verdict rules live in `Backup.DriveCheck.psm1` and are tested by `Test-BackupDriveCheck.ps1` without hardware.
+
 ## What to preserve
 
 Preserve source code, uncommitted/untracked work, `.git` history, Git LFS objects, manifests/lockfiles, configuration, unique datasets, user-created media, experiment results and release evidence. Treat folder names as clues, not proof of disposability. Do not globally exclude `build`, `dist`, `data`, `bin`, large files or all databases. A successful push is not a backup of everything in a working directory.

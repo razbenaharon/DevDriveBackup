@@ -11,6 +11,8 @@ param(
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Data.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Selection.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Backup.Status.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Backup.DriveCheck.psm1') -Force
 [void](Set-CenterPaths $DataRoot)
 [Globalization.CultureInfo]::CurrentCulture=[Globalization.CultureInfo]::GetCultureInfo('en-GB')
 [Globalization.CultureInfo]::CurrentUICulture=[Globalization.CultureInfo]::GetCultureInfo('en-US')
@@ -69,6 +71,19 @@ You can change the load while a backup runs. The priority changes at once; threa
 Speed test writes one temporary file (2 GB) to the backup drive, reads it back and deletes it. It also shows how the drive is connected: USB 2 is slow (about 40 MB/s), 5 Gbit/s USB reaches about 450 MB/s, 10 Gbit/s USB and Thunderbolt more.
 
 Many small files are limited by the drive they are read from, not by the backup drive. A low MB/s during a backup of a code folder is normal.
+'@
+ DriveCheck=@'
+Quick check (a few minutes) asks the drive for its own health report and runs its two-minute self-test, reads samples at the start, middle and end of the drive, looks in the Windows log for disk and connection errors of the last 30 days, checks the connection speed and scans the file system.
+
+Full surface scan reads every part of the drive, one piece after another, and notes every place that cannot be read or is suspiciously slow. It takes hours. You can stop it and continue later from the same place.
+
+Long self-test asks the drive to read itself completely. It works on its own for hours; the next quick check shows the result.
+
+Everything here only reads. Nothing on the drive is written, moved or repaired. Windows asks for administrator rights each time, because reading a drive directly needs them.
+
+The health report needs the free smartmontools program (Install health tool). Some USB boxes do not pass the request on; that part then shows "Not available", and the full surface scan answers the same question: are there places on the drive that cannot be read.
+
+A drive can fail suddenly without any early sign. A clean check lowers the risk; a second backup drive removes it.
 '@
  General=@'
 Profiles: each backup drive has its own profile, recognised by the drive itself rather than its letter. A profile lists the folders (sources) that go onto that drive, so different drives can hold different content.
@@ -156,7 +171,7 @@ $legend=New-Note $rail 16 500 292 184 $Help.Freshness;$legend.ScrollBars='None'
 # Content: flat navigation with an underline under the open page.
 $content=New-Control Panel $form 360 92 816 692;$content.BackColor=$ui.Paper
 $navUnderline=New-Control Panel $content 0 34 10 3;$navUnderline.BackColor=$ui.Ink
-$pageNames=@('Overview','What to back up','Speed and load','Help');$navButtons=@();$pages=@()
+$pageNames=@('Overview','What to back up','Speed and load','Drive check','Help');$navButtons=@();$pages=@()
 $x=0
 foreach($n in $pageNames){
  $w=[Windows.Forms.TextRenderer]::MeasureText($n,$labelFace).Width+24
@@ -170,7 +185,7 @@ function Show-Page([int]$Index){
  $navUnderline.SetBounds($navButtons[$Index].Left,34,[Windows.Forms.TextRenderer]::MeasureText($pageNames[$Index],$labelFace).Width,3)
 }
 for($i=0;$i -lt $navButtons.Count;$i++){$idx=$i;$navButtons[$i].Add_Click({Show-Page $idx}.GetNewClosure())}
-$tOverview,$tSources,$tSpeed,$tHelp=$pages
+$tOverview,$tSources,$tSpeed,$tCheck,$tHelp=$pages
 
 # Overview
 $ovTitle=New-Control Label $tOverview 24 20 520 30 '';$ovTitle.Font=Get-Face 'Bahnschrift SemiBold' 15
@@ -246,13 +261,38 @@ $runsGrid=New-Control DataGridView $tSpeed 24 362 768 150;Set-Grid $runsGrid;$ru
 foreach($c in @(@('When',14),@('Source',14),@('Type',12),@('Duration',10),@('Copied',22),@('Speed',10),@('Result',18))){$i=$runsGrid.Columns.Add($c[0],$c[0]);$runsGrid.Columns[$i].FillWeight=$c[1]}
 [void](New-Note $tSpeed 24 524 640 114 ($Help.Load+"`n`n"+$Help.Speed))
 
+# Drive check: one card per layer, from what the drive says about itself to the file system.
+$checkSummary=New-Control Label $tCheck 24 20 768 30 '';$checkSummary.Font=Get-Face 'Bahnschrift SemiBold' 15
+$checkWhen=New-Control Label $tCheck 25 52 768 20 '';$checkWhen.ForeColor=$ui.Muted
+$btnCheckQuick=New-Button $tCheck 24 84 150 36 'Quick check' -Primary
+$btnCheckScan=New-Button $tCheck 184 84 220 36 'Full surface scan'
+$btnCheckLong=New-Button $tCheck 414 84 140 36 'Long self-test'
+$btnInstallTool=New-Link $tCheck 566 92 120 'Install health tool'
+$btnCheckStop=New-Button $tCheck 692 84 100 36 'Stop';$btnCheckStop.Enabled=$false
+$checkProgress=New-Control ProgressBar $tCheck 24 132 768 6;$checkProgress.Style='Continuous'
+$checkStatus=New-Control Label $tCheck 24 144 768 38 '';$checkStatus.ForeColor=$ui.Muted
+$checkCards=[ordered]@{}
+foreach($c in @(@('Health','What the drive reports about itself',24,190),@('Surface','Reading the disk',416,190),@('Connection','The connection to the computer',24,352),@('FileSystem','The file system',416,352))){
+ $card=New-Control Panel $tCheck $c[2] $c[3] 376 150;$card.BackColor=$ui.Paper
+ $stripe=New-Control Panel $card 0 0 4 150;$stripe.BackColor=$ui.Line
+ (New-Control Label $card 16 10 250 22 $c[1]).Font=$labelFace
+ $state=New-Control Label $card 266 11 100 22 '';$state.TextAlign='TopRight';$state.Font=Get-Face 'Segoe UI Semibold' 9
+ $lines=New-Note $card 16 38 352 106 ' ';$lines.ForeColor=$ui.Ink;$lines.Font=$small;$lines.ScrollBars='None'
+ $checkCards[$c[0]]=[pscustomobject]@{Stripe=$stripe;State=$state;Lines=$lines}
+}
+[void](New-Note $tCheck 24 516 640 122 $Help.DriveCheck)
+
 # Help
-[void](New-Note $tHelp 24 20 640 618 ("How Backup Center works`n`n"+$Help.General+"`n`n`nHow each folder can be backed up`n`n"+$Help.Modes+"`n`n`nStatus colours`n`n"+$Help.Freshness+"`n`n`nComputer load`n`n"+$Help.Load+"`n`n`nDrive speed`n`n"+$Help.Speed))
+[void](New-Note $tHelp 24 20 640 618 ("How Backup Center works`n`n"+$Help.General+"`n`n`nHow each folder can be backed up`n`n"+$Help.Modes+"`n`n`nStatus colours`n`n"+$Help.Freshness+"`n`n`nComputer load`n`n"+$Help.Load+"`n`n`nDrive speed`n`n"+$Help.Speed+"`n`n`nDrive check`n`n"+$Help.DriveCheck))
 
 # --- State and refresh -------------------------------------------------------------------
 $script:data=Read-CenterProfiles
 $script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0
 $script:lastFree=$null;$script:lastTick=$null;$script:loadingModes=$false
+$script:check=$null;$script:install=$null
+$smartTool=Join-Path $PSScriptRoot 'bin\smartmontoolsin\smartctl.exe'
+$checkColor=@{OK=$stateColor.Fresh;Warning=$stateColor.Stale;Problem=$stateColor.Error;Unavailable=$stateColor.Never;NotRun=$stateColor.Never}
+$checkWord=@{OK='No problems';Warning='Worth a look';Problem='Problem';Unavailable='Not available';NotRun='Not checked'}
 $stateText=@{Fresh='Fresh';OK='OK';Stale='Needs a backup';Never='Never backed up';'Nothing selected'='Nothing selected';Error='Settings cannot be read'}
 
 function Get-SelectedProfile {
@@ -299,7 +339,7 @@ function Update-Details {
  foreach($c in @($btnBackup,$btnBackupOne,$btnVerify,$btnOpen,$btnRestore,$btnKeys,$btnAddSource,$btnRemoveSource,$btnSaveModes,$btnAddSub,$btnSpeed,$btnSaveLoad,$oldDays,$removeProfile)){$c.Enabled=$has -and -not $script:current}
  $btnStop.Enabled=[bool]$script:current
  $ovGrid.Rows.Clear();$runsGrid.Rows.Clear();$srcList.Items.Clear();$modeGrid.Rows.Clear()
- if(-not $p){$ovTitle.Text='No backup drive yet';$ovDrive.Text='Connect a backup drive and choose New profile.';$ageNumber.Text='';$ageUnit.Text='';$ageWhen.Text='';$meterFill.Width=0;$meterNote.Text='';$driveInfo.Text='';$driveFacts.Text='';return}
+ if(-not $p){$ovTitle.Text='No backup drive yet';$ovDrive.Text='Connect a backup drive and choose New profile.';$ageNumber.Text='';$ageUnit.Text='';$ageWhen.Text='';$meterFill.Width=0;$meterNote.Text='';$driveInfo.Text='';$driveFacts.Text='';Update-DriveCheck $null $null;return}
  $history=@(Get-CenterHistory);$d=Get-CenterDrive $p.DestinationVolumeId;$f=Get-CenterFreshness $p $history
  $ovTitle.Text=$p.Name
  $ovDrive.Text=if($d.Connected){"Connected as $($d.Letter):   $($p.DriveModel), $($d.FreeGB) GB free of $($d.SizeGB) GB"}else{"$($p.DriveModel). Not connected: connect it to back up, test its speed or restore."}
@@ -332,6 +372,9 @@ function Update-Details {
  }else{$speedWrite.Text='';$speedRead.Text='';$speedResult.Text='No speed test yet. It takes about half a minute and leaves nothing behind.'}
  $speedResult.Top=if($speedWrite.Text){122}else{93}
  if(-not $d.Connected){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnOpen.Enabled=$false;$btnRestore.Enabled=$false;$btnSpeed.Enabled=$false}
+ # A backup and a drive check of the same drive would compete for it and slow each other down.
+ if($script:check -and $script:check.ProfileId -eq $p.Id){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnSpeed.Enabled=$false}
+ Update-DriveCheck $p $d
  foreach($s in $p.Sources){[void]$srcList.Items.Add($s.Label+'   ('+$s.Path+')')}
  if($srcList.Items.Count){$srcList.SelectedIndex=0}else{Update-Modes}
  $driveInfo.Text=$p.Name
@@ -348,6 +391,54 @@ function Update-Details {
  }
 }
 
+function Get-CheckFolder($P){Join-Path (Get-CenterPaths).DriveCheck $P.Id}
+function Read-CheckFile([string]$Dir,[string]$Name){$f=Join-Path $Dir $Name;if(Test-Path -LiteralPath $f){try{Read-BackupStatus $f}catch{$null}}else{$null}}
+function Update-DriveCheck($P,$D){
+ $running=[bool]$script:check;$here=$running -and $P -and $script:check.ProfileId -eq $P.Id
+ $backingUp=$script:current -and $script:runProfile -and $P -and $script:runProfile.Id -eq $P.Id
+ $ready=$P -and $D.Connected -and -not $running -and -not $backingUp -and -not $script:install
+ $btnCheckQuick.Enabled=$ready;$btnCheckScan.Enabled=$ready;$btnCheckLong.Enabled=$ready -and (Test-Path -LiteralPath $smartTool);$btnCheckStop.Enabled=$here
+ $btnInstallTool.Visible=-not (Test-Path -LiteralPath $smartTool);$btnInstallTool.Enabled=-not $script:install
+ if(-not $P){$checkSummary.Text='';$checkWhen.Text='';$checkStatus.Text='';foreach($k in $checkCards.Keys){$checkCards[$k].State.Text='';$checkCards[$k].Lines.Text='';$checkCards[$k].Stripe.BackColor=$ui.Line};return}
+ $dir=Get-CheckFolder $P
+ $report=Read-CheckFile $dir 'report.json';$scan=Read-CheckFile $dir 'surface.json'
+ $view=Get-DriveCheckView $report $scan
+ foreach($k in $checkCards.Keys){
+  $g=$view.Groups[$k];$c=$checkCards[$k]
+  $c.State.Text=$checkWord[$g.Status];$c.State.ForeColor=$checkColor[$g.Status];$c.Stripe.BackColor=$checkColor[$g.Status]
+  $c.Lines.Text=(@($g.Lines) -join "`r`n")
+  $high=[Windows.Forms.TextRenderer]::MeasureText($c.Lines.Text,$small,[Drawing.Size]::new($c.Lines.Width-20,0),[Windows.Forms.TextFormatFlags]::WordBreak).Height
+  $c.Lines.ScrollBars=if($high -gt $c.Lines.Height){'Vertical'}else{'None'}
+ }
+ $partial=@($view.Groups.Values|Where-Object {$_.Status -in 'Unavailable','NotRun'}).Count
+ $checkSummary.Text=switch($view.Overall){'Problem'{'Problem found'}'Warning'{'Worth a look'}'OK'{if($partial){'No problems found in what could be checked'}else{'No problems found'}}default{'Not checked yet'}}
+ $checkSummary.ForeColor=if($view.Overall -in 'NotRun','Unavailable'){$ui.Ink}else{$checkColor[$view.Overall]}
+ $quick=if($report){'Quick check '+(Format-CenterAge $report.Finished)}else{'No quick check yet'}
+ $full=if(-not $scan){'no full scan yet'}elseif($scan.Complete){'full scan finished '+(Format-CenterAge $scan.Finished)}else{'full scan stopped at {0:N0}%' -f (100*[double]$scan.NextOffset/[double]$scan.Size)}
+ $checkWhen.Text="$quick, $full."+$(if(-not $D.Connected){'  Connect the drive to check it.'}else{''})
+ $btnCheckScan.Text=if($scan -and -not $scan.Complete -and [double]$scan.NextOffset -gt 0){'Continue full scan ({0:N0}%)' -f (100*[double]$scan.NextOffset/[double]$scan.Size)}else{'Full surface scan'}
+ if($here){return}
+ $last=Read-CheckFile $dir 'run.json'
+ $checkStatus.Text=if($running){'A drive check of another drive is running. One drive at a time.'}elseif($last){'Last run '+(Format-CenterAge $last.Finished)+': '+$last.Message}else{'Windows asks for administrator rights when a check starts. Every check only reads.'}
+}
+function Start-DriveCheck([string]$Mode){
+ $p=Get-SelectedProfile;if(-not $p){return};$d=Get-CenterDrive $p.DestinationVolumeId;if(-not $d.Connected){throw 'Connect the drive first.'}
+ if($Mode -eq 'Surface'){
+  $hours=[double]$d.SizeGB*1GB/150MB/3600
+  if([Windows.Forms.MessageBox]::Show(("Read every part of this drive?`n`nAt a typical 150 MB/s this takes about {0:N0} hours. It only reads; you can keep working, stop it any time and continue later. The computer stays awake while it runs." -f [math]::Max(1,$hours)),'Backup Center','YesNo','Question') -ne 'Yes'){return}
+ }
+ if($Mode -eq 'LongSelfTest' -and [Windows.Forms.MessageBox]::Show("Ask the drive to read itself completely?`n`nThe drive does this on its own and it takes hours. Keep it connected and the computer awake; a USB box that goes to sleep stops the test. Run a quick check afterwards to see the result.",'Backup Center','YesNo','Question') -ne 'Yes'){return}
+ $dir=Get-CheckFolder $p;New-Item -ItemType Directory -Path $dir -Force|Out-Null
+ foreach($n in 'stop.request','progress.json','run.json'){Remove-Item -LiteralPath (Join-Path $dir $n) -ErrorAction SilentlyContinue}
+ # The command name rather than this process's path, which changes with every Store update of PowerShell.
+ $pwsh=(Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1).Source;if(-not $pwsh){$pwsh=(Get-Process -Id $PID).Path}
+ $arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $PSScriptRoot 'Invoke-DriveCheck.ps1')+'" -Drive '+$d.Letter+' -Mode '+$Mode+' -OutputDirectory "'+$dir+'"'
+ $checkStatus.Text='Windows asks for administrator rights...'
+ try{$proc=Start-Process -FilePath $pwsh -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru}
+ catch{$checkStatus.Text='Not started: Windows did not give administrator rights. ('+$_.Exception.Message+')';return}
+ $script:check=[pscustomobject]@{ProfileId=$p.Id;Process=$proc;Dir=$dir;Mode=$Mode;Started=Get-Date}
+ $checkProgress.Value=0;$checkStatus.Text='Starting...';$checkTimer.Start();Update-Details
+}
 function Format-Load($L){
  $prio=if($L.Priority -eq 'Normal'){'normal priority'}else{'your programs come first'}
  "$($L.CpuThreads) of $([Environment]::ProcessorCount) processor threads, up to $([math]::Round($L.MemoryMiB/1024,1)) GB memory, $($L.CopyThreads) files at once, $prio."
@@ -617,6 +708,46 @@ $speedTimer.Add_Tick({
   Save-CenterProfiles $script:data;Update-Details
  }catch{$speedResult.Text='Speed test failed: '+$_.Exception.Message}finally{$btnSpeed.Enabled=$true}
 })
+$btnCheckQuick.Add_Click({try{Start-DriveCheck 'Quick'}catch{Show-Error $_;Update-Details}})
+$btnCheckScan.Add_Click({try{Start-DriveCheck 'Surface'}catch{Show-Error $_;Update-Details}})
+$btnCheckLong.Add_Click({try{Start-DriveCheck 'LongSelfTest'}catch{Show-Error $_;Update-Details}})
+$btnCheckStop.Add_Click({
+ # The check runs as administrator, so this window cannot end it; it asks the check to stop itself.
+ if($script:check){New-Item -ItemType File -Path (Join-Path $script:check.Dir 'stop.request') -Force|Out-Null;$btnCheckStop.Enabled=$false;$checkStatus.Text='Stopping after the current step...'}
+})
+$btnInstallTool.Add_Click({try{
+ if([Windows.Forms.MessageBox]::Show("Download and install the free smartmontools program (about 1.5 MB, from its official GitHub release, checked against a fixed checksum)?`n`nIt reads the drive's own health report and runs its self-tests. Only its command-line tool is installed, into the bin folder of Backup Center: no service, Start menu entry or system setting. Windows asks for administrator rights.",'Backup Center','YesNo','Question') -ne 'Yes'){return}
+ $script:install=Start-CenterStep ([pscustomobject]@{FilePath=(Get-Process -Id $PID).Path;Arguments=@('-NoProfile','-File',(Join-Path $PSScriptRoot 'Install-DriveTools.ps1'));Priority=$null}) $null
+ $checkStatus.Text='Installing the health tool...';$checkTimer.Start();Update-Details
+}catch{Show-Error $_}})
+$checkTimer=[Windows.Forms.Timer]::new();$checkTimer.Interval=1000
+$checkTimer.Add_Tick({
+ try{
+  if($script:install -and $script:install.Process.HasExited){
+   $i=$script:install;$script:install=$null
+   $out=($i.Out.GetAwaiter().GetResult()+"`n"+$i.Err.GetAwaiter().GetResult()).Trim();$code=$i.Process.ExitCode;$i.Process.Dispose()
+   Update-Details
+   $checkStatus.Text=if($code -eq 0 -and (Test-Path -LiteralPath $smartTool)){'Health tool installed: '+@($out -split "`n")[0]+'. Run a quick check.'}else{'The health tool was not installed. '+@($out -split "`n"|Where-Object {$_.Trim()})[-1]}
+  }
+  $c=$script:check
+  if(-not $c){if(-not $script:install){$checkTimer.Stop()};return}
+  $runFile=Join-Path $c.Dir 'run.json'
+  $exited=$false;try{$exited=$c.Process.HasExited}catch{}
+  if(-not (Test-Path -LiteralPath $runFile) -and -not $exited){
+   $pr=Read-CheckFile $c.Dir 'progress.json'
+   if($pr -and $script:check.ProfileId -eq (Get-SelectedProfile).Id){$checkStatus.Text=$pr.Text;if([double]$pr.Percent -ge 0){$checkProgress.Value=[int][math]::Min(100,[math]::Max(0,[double]$pr.Percent))}}
+   return
+  }
+  if(-not (Test-Path -LiteralPath $runFile)){
+   # It ended without a word (closed or crashed): record that, so the page does not show an old result as new.
+   [void](Write-BackupStatus ([ordered]@{Mode=$c.Mode;Success=$false;Message='The drive check ended without a result.';Started=$c.Started.ToString('o');Finished=(Get-Date).ToString('o')}) $runFile)
+  }
+  $r=Read-CheckFile $c.Dir 'run.json'
+  $script:check=$null;$checkProgress.Value=0
+  Update-Details
+  if($r -and -not $r.Success -and $r.Message -notlike 'Stopped*'){[void][Windows.Forms.MessageBox]::Show('The drive check did not finish: '+$r.Message,'Backup Center',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)}
+ }catch{$checkStatus.Text='Could not read the drive check progress this time: '+$_.Exception.Message}
+})
 $loadPick.Add_SelectedIndexChanged({try{if(-not $script:loadingLoad -and $loadPick.SelectedItem){Set-ProfileLoad ([string]$loadPick.SelectedItem)}}catch{Show-Error $_}})
 $loadLevel.Add_SelectedIndexChanged({try{if(-not $script:loadingLoad -and $loadLevel.SelectedItem){Set-ProfileLoad ([string]$loadLevel.SelectedItem)}}catch{Show-Error $_}})
 $btnSaveLoad.Add_Click({try{
@@ -632,6 +763,10 @@ $oldDays.Add_ValueChanged({try{
 $form.Add_FormClosing({param($s,$e)
  if($script:current -and [Windows.Forms.MessageBox]::Show('A backup is running. Stop it and close?','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
  if($script:current){$script:queue.Clear();try{$script:current.Process.Kill($true)}catch{}}
+ if($script:check){
+  if([Windows.Forms.MessageBox]::Show('A drive check is running. Stop it and close? A full scan continues later from where it stopped.','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
+  New-Item -ItemType File -Path (Join-Path $script:check.Dir 'stop.request') -Force|Out-Null
+ }
 })
 
 $form.Add_Shown({

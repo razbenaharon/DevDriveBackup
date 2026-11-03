@@ -64,10 +64,10 @@ function Set-CenterRunPriority($Process,[string]$Priority) {
 function Set-CenterPaths([string]$Root) {
  # Root '' = the real locations; tests pass a disposable folder.
  if($Root){
-  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $Root 'profiles.local.json');Jobs=(Join-Path $Root 'jobs');History=(Join-Path $Root 'history.jsonl');Keys=(Join-Path $Root 'keys');Documents=(Join-Path $Root 'documents')}
+  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $Root 'profiles.local.json');Jobs=(Join-Path $Root 'jobs');History=(Join-Path $Root 'history.jsonl');Keys=(Join-Path $Root 'keys');Documents=(Join-Path $Root 'documents');DriveCheck=(Join-Path $Root 'drive-check')}
  }else{
   $app=Join-Path $env:LOCALAPPDATA 'DevDriveMirror'
-  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $script:ToolRoot 'profiles.local.json');Jobs=(Join-Path $script:ToolRoot 'jobs');History=(Join-Path $app 'center\history.jsonl');Keys=$app;Documents=(Join-Path $env:USERPROFILE 'Backup Center recovery keys')}  # local, not a synced Documents folder
+  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $script:ToolRoot 'profiles.local.json');Jobs=(Join-Path $script:ToolRoot 'jobs');History=(Join-Path $app 'center\history.jsonl');Keys=$app;Documents=(Join-Path $env:USERPROFILE 'Backup Center recovery keys');DriveCheck=(Join-Path $app 'drive-check')}  # local, not a synced Documents folder
  }
  $script:Paths
 }

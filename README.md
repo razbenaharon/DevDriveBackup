@@ -25,15 +25,17 @@ Most backup tools either copy everything slowly or hide your files in a format o
 | **Skips what rebuilds** | `node_modules`, `.venv`, `__pycache__`, test and build caches, recycle bin and system folders are skipped by default; your own skips go in a personal settings file. |
 | **Safe with developer drives** | Junctions and symlinks are not followed, so nothing is copied twice. Refuses a backup onto the same physical disk as the source, including the disk that holds a Dev Drive VHDX file. |
 | **Measures the backup drive** | Reports model, health, file system and the real USB link speed (USB 2, 5 Gbit/s, 10 Gbit/s), and runs an unbuffered read/write benchmark. |
+| **Checks the backup drive itself** | *Drive check* looks at four layers: what the drive reports about itself (replaced and suspect areas, errors, hours, temperature, its own self-tests), reading the disk (samples, or a resumable full surface scan), the connection (link speed, transfer errors, resets in the Windows log) and the file system. Read only. |
 
 ## Install
 
 1. Install [PowerShell 7.2 or newer](https://aka.ms/powershell).
 2. Get the code: `git clone https://github.com/razbenaharon/BackupCenter.git`, or download the ZIP and run `Get-ChildItem -Recurse | Unblock-File` in the folder so Windows allows the scripts.
 3. Only if you want versioned history: `pwsh -NoProfile -File ./Install-BackupEngine.ps1` downloads restic 0.19.1 into `bin\` and checks its pinned SHA-256.
-4. Optional: `pwsh -NoProfile -File ./New-BackupCenterShortcut.ps1` puts a **Backup Center** shortcut with the program icon on the desktop.
+4. Only if you want the drive's own health report in *Drive check*: **Install health tool** on that page, or `pwsh -NoProfile -File ./Install-DriveTools.ps1`, downloads smartmontools 7.5, checks its pinned SHA-256 and installs only `smartctl` into `bin\smartmontools` (the installer asks for administrator rights; no service, Start menu entry or PATH change).
+5. Optional: `pwsh -NoProfile -File ./New-BackupCenterShortcut.ps1` puts a **Backup Center** shortcut with the program icon on the desktop.
 
-No administrator rights, PATH changes or services are needed.
+Backups need no administrator rights, PATH changes or services. Only *Drive check* asks Windows for administrator rights, each time it runs, because reading a drive directly needs them.
 
 ## Quick start
 
@@ -72,6 +74,7 @@ The first plain copy is verified automatically, file by file. After that, back u
 | `Backup-History.ps1`, `Backup-Security.ps1` | Versions and restore; password and recovery key windows |
 | `BackupCenter-Advanced.cmd`, `Backup-Manager.ps1` | Advanced window for one versioned source |
 | `Set-BackupDestination.ps1`, `Measure-BackupDisk.ps1` | Drive inspection, USB link speed, benchmark |
+| `Invoke-DriveCheck.ps1`, `Backup.DriveCheck.psm1`, `Install-DriveTools.ps1` | Drive check (runs as administrator, read only), its verdict rules, health tool installer |
 | `Inspect-DevDrive.ps1`, `Build-BackupReport.py` | Optional size inventory and offline HTML report |
 | `profiles.local.json`, `jobs\*.local.json`, `backup.local.json` | Your personal settings (git-ignored) |
 
@@ -100,6 +103,9 @@ Plain copy: open the folder on the backup drive and copy files back. Versions: *
 **Can I use several backup drives?**
 Yes. Each drive has its own profile with its own folders and its own freshness.
 
+**How do I know the backup drive itself is healthy?**
+Open **Drive check** and run a **Quick check** (a few minutes). For a full answer, run a **Full surface scan**: it reads every part of the drive, takes hours, and can stop and continue later. Many USB boxes do not pass the drive's own health report on; then that part shows *Not available* and the full scan answers the same question: are there places that cannot be read. Nothing is written to the drive.
+
 **Is there a scheduler or reminder?**
 No, by design. You decide when to back up; the window shows how old each backup is.
 
@@ -114,7 +120,7 @@ pwsh -NoProfile -File ./Test-BackupSystem.ps1 -DestinationDrive Y      # version
 pwsh -NoProfile -File ./Test-BackupSecurity.ps1 -DestinationDrive Y    # password change and recovery keys
 ```
 
-`Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
+`Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
 
 ### Keeping your own details out of a fork
 

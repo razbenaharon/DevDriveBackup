@@ -33,6 +33,9 @@ jobs:
       - name: Verify concurrent status access
         shell: pwsh
         run: ./Test-BackupStatus.ps1
+      - name: Verify drive check rules
+        shell: pwsh
+        run: ./Test-BackupDriveCheck.ps1
       - name: Verify history selection safeguards
         shell: pwsh
         run: ./Test-BackupHistory.ps1

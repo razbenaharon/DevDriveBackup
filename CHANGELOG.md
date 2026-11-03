@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Drive check** page: checks the backup drive in four layers, each with its own verdict. *Quick check* reads the drive's health report (smartctl) and runs its short self-test, reads samples at the start, middle and end, looks for disk, reset and disconnection entries of the last 30 days in the Windows log (matched to this drive through Windows' record of drive arrivals, since disk numbers move between drives), checks the link speed and runs Windows' online file system scan. *Full surface scan* reads the whole disk, notes unreadable and suspiciously slow places, keeps the computer awake, and continues where it stopped. *Long self-test* starts the drive's own full read. Read only; runs as administrator (`Invoke-DriveCheck.ps1`), stopped through a request file because the window cannot end an elevated process.
+- `Install-DriveTools.ps1` (and **Install health tool**) downloads smartmontools 7.5 with a pinned SHA-256 and installs only `smartctl` and its drive database into `bin\smartmontools`.
 - `Test-PrivacyGuard.ps1` blocks private backup details (volume identifiers, profile paths, personal email, drive models and labels, folder names from your `*.local.json`) from commits, commit messages and pushes; hooks in `.githooks`, also run in CI.
 - Plain copy no longer stops after copying when robocopy writes two "extra" records on one line during multi-threaded listing.
 
