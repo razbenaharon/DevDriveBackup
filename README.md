@@ -18,7 +18,7 @@ Most backup tools either copy everything slowly or hide your files in a format o
 | **History when you need it** | Folders you mark *Versions* go into an encrypted, deduplicated restic repository with every past version. |
 | **Per-folder choice** | Each folder is *Plain copy*, *Versions*, *Both* or *Skip*. A folder inside a skipped folder can still be backed up. |
 | **Proof, not hope** | *Check backup content* re-reads both sides of every file and compares SHA-256 hashes (plain copy) or verifies all repository data (versions). |
-| **Nothing deleted by surprise** | Files you delete from the source are never deleted from the copy; they can be moved aside to a dated recovery folder instead. |
+| **Nothing deleted by surprise** | Files you delete from the source stay in the copy, or, with *Keep deleted for N backups*, move to a dated recovery folder beside it; only the newest N recovery folders are kept. |
 | **Load control for your hardware** | Detects your processor and memory and offers Light, Balanced, Strong and Maximum levels, or your own threads, memory limit, parallel files and priority. You can lower the load while a backup runs. |
 | **Several backup drives, each with its own content** | One profile per drive, recognised by the drive itself rather than its letter. |
 | **Knows how fresh each backup is** | The age of the last complete backup, coloured green, blue or orange against the number of days you choose. |
@@ -48,7 +48,7 @@ The first plain copy is verified automatically, file by file. After that, back u
 
 ## How it works
 
-**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`). Verification hashes both sides in parallel and counts selected files missing from the copy. Backup Center's own password, recovery-key and state folders are never copied by either engine.
+**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`, or **Keep deleted for** on the overview); `-KeepRecovery N` then deletes all but the newest N dated recovery folders. Nothing is moved aside after a run in which robocopy failed. Verification hashes both sides in parallel and counts selected files missing from the copy. Backup Center's own password, recovery-key and state folders are never copied by either engine.
 
 **Versions** (`Backup-Worker.ps1`) run restic with a random 256-bit password stored for your Windows account (DPAPI) plus a portable recovery key file, a hard memory cap (Windows Job Object), CPU and I/O limits, and a structural `restic check` after every backup. Restore always goes to a new folder and verifies restored content.
 

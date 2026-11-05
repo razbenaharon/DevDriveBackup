@@ -203,13 +203,20 @@ $ovDrive=New-Control Label $tOverview 25 52 520 20 '';$ovDrive.ForeColor=$ui.Mut
 # The last drive check in one line; it opens the Drive check page.
 $ovCheck=New-Link $tOverview 472 174 320 'Drive check: not checked yet';$ovCheck.Font=$small;$ovCheck.TextAlign='TopRight'
 $ageNumber=New-Control Label $tOverview 18 80 200 76 '';$ageNumber.Font=Get-Face 'Bahnschrift SemiBold' 44;$ageNumber.AutoSize=$true
-$ageUnit=New-Control Label $tOverview 140 96 640 26 '';$ageUnit.Font=Get-Face 'Bahnschrift' 15
+$ageUnit=New-Control Label $tOverview 140 96 380 26 '';$ageUnit.Font=Get-Face 'Bahnschrift' 15;$ageUnit.AutoEllipsis=$true
 $ageWhen=New-Control Label $tOverview 140 124 640 20 '';$ageWhen.ForeColor=$ui.Muted
 (New-Control Label $tOverview 560 26 120 22 'Mark as old after').ForeColor=$ui.Muted
 $oldDays=New-Control NumericUpDown $tOverview 682 22 52 26;$oldDays.Minimum=1;$oldDays.Maximum=365;$oldDays.BorderStyle='FixedSingle'
 (New-Control Label $tOverview 740 26 50 22 'days').ForeColor=$ui.Muted
 (New-Control Label $tOverview 560 58 120 22 'Computer load').ForeColor=$ui.Muted
 $loadPick=New-Control ComboBox $tOverview 682 54 110 26;$loadPick.DropDownStyle='DropDownList';$loadPick.FlatStyle='Flat';[void]$loadPick.Items.AddRange([object[]]@('Light','Balanced','Strong','Maximum','Custom'))
+# 0 = files deleted from the source stay in the plain copy; N = they move to a dated recovery
+# folder beside it, and only the newest N recovery folders are kept.
+(New-Control Label $tOverview 560 94 120 22 'Keep deleted for').ForeColor=$ui.Muted
+$keepDeleted=New-Control NumericUpDown $tOverview 682 90 52 26;$keepDeleted.Minimum=0;$keepDeleted.Maximum=100;$keepDeleted.BorderStyle='FixedSingle'
+(New-Control Label $tOverview 740 94 60 22 'backups').ForeColor=$ui.Muted
+$keepTip=New-Object Windows.Forms.ToolTip;$keepTip.AutoPopDelay=20000
+$keepTip.SetToolTip($keepDeleted,"0: files you delete stay in the plain copy.`nA number: each backup moves them out of the copy into a dated folder beside it`n(<copy folder>-recovery) and keeps only that many of these folders, the newest.`nOlder ones are deleted from the backup drive.")
 $meter=New-Control Panel $tOverview 24 166 768 6;$meter.BackColor=$ui.Line
 $meterFill=New-Control Panel $meter 0 0 0 6
 $meterNote=New-Control Label $tOverview 24 176 440 20 '';$meterNote.ForeColor=$ui.Muted;$meterNote.Font=$small;$meterNote.AutoEllipsis=$true
@@ -357,7 +364,7 @@ function Update-ProfileList([string]$SelectId) {
 function Update-Details {
  $p=Get-SelectedProfile
  $has=[bool]$p
- foreach($c in @($btnBackup,$btnBackupOne,$btnVerify,$btnOpen,$btnRestore,$btnKeys,$btnAddSource,$btnRemoveSource,$btnSaveModes,$btnAddSub,$btnSpeed,$btnSaveLoad,$oldDays,$removeProfile)){$c.Enabled=$has -and -not $script:current}
+ foreach($c in @($btnBackup,$btnBackupOne,$btnVerify,$btnOpen,$btnRestore,$btnKeys,$btnAddSource,$btnRemoveSource,$btnSaveModes,$btnAddSub,$btnSpeed,$btnSaveLoad,$oldDays,$keepDeleted,$removeProfile)){$c.Enabled=$has -and -not $script:current}
  $btnStop.Enabled=[bool]$script:current
  $ovGrid.Rows.Clear();$runsGrid.Rows.Clear();$srcList.Items.Clear();$modeGrid.Rows.Clear()
  if(-not $p){$ovTitle.Text='No backup drive yet';$ovDrive.Text='Connect a backup drive and choose New profile.';$ageNumber.Text='';$ageUnit.Text='';$ageWhen.Text='';$meterFill.Width=0;$meterNote.Text='';$driveInfo.Text='';$driveFacts.Text='';Update-DriveCheck $null $null;return}
@@ -405,7 +412,7 @@ function Update-Details {
  $driveInfo.Text=$p.Name
  $driveFacts.Text=if($d.Connected){"Drive $($d.Letter):   $($p.DriveModel), $($d.FileSystem), $($d.FreeGB) GB free of $($d.SizeGB) GB"}else{"$($p.DriveModel). Not connected."}
  Update-LoadControls $p
- $script:loadingDays=$true;$oldDays.Value=[decimal]$p.ReminderDays;$script:loadingDays=$false
+ $script:loadingDays=$true;$oldDays.Value=[decimal]$p.ReminderDays;$keepDeleted.Value=[decimal](Get-CenterKeepDeleted $p);$script:loadingDays=$false
  foreach($h in @($history|Where-Object {$_.ProfileId -eq $p.Id}|Sort-Object {[datetime]$_.Finished} -Descending|Select-Object -First 40)){
   $type=switch($h.Kind){'Mirror'{'Plain copy'}'Versioned'{'Versions'}'MirrorCheck'{'Copy check'}'VersionedCheck'{'Versions check'}default{$h.Kind}}
   $copied=if($h.Kind -like '*Check' -and $h.CheckedFiles){'{0:N0} checked' -f $h.CheckedFiles}elseif($null -ne $h.CopiedFiles){'{0:N0} files, {1}' -f $h.CopiedFiles,(Format-Size $h.CopiedBytes)}elseif($h.CheckedFiles){'{0:N0} checked' -f $h.CheckedFiles}else{''}
@@ -799,6 +806,10 @@ $btnSaveLoad.Add_Click({try{
 $oldDays.Add_ValueChanged({try{
  if($script:loadingDays){return};$p=Get-SelectedProfile;if(-not $p){return}
  $p.ReminderDays=[int]$oldDays.Value;Save-CenterProfiles $script:data;Update-ProfileList $p.Id
+}catch{Show-Error $_}})
+$keepDeleted.Add_ValueChanged({try{
+ if($script:loadingDays){return};$p=Get-SelectedProfile;if(-not $p){return}
+ $p|Add-Member -NotePropertyName KeepDeleted -NotePropertyValue ([int]$keepDeleted.Value) -Force;Save-CenterProfiles $script:data
 }catch{Show-Error $_}})
 $form.Add_FormClosing({param($s,$e)
  # Ask about everything first; stop nothing unless the window really closes.

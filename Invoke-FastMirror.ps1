@@ -5,8 +5,8 @@
 # Choices in backup.local.json (see Backup.Selection.psm1), with DefaultMode for anything
 # not listed. Each run compares every file by size and modification time (no content read)
 # and copies only new or changed files. Files that disappeared from the source are not
-# deleted: with -MoveExtras they are moved to a dated recovery folder beside the mirror;
-# otherwise they are only reported. Folders that are no longer selected keep their old copy
+# deleted: with -MoveExtras they are moved to a dated recovery folder beside the mirror, and
+# -KeepRecovery N then deletes all but the newest N recovery folders; otherwise they are only reported. Folders that are no longer selected keep their old copy
 # in the mirror and are listed in the summary. -Verify (default on the first run) re-reads
 # both copies and compares SHA-256 for every selected file; a selected source file missing from
 # the mirror is a difference. A selected folder that is missing or became a link fails the run.
@@ -19,6 +19,9 @@ param(
  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(\\[A-Za-z0-9][A-Za-z0-9._-]{0,79})?$')][string]$Folder='DevDrive-Mirror',
  [ValidateRange(1,64)][int]$Threads=16,
  [switch]$MoveExtras,
+ # With -MoveExtras: keep only this many dated recovery folders (the newest) and delete older
+ # ones from the backup drive. 0 keeps every recovery folder.
+ [ValidateRange(0,100)][int]$KeepRecovery=0,
  [switch]$Verify,
  [switch]$SkipVerify,
  # Compare the mirror with the source without copying anything.
@@ -160,7 +163,11 @@ $extras=@($extras|Sort-Object -Unique|Where-Object {
  $rel -and (Test-BackupModeIncludes (Get-BackupMode $selection $rel) 'Mirror')
 })
 $summary.ExtrasFound=$extras.Count
-if($MoveExtras -and $extras.Count -and -not $VerifyOnly){
+# Files are moved aside only after a copy that could read the source: a run where robocopy failed
+# (exit code 8 or more) may have missed files that still exist, so its extras are only reported.
+$copyFailed=@($summary.Runs|Where-Object {$_.ExitCode -ge 8}).Count -gt 0
+if($MoveExtras -and $copyFailed){$summary.ExtrasNotMovedReason='Some files could not be copied in this run, so nothing was moved aside'}
+if($MoveExtras -and $extras.Count -and -not $VerifyOnly -and -not $copyFailed){
  $stamp=Join-Path $recoveryRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
  foreach($item in $extras){
   if(-not(Test-Path -LiteralPath $item)){continue}
@@ -170,6 +177,17 @@ if($MoveExtras -and $extras.Count -and -not $VerifyOnly){
   Move-Item -LiteralPath $item -Destination $target
  }
  $summary.ExtrasMovedTo=$stamp
+ $summary.ExtrasMoved=$extras.Count
+}
+# Old recovery folders: keep the newest KeepRecovery, delete the rest. Only folders this script
+# names (yyyyMMdd-HHmmss) directly inside the recovery root are touched.
+$summary.RecoveryRemoved=@()
+if($MoveExtras -and $KeepRecovery -gt 0 -and -not $VerifyOnly -and (Test-Path -LiteralPath $recoveryRoot -PathType Container)){
+ $dated=@(Get-ChildItem -LiteralPath $recoveryRoot -Directory -Force|Where-Object {$_.Name -match '^\d{8}-\d{6}$' -and -not($_.Attributes -band [IO.FileAttributes]::ReparsePoint)}|Sort-Object Name -Descending)
+ foreach($old in @($dated|Select-Object -Skip $KeepRecovery)){
+  Remove-Item -LiteralPath $old.FullName -Recurse -Force
+  $summary.RecoveryRemoved+=$old.Name
+ }
 }
 
 # Old copies in the mirror of folders that are no longer selected. They are kept, never deleted.

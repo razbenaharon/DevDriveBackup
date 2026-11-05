@@ -96,6 +96,12 @@ try{
  $kinds=Get-CenterSourceKinds $s
  Assert ($kinds.Mirror -and -not $kinds.Versioned) 'changing folder modes changes which tools run'
  Assert (@(Get-CenterSteps $p @() 'Backup').Count -eq 1) 'only the plain copy runs after the change'
+ $plain=@((Get-CenterSteps $p @() 'Backup')[0].Arguments)
+ Assert ((Get-CenterKeepDeleted $p) -eq 0 -and '-MoveExtras' -notin $plain) 'by default deleted files stay in the plain copy'
+ $p|Add-Member -NotePropertyName KeepDeleted -NotePropertyValue 5 -Force
+ $plain=@((Get-CenterSteps $p @() 'Backup')[0].Arguments);$checkArgs=@((Get-CenterSteps $p @() 'Verify')[0].Arguments)
+ Assert ('-MoveExtras' -in $plain -and $plain[[array]::IndexOf($plain,'-KeepRecovery')+1] -eq '5' -and '-MoveExtras' -notin $checkArgs) 'Keep deleted moves deleted files aside on a backup, never on a content check'
+ $p.KeepDeleted=0
 
  Remove-CenterSource $data $p.Id $s.Id
  Assert (@((Get-CenterProfile $data $p.Id).Sources).Count -eq 0 -and (Test-Path -LiteralPath $s.ConfigPath)) 'removing a source keeps its job file'

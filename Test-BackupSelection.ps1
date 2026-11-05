@@ -105,6 +105,22 @@ try{
  Assert ((@($second.NotSelectedButInMirror|Sort-Object) -join '|') -eq 'mirrorOnly|unlisted' -and (InMirror 'mirrorOnly\b.txt') -and (InMirror 'unlisted\g.txt')) 'old copies of folders no longer selected are kept and reported'
  Assert ($second.Verify.Differences -eq 0 -and $second.Verify.FilesMatched -eq 6) 'verification covers only selected files'
 
+ # Keep only the newest recovery folders; anything else in the recovery root is left alone.
+ $recoveryRoot=$mirror+'-recovery'
+ New-Item -ItemType Directory -Path (Join-Path $recoveryRoot 'my-notes') -Force|Out-Null
+ $last=$null
+ foreach($i in 1..3){
+  [IO.File]::WriteAllText((Join-Path $source "both\temp$i.txt"),"round $i")
+  [void](Mirror @{SkipVerify=$true})
+  Remove-Item -LiteralPath (Join-Path $source "both\temp$i.txt")
+  Start-Sleep -Milliseconds 1100   # recovery folders are named to the second
+  $last=Mirror @{SkipVerify=$true;MoveExtras=$true;KeepRecovery=2}
+ }
+ $dated=@(Get-ChildItem -LiteralPath $recoveryRoot -Directory|Where-Object Name -match '^\d{8}-\d{6}$'|Sort-Object Name)
+ Assert ($dated.Count -eq 2 -and (Test-Path -LiteralPath (Join-Path $dated[1].FullName 'both\temp3.txt')) -and (Test-Path -LiteralPath (Join-Path $dated[0].FullName 'both\temp2.txt'))) 'only the newest recovery folders are kept'
+ Assert ((Test-Path -LiteralPath (Join-Path $recoveryRoot 'my-notes')) -and @($last.RecoveryRemoved).Count -eq 1) 'pruning removes only dated recovery folders'
+ Assert (-not(InMirror 'both\temp3.txt') -and (InMirror 'both\a.txt')) 'the plain copy holds only what the source still has'
+
  # --- Versioned backup --------------------------------------------------------------------
  $runDir=Join-Path $private ('backup-'+[guid]::NewGuid().ToString('N'))
  & (Join-Path $PSScriptRoot 'Backup-Worker.ps1') -ConfigPath $configPath -Action Backup -RunDirectory $runDir

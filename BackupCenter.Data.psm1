@@ -301,6 +301,12 @@ function Get-CenterFreshness($Profile,$History,[datetime]$Now=(Get-Date)) {
 }
 
 # --- Running ------------------------------------------------------------------------------
+function Get-CenterKeepDeleted($Profile) {
+ # KeepDeleted N (1-100): files deleted from the source are moved out of the plain copy into a dated
+ # recovery folder, and only the newest N recovery folders are kept. 0 or missing: they stay in the copy.
+ if(-not $Profile.PSObject.Properties['KeepDeleted'] -or $null -eq $Profile.KeepDeleted){return 0}
+ [math]::Max(0,[math]::Min(100,[int]$Profile.KeepDeleted))
+}
 function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup','Verify')][string]$Purpose='Backup') {
  # The ordered list of tool runs for one press of Back up / Verify.
  $drive=Get-CenterDrive $Profile.DestinationVolumeId
@@ -312,6 +318,7 @@ function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup'
   if($kinds.Mirror){
    $a=@('-NoProfile','-File',(Join-Path $script:ToolRoot 'Invoke-FastMirror.ps1'),'-ConfigPath',$s.ConfigPath,'-DestinationDrive',$drive.Letter,'-Folder',$s.MirrorFolder,'-Threads',[string]$load.CopyThreads)
    if($Purpose -eq 'Verify'){$a+='-VerifyOnly'}
+   else{$keep=Get-CenterKeepDeleted $Profile;if($keep -gt 0){$a+=@('-MoveExtras','-KeepRecovery',[string]$keep)}}
    [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Mirror';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$null;Priority=$load.Priority}
   }
   if($kinds.Versioned){
@@ -381,7 +388,7 @@ function Get-CenterStaleProfiles([datetime]$Now=(Get-Date)) {
   if($f.State -in @('Stale','Never')){[pscustomobject]@{Profile=$p;Freshness=$f}}
  }
 }
-Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterDrive,Get-CenterCandidateDrives,
+Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterDrive,Get-CenterCandidateDrives,
  New-CenterProfile,Remove-CenterProfile,Add-CenterSource,Remove-CenterSource,Read-CenterJob,Save-CenterJob,Get-CenterSourceKinds,Sync-CenterJob,
  Add-CenterHistory,Get-CenterHistory,Get-LastSuccess,Get-FreshnessState,Format-CenterAge,Get-CenterFreshness,
  Get-CenterSteps,Start-CenterStep,Complete-CenterStep,Get-CenterStaleProfiles
