@@ -42,6 +42,12 @@ jobs:
       - name: Verify the AI session activity rule
         shell: pwsh
         run: ./Test-BackupActivity.ps1
+      - name: Verify colour themes and contrast
+        shell: pwsh
+        run: ./Test-BackupTheme.ps1
+      - name: Verify the clean-up of old versions
+        shell: pwsh
+        run: ./Test-BackupRetention.ps1
       - name: Verify history selection safeguards
         shell: pwsh
         run: ./Test-BackupHistory.ps1

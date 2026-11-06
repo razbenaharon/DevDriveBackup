@@ -64,10 +64,10 @@ function Set-CenterRunPriority($Process,[string]$Priority) {
 function Set-CenterPaths([string]$Root) {
  # Root '' = the real locations; tests pass a disposable folder.
  if($Root){
-  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $Root 'profiles.local.json');Jobs=(Join-Path $Root 'jobs');History=(Join-Path $Root 'history.jsonl');Keys=(Join-Path $Root 'keys');Documents=(Join-Path $Root 'documents');DriveCheck=(Join-Path $Root 'drive-check')}
+  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $Root 'profiles.local.json');Jobs=(Join-Path $Root 'jobs');History=(Join-Path $Root 'history.jsonl');Keys=(Join-Path $Root 'keys');Documents=(Join-Path $Root 'documents');DriveCheck=(Join-Path $Root 'drive-check');Appearance=(Join-Path $Root 'appearance.json')}
  }else{
   $app=Join-Path $env:LOCALAPPDATA 'DevDriveMirror'
-  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $script:ToolRoot 'profiles.local.json');Jobs=(Join-Path $script:ToolRoot 'jobs');History=(Join-Path $app 'center\history.jsonl');Keys=$app;Documents=(Join-Path $env:USERPROFILE 'Backup Center recovery keys');DriveCheck=(Join-Path $app 'drive-check')}  # local, not a synced Documents folder
+  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $script:ToolRoot 'profiles.local.json');Jobs=(Join-Path $script:ToolRoot 'jobs');History=(Join-Path $app 'center\history.jsonl');Keys=$app;Documents=(Join-Path $env:USERPROFILE 'Backup Center recovery keys');DriveCheck=(Join-Path $app 'drive-check');Appearance=(Join-Path $app 'center\appearance.json')}  # local, not a synced Documents folder
  }
  $script:Paths
 }
@@ -100,9 +100,18 @@ function Get-SafeName([string]$Text) {
 }
 function New-ShortId {[guid]::NewGuid().ToString('N').Substring(0,8)}
 
+$script:VolumeCache=$null
+function Get-CenterVolumes {
+ # Listing the volumes takes about a second; one refresh of the window asks several times, so the list
+ # is reused for 3 seconds. Plugging a drive in or out shows up on the next refresh.
+ if(-not $script:VolumeCache -or ((Get-Date)-$script:VolumeCache.At).TotalSeconds -gt 3){
+  $script:VolumeCache=[pscustomobject]@{At=Get-Date;List=@(Get-Volume -ErrorAction SilentlyContinue)}
+ }
+ $script:VolumeCache.List
+}
 function Get-CenterDrive([string]$VolumeId) {
  # The drive of a profile, or Connected=$false when it is not plugged in.
- $v=@(Get-Volume -ErrorAction SilentlyContinue|Where-Object {$_.UniqueId -eq $VolumeId -and $_.DriveLetter})
+ $v=@(Get-CenterVolumes|Where-Object {$_.UniqueId -eq $VolumeId -and $_.DriveLetter})
  if($v.Count -ne 1){return [pscustomobject]@{Connected=$false;Letter=$null;Label=$null;FileSystem=$null;SizeGB=$null;FreeGB=$null}}
  [pscustomobject]@{Connected=$true;Letter=[string]$v[0].DriveLetter;Label=$v[0].FileSystemLabel;FileSystem=$v[0].FileSystem;SizeGB=[math]::Round($v[0].Size/1GB,1);FreeGB=[math]::Round($v[0].SizeRemaining/1GB,1)}
 }
@@ -354,6 +363,19 @@ function Get-CenterKeepDeleted($Profile) {
  if(-not $Profile.PSObject.Properties['KeepDeleted'] -or $null -eq $Profile.KeepDeleted){return 0}
  [math]::Max(0,[math]::Min(100,[int]$Profile.KeepDeleted))
 }
+function Get-CenterVersionRetention($Profile) {
+ # VersionRetention {Days,Weeks,Months}: after each versioned backup keep one version per day for Days
+ # days, per week for Weeks weeks and per month for Months months; older ones are deleted. Missing or
+ # all zero: every version is kept until deleted by hand.
+ $r=if($Profile.PSObject.Properties['VersionRetention']){$Profile.VersionRetention}else{$null}
+ $get={param($n,$max)if($r -and $r.PSObject.Properties[$n] -and $null -ne $r.$n){[math]::Max(0,[math]::Min($max,[int]$r.$n))}else{0}}
+ $d=& $get 'Days' 3650;$w=& $get 'Weeks' 520;$m=& $get 'Months' 240
+ [pscustomobject]@{Enabled=($d+$w+$m -gt 0);Days=$d;Weeks=$w;Months=$m}
+}
+function Format-CenterVersionRetention($Retention) {
+ if(-not $Retention.Enabled){return 'every version'}
+ @(if($Retention.Days){"$($Retention.Days) d"};if($Retention.Weeks){"$($Retention.Weeks) w"};if($Retention.Months){"$($Retention.Months) m"}) -join ' / '
+}
 function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup','Verify')][string]$Purpose='Backup') {
  # The ordered list of tool runs for one press of Back up / Verify.
  $drive=Get-CenterDrive $Profile.DestinationVolumeId
@@ -372,6 +394,8 @@ function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup'
    $run=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\runs\center-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+(New-ShortId))
    $a=@('-NoProfile','-File',(Join-Path $script:ToolRoot 'Backup-Worker.ps1'),'-ConfigPath',$s.ConfigPath,'-RunDirectory',$run)
    $a+=if($Purpose -eq 'Verify'){@('-Action','Check','-ReadAllData')}else{@('-Action','Backup')}
+   $keep=Get-CenterVersionRetention $Profile
+   if($Purpose -eq 'Backup' -and $keep.Enabled){$a+=@('-KeepDays',[string]$keep.Days,'-KeepWeeks',[string]$keep.Weeks,'-KeepMonths',[string]$keep.Months)}
    [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Versioned';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$run;Priority=$load.Priority}
   }
  }
@@ -395,7 +419,7 @@ function Complete-CenterStep($Running,[string]$ProfileId) {
  if($Running.OutputPath){[IO.File]::WriteAllText($Running.OutputPath,$stdout+"`n--- errors ---`n"+$stderr)}
  $s=$Running.Step
  $e=[ordered]@{ProfileId=$ProfileId;SourceId=$s.SourceId;Label=$s.Label;Kind=$s.Kind;Purpose=$s.Purpose;Started=$Running.Started.ToString('o');Finished=(Get-Date).ToString('o')
-  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Success=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;CheckedFiles=$null;Details=$null}
+  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Success=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;CheckedFiles=$null;Details=$null;Note=$null}
  try{
   if($s.Kind -eq 'Mirror'){
    $start=$stdout.IndexOf('{');if($start -lt 0){throw ($stderr.Trim() -replace '\s+',' ')}
@@ -418,6 +442,11 @@ function Complete-CenterStep($Running,[string]$ProfileId) {
    $e.Details=$s.RunDirectory
    if($r.State -eq 'Completed'){$e.Success=$true;if($r.Progress -and $r.Progress.PSObject.Properties['files_new']){$e.CopiedFiles=[long]$r.Progress.files_new+[long]$r.Progress.files_changed;$e.CopiedBytes=[long]$r.Progress.data_added}}
    else{$e.Error=[string]$r.Error}
+   # The automatic clean-up of old versions: a note, never a failed backup.
+   if($r.PSObject.Properties['Retention'] -and $r.Retention){
+    $e.Note=if($r.Retention.PSObject.Properties['Error'] -and $r.Retention.Error){'Backed up, but old versions were not cleaned up: '+$r.Retention.Error}
+     elseif($r.Retention.Removed -gt 0){"Deleted $($r.Retention.Removed) old versions; $($r.Retention.Kept) kept."}else{"No old versions to delete; $($r.Retention.Kept) kept."}
+   }
   }
  }catch{$e.Error=$_.Exception.Message}
  if(-not $e.Success -and -not $e.Error){$e.Error="The tool ended with exit code $($p.ExitCode)"}
@@ -435,7 +464,7 @@ function Get-CenterStaleProfiles([datetime]$Now=(Get-Date)) {
   if($f.State -in @('Stale','Never')){[pscustomobject]@{Profile=$p;Freshness=$f}}
  }
 }
-Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterDrive,Get-CenterCandidateDrives,
+Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterVersionRetention,Format-CenterVersionRetention,Get-CenterDrive,Get-CenterCandidateDrives,
  New-CenterProfile,Remove-CenterProfile,Add-CenterSource,Remove-CenterSource,Read-CenterJob,Save-CenterJob,Get-CenterSourceKinds,Sync-CenterJob,
  Add-CenterHistory,Get-CenterHistory,Get-LastSuccess,Get-FreshnessState,Format-CenterAge,Get-CenterFreshness,
  Get-CenterSteps,Start-CenterStep,Complete-CenterStep,Get-CenterStaleProfiles,Get-CenterAgentActivity,Get-CenterSessionTitle

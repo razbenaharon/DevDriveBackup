@@ -19,6 +19,8 @@ Most backup tools either copy everything slowly or hide your files in a format o
 | **Per-folder choice** | Each folder is *Plain copy*, *Versions*, *Both* or *Skip*. A folder inside a skipped folder can still be backed up. |
 | **Proof, not hope** | *Check backup content* re-reads both sides of every file and compares SHA-256 hashes (plain copy) or verifies all repository data (versions). |
 | **Nothing deleted by surprise** | Files you delete from the source stay in the copy, or, with *Keep deleted for N backups*, move to a dated recovery folder beside it; only the newest N recovery folders are kept. |
+| **Keep versions** | Optional clean-up after each versioned backup: one version a day for *N* days, a week for *N* weeks and a month for *N* months (restic `--keep-within-daily/weekly/monthly`, counted back from the newest version so a long pause never empties the history). Dry run first; the newest version, the one just made and versions from other tools are never deleted; deleted versions free their space and the repository is checked again. |
+| **Themes and size** | The *Look* page offers Light, Dark, Sand, Ocean and High contrast, each checked for WCAG 2.2 contrast, plus *Custom*: pick four colours and the rest is derived so text stays readable; the page reports any pair that is hard to read. Dark themes darken the title bar, scroll bars and drop-downs too. A larger or maximised window scales everything, text included, in proportion. |
 | **Waits for AI sessions** | Before a backup it looks for Claude Code or Codex sessions that worked in the last 10 minutes (their conversation files change while they work). If there are any, it names them and offers to wait and start by itself once all have been quiet for 10 minutes. |
 | **Load control for your hardware** | Detects your processor and memory and offers Light, Balanced, Strong and Maximum levels, or your own threads, memory limit, parallel files and priority. You can lower the load while a backup runs. |
 | **Several backup drives, each with its own content** | One profile per drive, recognised by the drive itself rather than its letter. |
@@ -93,7 +95,7 @@ The plain copy does not; it is an ordinary file-for-file copy. Versions are comp
 No. Plain copies compare size and modification time and copy only what changed. *Check backup content* is the separate, slower step that reads everything and compares hashes.
 
 **What happens to files I delete?**
-They stay in the plain copy. Versions keep them in older snapshots. Nothing on the backup drive is deleted automatically.
+By default they stay in the plain copy, and versions keep them in older snapshots. Two settings on the overview clean up instead: **Keep deleted for N backups** moves them out of the plain copy into dated recovery folders and keeps the newest N; **Keep versions** keeps one version a day, a week and a month for as long as you choose (for example 7 days, 4 weeks, 3 months) and deletes older versions after each backup.
 
 **Will it slow down my computer?**
 Choose the load. Light uses about a sixth of your processor threads at below-normal priority so your programs come first; you can switch levels during a backup.
@@ -121,7 +123,7 @@ pwsh -NoProfile -File ./Test-BackupSystem.ps1 -DestinationDrive Y      # version
 pwsh -NoProfile -File ./Test-BackupSecurity.ps1 -DestinationDrive Y    # password change and recovery keys
 ```
 
-`Test-BackupCopyRules.ps1`, `Test-BackupActivity.ps1`, `Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
+`Test-BackupCopyRules.ps1`, `Test-BackupActivity.ps1`, `Test-BackupTheme.ps1`, `Test-BackupRetention.ps1` (its real restic part runs where restic is installed), `Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
 
 ### Keeping your own details out of a fork
 

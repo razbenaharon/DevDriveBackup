@@ -66,6 +66,13 @@ try{
  Assert ((Format-CenterAge $now.AddHours(-5) $now) -eq '5 hours ago' -and (Format-CenterAge $now.AddDays(-3) $now) -eq '3 days ago') 'ages read naturally'
 
  Sync-CenterJob $p $s
+ $versionArgs={param($Purpose)@((@(Get-CenterSteps $p @() $Purpose)|Where-Object {$_.Kind -eq 'Versioned'})[0].Arguments)}
+ Assert (-not (Get-CenterVersionRetention $p).Enabled -and '-KeepDays' -notin (& $versionArgs 'Backup')) 'by default every version is kept'
+ $p|Add-Member -NotePropertyName VersionRetention -NotePropertyValue ([pscustomobject]@{Days=7;Weeks=4;Months=3}) -Force
+ $va=& $versionArgs 'Backup'
+ Assert ($va[[array]::IndexOf($va,'-KeepDays')+1] -eq '7' -and $va[[array]::IndexOf($va,'-KeepWeeks')+1] -eq '4' -and $va[[array]::IndexOf($va,'-KeepMonths')+1] -eq '3' -and '-KeepDays' -notin (& $versionArgs 'Verify')) 'Keep versions passes 7 days / 4 weeks / 3 months to a versioned backup, never to a check'
+ Assert ((Format-CenterVersionRetention (Get-CenterVersionRetention $p)) -eq '7 d / 4 w / 3 m') 'the overview shows the rule briefly'
+ $p.VersionRetention=[pscustomobject]@{Days=0;Weeks=0;Months=0}
  function Invoke-All([string]$Purpose){
   $results=@()
   foreach($step in @(Get-CenterSteps $p @() $Purpose)){

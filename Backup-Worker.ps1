@@ -8,7 +8,12 @@ param(
  [string[]]$RestoreInclude=@(),
  [switch]$ReadAllData,
  [switch]$ForceRead,
- [string]$RequestPath
+ [string]$RequestPath,
+ # Backup only: afterwards keep one version per day / week / month for this long and delete the rest
+ # (all 0: keep every version).
+ [ValidateRange(0,3650)][int]$KeepDays=0,
+ [ValidateRange(0,520)][int]$KeepWeeks=0,
+ [ValidateRange(0,240)][int]$KeepMonths=0
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -30,7 +35,7 @@ function Assert-PlainAncestors([string]$Path) {
 function Run-Engine([string[]]$EngineArguments,[string]$Stage,[string]$InputSecret) {
  $script:status.State=$Stage;Save-Status
  $psi=[Diagnostics.ProcessStartInfo]::new($script:engine);$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
- $connections=if($Stage -eq 'DeletingHistory' -and $EngineArguments -contains '--prune'){[math]::Max(2,$script:backendConnections)}else{$script:backendConnections}
+ $connections=if($Stage -in 'DeletingHistory','DeletingOldVersions' -and $EngineArguments -contains '--prune'){[math]::Max(2,$script:backendConnections)}else{$script:backendConnections}
  foreach($a in @('-r',$script:repository,'--json','--cache-dir',$script:cache,'--pack-size',[string]$script:config.PackMiB,'--compression','auto','--limit-upload',[string][int]($script:config.RateMBps*1000000/1024),'--limit-download',[string][int]($script:config.RateMBps*1000000/1024),'-o',('local.connections='+$connections))+$EngineArguments){[void]$psi.ArgumentList.Add($a)}
  $psi.Environment['RESTIC_PASSWORD']=$script:password
  foreach($name in @('RESTIC_PASSWORD_FILE','RESTIC_PASSWORD_COMMAND','RESTIC_REPOSITORY_FILE','RESTIC_KEY_HINT')){[void]$psi.Environment.Remove($name)}
@@ -244,7 +249,25 @@ try {
  foreach($exclude in @($script:config.Exclude)+$selectionExcludes+$privateExcludes){if($exclude){$base+=@('--iexclude',[string]$exclude)}}
  switch($Action){
   {$_ -in @('ExportKey','ChangePassword','ResumePasswordChange')} {Invoke-KeyManagement}
-  'Backup' {Run-Engine ($base+@('--')+$sources) 'BackingUp';Run-Engine @('check') 'CheckingStructure'}
+  'Backup' {
+   Run-Engine ($base+@('--')+$sources) 'BackingUp';Run-Engine @('check') 'CheckingStructure'
+   if($KeepDays+$KeepWeeks+$KeepMonths -gt 0){
+    # The backup itself has succeeded and been checked. A failed clean-up is reported, not a failed backup.
+    $new=$script:status.Snapshot
+    try{
+     Run-Engine (Get-RetentionArguments $KeepDays $KeepWeeks $KeepMonths) 'PlanningCleanUp'
+     $plan=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'PlanningCleanUp.jsonl') -Raw|ConvertFrom-Json)
+     Run-Engine @('snapshots','--tag','devdrive') 'ReadingHistory'
+     $available=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistory.jsonl') -Raw|ConvertFrom-Json)
+     $remove=@(Get-RetentionRemovals $plan $new $available)
+     [IO.File]::WriteAllText((Join-Path $RunDirectory 'clean-up-plan.json'),(ConvertTo-Json @($remove) -Depth 8))
+     if($remove.Count){Run-Engine (@('forget')+@($remove|ForEach-Object {$_.id})+'--prune') 'DeletingOldVersions';Run-Engine @('check') 'CheckingStructure'}
+     $script:status.Retention=[ordered]@{Days=$KeepDays;Weeks=$KeepWeeks;Months=$KeepMonths;Removed=$remove.Count;Kept=($available.Count-$remove.Count)}
+    }catch{
+     $script:status.Retention=[ordered]@{Days=$KeepDays;Weeks=$KeepWeeks;Months=$KeepMonths;Removed=0;Error=$_.Exception.Message}
+    }
+   }
+  }
   'Preview' {Run-Engine ($base+@('--dry-run','--')+$sources) 'Previewing'}
   'Check' {$args=@('check');if($ReadAllData){$args+='--read-data'};Run-Engine $args 'Verifying'}
   'Snapshots' {Run-Engine @('snapshots') 'ListingSnapshots'}

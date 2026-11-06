@@ -6,6 +6,10 @@ param(
  [string]$DataRoot,          # tests: keep profiles, jobs and history in this folder
  [string]$RenderPreview,     # tests: save a picture of the window and close it
  [int]$PreviewTab=0,
+ [string]$PreviewTheme,      # tests: show this theme without saving it
+ [int]$PreviewWidth=0,       # tests: open the window at this inner size (zoomed)
+ [int]$PreviewHeight=0,
+ [ValidateSet('','KeepVersions')][string]$PreviewDialog='',  # tests: open this dialog at start; nothing is saved
  [int]$AutoCloseSeconds=0    # tests: run normally, then close after this many seconds
 )
 $ErrorActionPreference='Stop'
@@ -13,6 +17,7 @@ Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Data.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Selection.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Status.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.DriveCheck.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Theme.psm1') -Force
 [void](Set-CenterPaths $DataRoot)
 [Globalization.CultureInfo]::CurrentCulture=[Globalization.CultureInfo]::GetCultureInfo('en-GB')
 [Globalization.CultureInfo]::CurrentUICulture=[Globalization.CultureInfo]::GetCultureInfo('en-US')
@@ -31,9 +36,9 @@ $script:errorLog=Join-Path $env:LOCALAPPDATA 'DevDriveMirror\center\ui-errors.lo
 # --- Texts ---------------------------------------------------------------------------------
 $Help=[ordered]@{
  Modes=@'
-Plain copy (mirror): an ordinary, uncompressed copy of the files on the backup drive. You can open and use the files directly from the drive, on any computer. Each run copies only files that are new or changed (compared by size and time). Files you delete here are not deleted from the copy; they stay there until you clean them up.
+Plain copy (mirror): an ordinary, uncompressed copy of the files on the backup drive. You can open and use the files directly from the drive, on any computer. Each run copies only files that are new or changed (compared by size and time). Files you delete here stay in the copy, unless "Keep deleted for" on the overview is above 0: then each backup moves them into a dated recovery folder beside the copy and keeps only that many of these folders.
 
-Versions (history): encrypted, compressed snapshots. Every run keeps a new version, so you can go back to how a file looked on an earlier date. Opening files needs this window (Versions and restore) or the restic program with the recovery key. Identical data is stored once, so many versions take little extra space.
+Versions (history): encrypted, compressed snapshots. Every run keeps a new version, so you can go back to how a file looked on an earlier date. Opening files needs this window (Versions and restore) or the restic program with the recovery key. Identical data is stored once, so many versions take little extra space. Every version is kept, unless "Keep versions" on the overview is set: then each backup keeps one version a day, a week and a month for as long as you choose, counted back from the newest version, and deletes older ones.
 
 Both: a plain copy and versions. The safest choice for important work.
 
@@ -96,19 +101,41 @@ Keys: versions are encrypted. The first versioned backup of a source creates a r
 
 Never copied: rebuildable folders (node_modules, virtual environments, caches), shortcuts (junctions and links; their real folders are copied where they really are), the recycle bin and Windows system folders, and the runner folder that holds credentials.
 '@
+ Look=@'
+Themes: Light, Dark, Sand, Ocean and High contrast are checked so every text stays readable (at least 4.5:1, the WCAG minimum for normal text). Dark themes also darken the window's title bar and scroll bars.
+
+Custom: pick the window background, the panels, the text and the main buttons. Secondary text, lines and selection are worked out from them. If a pair is hard to read, this page says which one and by how much.
+
+Size: make the window larger or maximise it and everything grows in the same proportion, text included. The smallest size is the original one.
+'@
 }
 
 # --- Window --------------------------------------------------------------------------------
 # Look: cool archival paper, white work surfaces, slate ink. Bahnschrift (an industrial,
 # label-like face shipped with Windows) for names and numbers; Segoe UI for reading.
 # One loud element: the age of the last complete backup on the overview.
-$ui=@{
- Paper=[Drawing.Color]::FromArgb(236,240,239);Surface=[Drawing.Color]::White;Ink=[Drawing.Color]::FromArgb(31,42,46)
- Muted=[Drawing.Color]::FromArgb(94,107,112);Line=[Drawing.Color]::FromArgb(206,214,216);Select=[Drawing.Color]::FromArgb(220,229,233)
+# Colours come from the chosen theme (BackupCenter.Theme.psm1, "Look" page). These tables are filled
+# in place, so every handler that reads them sees a new theme at once.
+$uiRoles='Paper','Surface','Ink','Muted','Line','Select','Accent','OnAccent','AccentHover'
+$ui=@{};$stateColor=@{};$stateInk=@{}
+function ConvertTo-UiColor([string]$Hex){$c=ConvertFrom-CenterHex $Hex;[Drawing.Color]::FromArgb($c[0],$c[1],$c[2])}
+function Set-UiPalette($Theme){
+ foreach($r in $uiRoles){$ui[$r]=ConvertTo-UiColor $Theme[$r]}
+ $ui.Dark=[bool]$Theme.Dark;$ui.Name=[string]$Theme.Name
+ # Stripes and the large age number use Color; small status text uses Ink, readable (4.5:1) on panels and selection.
+ $s=Get-CenterStateColors ([bool]$Theme.Dark)
+ foreach($k in @($s.Color.Keys)){$stateColor[$k]=ConvertTo-UiColor $s.Color[$k];$stateInk[$k]=ConvertTo-UiColor $s.Ink[$k]}
+ $stateColor['Nothing selected']=$stateColor.Never;$stateInk['Nothing selected']=$stateInk.Never
 }
-$stateColor=@{Fresh=[Drawing.Color]::FromArgb(46,139,87);OK=[Drawing.Color]::FromArgb(92,124,143);Stale=[Drawing.Color]::FromArgb(199,130,42);Never=[Drawing.Color]::FromArgb(154,163,168);'Nothing selected'=[Drawing.Color]::FromArgb(154,163,168);Error=[Drawing.Color]::FromArgb(178,34,34)}
-# The same states as small text: darker, so they stay readable (4.5:1) on white, paper and selection.
-$stateInk=@{Fresh=[Drawing.Color]::FromArgb(30,110,66);OK=[Drawing.Color]::FromArgb(66,94,110);Stale=[Drawing.Color]::FromArgb(138,82,10);Never=[Drawing.Color]::FromArgb(90,100,105);'Nothing selected'=[Drawing.Color]::FromArgb(90,100,105);Error=[Drawing.Color]::FromArgb(178,34,34)}
+$script:appearance=Read-CenterAppearance (Get-CenterPaths).Appearance
+if($PreviewTheme){$script:appearance.Theme=$PreviewTheme}
+function Get-ChosenTheme {try{Get-CenterTheme $script:appearance.Theme $script:appearance.Custom}catch{Get-CenterTheme 'Light'}}
+function Set-SystemColorMode {
+ # .NET 9+ draws its own parts (arrows of number boxes, drop-down buttons, dialogs) dark too.
+ try{[Windows.Forms.Application]::SetColorMode($(if($ui.Dark){'Dark'}else{'Classic'}))}catch{}
+}
+Set-UiPalette (Get-ChosenTheme)
+Set-SystemColorMode
 function Get-Face([string]$Name,[double]$Size,[Drawing.FontStyle]$Style=[Drawing.FontStyle]::Regular){
  $f=[Drawing.Font]::new($Name,[single]$Size,$Style);if($f.Name -ne $Name){$f=[Drawing.Font]::new('Segoe UI',[single]$Size,$Style)};$f
 }
@@ -116,6 +143,8 @@ $font=Get-Face 'Segoe UI' 9.75
 $small=Get-Face 'Segoe UI' 9
 $bold=Get-Face 'Bahnschrift SemiBold' 11.5
 $labelFace=Get-Face 'Bahnschrift' 10
+# Dialogs keep the unzoomed font; the main window's fonts grow with it (see "Zoom" below).
+$dialogFont=$font
 $form=[Windows.Forms.Form]::new();$form.Text='Backup Center';$form.ClientSize=[Drawing.Size]::new(1200,800);$form.StartPosition='CenterScreen';$form.Font=$font;$form.MinimumSize=[Drawing.Size]::new(1216,839);$form.BackColor=$ui.Paper;$form.ForeColor=$ui.Ink
 $iconFile=Join-Path $PSScriptRoot 'BackupCenter.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
 function New-Control([string]$Type,$Parent,[int]$X,[int]$Y,[int]$W,[int]$H,[string]$Text=''){
@@ -128,15 +157,28 @@ function New-Note($Parent,[int]$X,[int]$Y,[int]$W,[int]$H,[string]$Text){
 }
 function Set-Button($b,[switch]$Primary){
  $b.FlatStyle='Flat';$b.Cursor='Hand';$b.FlatAppearance.BorderSize=1
- if($Primary){$b.BackColor=$ui.Ink;$b.ForeColor=[Drawing.Color]::White;$b.FlatAppearance.BorderColor=$ui.Ink;$b.FlatAppearance.MouseOverBackColor=[Drawing.Color]::FromArgb(55,70,76);$b.Font=Get-Face 'Segoe UI Semibold' 9.75}
- else{$b.BackColor=$ui.Surface;$b.ForeColor=$ui.Ink;$b.FlatAppearance.BorderColor=$ui.Line;$b.FlatAppearance.MouseOverBackColor=$ui.Select}
- # A disabled dark button turns light: Windows draws disabled text grey, unreadable on the dark fill.
+ if($Primary){$b.Font=Get-Face 'Segoe UI Semibold' 9.75}
  $b.Tag=if($Primary){'Primary'}else{''}
- $b.Add_EnabledChanged({param($s,$e)
-  if($s.Tag -eq 'Primary'){$s.BackColor=if($s.Enabled){$ui.Ink}else{$ui.Line};$s.FlatAppearance.BorderColor=$s.BackColor}
-  $s.ForeColor=if($s.Enabled){if($s.Tag -eq 'Primary'){[Drawing.Color]::White}else{$ui.Ink}}else{$ui.Muted}
+ Set-ButtonColors $b
+ $b.Add_EnabledChanged({param($s,$e)Set-ButtonColors $s})
+ # Windows draws the text of a disabled flat button in its own grey, which disappears on dark themes.
+ $b.Add_Paint({param($s,$e)
+  if($s.Enabled){return}
+  $e.Graphics.Clear($s.BackColor);$r=$s.ClientRectangle
+  $e.Graphics.DrawRectangle([Drawing.Pen]::new($ui.Line),0,0,$r.Width-1,$r.Height-1)
+  [Windows.Forms.TextRenderer]::DrawText($e.Graphics,$s.Text,$s.Font,$r,$ui.Muted,[Windows.Forms.TextFormatFlags]'HorizontalCenter,VerticalCenter,SingleLine,EndEllipsis')
  })
  $b
+}
+function Set-ButtonColors($b){
+ # A disabled main button turns light: Windows draws disabled text grey, unreadable on a strong fill.
+ if($b.Tag -eq 'Primary'){
+  $b.BackColor=if($b.Enabled){$ui.Accent}else{$ui.Line};$b.FlatAppearance.BorderColor=$b.BackColor;$b.FlatAppearance.MouseOverBackColor=$ui.AccentHover
+  $b.ForeColor=if($b.Enabled){$ui.OnAccent}else{$ui.Muted}
+ }else{
+  $b.BackColor=$ui.Surface;$b.FlatAppearance.BorderColor=$ui.Line;$b.FlatAppearance.MouseOverBackColor=$ui.Select
+  $b.ForeColor=if($b.Enabled){$ui.Ink}else{$ui.Muted}
+ }
 }
 function New-Button($Parent,[int]$X,[int]$Y,[int]$W,[int]$H,[string]$Text,[switch]$Primary){Set-Button (New-Control Button $Parent $X $Y $W $H $Text) -Primary:$Primary}
 function New-Link($Parent,[int]$X,[int]$Y,[int]$W,[string]$Text){
@@ -146,7 +188,7 @@ function Set-Grid($g){
  $g.BorderStyle='None';$g.BackgroundColor=$ui.Surface;$g.GridColor=$ui.Line;$g.CellBorderStyle='SingleHorizontal';$g.RowHeadersVisible=$false;$g.AllowUserToAddRows=$false;$g.AllowUserToResizeRows=$false
  $g.EnableHeadersVisualStyles=$false;$g.ColumnHeadersBorderStyle='None';$g.ColumnHeadersHeight=34;$g.ColumnHeadersHeightSizeMode='DisableResizing'
  $g.ColumnHeadersDefaultCellStyle.BackColor=$ui.Surface;$g.ColumnHeadersDefaultCellStyle.ForeColor=$ui.Muted;$g.ColumnHeadersDefaultCellStyle.Font=$small;$g.ColumnHeadersDefaultCellStyle.SelectionBackColor=$ui.Surface
- $g.DefaultCellStyle.SelectionBackColor=$ui.Select;$g.DefaultCellStyle.SelectionForeColor=$ui.Ink;$g.DefaultCellStyle.ForeColor=$ui.Ink;$g.DefaultCellStyle.Padding=[Windows.Forms.Padding]::new(6,0,6,0)
+ $g.DefaultCellStyle.SelectionBackColor=$ui.Select;$g.DefaultCellStyle.SelectionForeColor=$ui.Ink;$g.DefaultCellStyle.ForeColor=$ui.Ink;$g.DefaultCellStyle.BackColor=$ui.Surface;$g.DefaultCellStyle.Padding=[Windows.Forms.Padding]::new(6,0,6,0)
  $g.RowTemplate.Height=32;$g.AutoSizeColumnsMode='Fill';$g.SelectionMode='FullRowSelect';$g.MultiSelect=$false
 }
 function New-Surface($Parent,[int]$X,[int]$Y,[int]$W,[int]$H){$p=New-Control Panel $Parent $X $Y $W $H;$p.BackColor=$ui.Surface;$p}
@@ -161,17 +203,17 @@ $driveList=New-Control ListBox $rail 0 46 320 360;$driveList.DrawMode='OwnerDraw
 $script:driveRows=@()
 $driveList.Add_DrawItem({param($s,$e)
  if($e.Index -lt 0 -or $e.Index -ge $script:driveRows.Count){return}
- $r=$script:driveRows[$e.Index];$g=$e.Graphics;$g.TextRenderingHint='ClearTypeGridFit'
+ $r=$script:driveRows[$e.Index];$g=$e.Graphics;$g.TextRenderingHint='ClearTypeGridFit';$z=$script:zoom;$x=$e.Bounds.X;$y=$e.Bounds.Y
  $selected=($e.State -band [Windows.Forms.DrawItemState]::Selected) -ne 0
  $bg=if($selected){$ui.Select}else{$ui.Surface};$g.FillRectangle([Drawing.SolidBrush]::new($bg),$e.Bounds)
- $g.FillRectangle([Drawing.SolidBrush]::new($stateColor[$r.State]),$e.Bounds.X+12,$e.Bounds.Y+12,4,$e.Bounds.Height-24)
+ $g.FillRectangle([Drawing.SolidBrush]::new($stateColor[$r.State]),[single]($x+12*$z),[single]($y+12*$z),[single](4*$z),[single]($e.Bounds.Height-24*$z))
  # Long names end in "..." inside the row instead of being cut mid-word at the edge.
  $fit=[Drawing.StringFormat]::new();$fit.Trimming='EllipsisCharacter';$fit.FormatFlags='NoWrap'
- $w=[single]($e.Bounds.Width-44)
- $g.DrawString($r.Name,$bold,[Drawing.SolidBrush]::new($ui.Ink),[Drawing.RectangleF]::new($e.Bounds.X+28,$e.Bounds.Y+11,$w,22),$fit)
- $g.DrawString($r.Where,$small,[Drawing.SolidBrush]::new($ui.Muted),[Drawing.RectangleF]::new($e.Bounds.X+29,$e.Bounds.Y+36,$w,18),$fit)
- $g.DrawString($r.When,$small,[Drawing.SolidBrush]::new($stateInk[$r.State]),[Drawing.RectangleF]::new($e.Bounds.X+29,$e.Bounds.Y+54,$w,18),$fit)
- $g.DrawLine([Drawing.Pen]::new($ui.Line),$e.Bounds.X+12,$e.Bounds.Bottom-1,$e.Bounds.Right-12,$e.Bounds.Bottom-1)
+ $w=[single]($e.Bounds.Width-44*$z)
+ $g.DrawString($r.Name,$bold,[Drawing.SolidBrush]::new($ui.Ink),[Drawing.RectangleF]::new($x+28*$z,$y+11*$z,$w,22*$z),$fit)
+ $g.DrawString($r.Where,$small,[Drawing.SolidBrush]::new($ui.Muted),[Drawing.RectangleF]::new($x+29*$z,$y+36*$z,$w,18*$z),$fit)
+ $g.DrawString($r.When,$small,[Drawing.SolidBrush]::new($stateInk[$r.State]),[Drawing.RectangleF]::new($x+29*$z,$y+54*$z,$w,18*$z),$fit)
+ $g.DrawLine([Drawing.Pen]::new($ui.Line),[single]($x+12*$z),[single]($e.Bounds.Bottom-1),[single]($e.Bounds.Right-12*$z),[single]($e.Bounds.Bottom-1))
 })
 $newProfile=New-Button $rail 16 414 140 34 'New profile...'
 $removeProfile=New-Button $rail 164 414 140 34 'Remove profile'
@@ -181,21 +223,23 @@ $legend=New-Note $rail 16 500 292 184 $Help.Freshness;$legend.ScrollBars='None'
 # Content: flat navigation with an underline under the open page.
 $content=New-Control Panel $form 360 92 816 692;$content.BackColor=$ui.Paper
 $navUnderline=New-Control Panel $content 0 34 10 3;$navUnderline.BackColor=$ui.Ink
-$pageNames=@('Overview','What to back up','Speed and load','Drive check','Help');$navButtons=@();$pages=@()
+$pageNames=@('Overview','What to back up','Speed and load','Drive check','Look','Help');$navButtons=@();$pages=@();$script:page=0;$script:zoom=1.0
 $x=0
 foreach($n in $pageNames){
  $w=[Windows.Forms.TextRenderer]::MeasureText($n,$labelFace).Width+24
- $b=New-Control Button $content $x 0 $w 34 $n;$b.FlatStyle='Flat';$b.FlatAppearance.BorderSize=0;$b.FlatAppearance.MouseOverBackColor=$ui.Paper;$b.FlatAppearance.MouseDownBackColor=$ui.Paper;$b.Font=$labelFace;$b.ForeColor=$ui.Muted;$b.Cursor='Hand';$b.TextAlign='MiddleLeft';$b.Padding=[Windows.Forms.Padding]::new(0)
+ # Tabs are text, not buttons: Windows' dark mode would draw a frame around every button.
+ $b=New-Control Label $content $x 0 $w 34 $n;$b.Font=$labelFace;$b.ForeColor=$ui.Muted;$b.Cursor='Hand';$b.TextAlign='MiddleLeft';$b.Padding=[Windows.Forms.Padding]::new(0)
  $navButtons+=$b;$x+=$w+8
  $pg=New-Surface $content 0 46 816 646;$pg.Visible=$false;$pages+=$pg
 }
 $navLine=New-Control Panel $content 0 37 816 1;$navLine.BackColor=$ui.Line;$navUnderline.BringToFront()
 function Show-Page([int]$Index){
+ $script:page=$Index;$z=$script:zoom
  for($i=0;$i -lt $pages.Count;$i++){$pages[$i].Visible=($i -eq $Index);$navButtons[$i].ForeColor=if($i -eq $Index){$ui.Ink}else{$ui.Muted}}
- $navUnderline.SetBounds($navButtons[$Index].Left,34,[Windows.Forms.TextRenderer]::MeasureText($pageNames[$Index],$labelFace).Width,3)
+ $navUnderline.SetBounds($navButtons[$Index].Left,[int](34*$z),[Windows.Forms.TextRenderer]::MeasureText($pageNames[$Index],$labelFace).Width,[math]::Max(2,[int][math]::Round(3*$z)))
 }
 for($i=0;$i -lt $navButtons.Count;$i++){$idx=$i;$navButtons[$i].Add_Click({Show-Page $idx}.GetNewClosure())}
-$tOverview,$tSources,$tSpeed,$tCheck,$tHelp=$pages
+$tOverview,$tSources,$tSpeed,$tCheck,$tLook,$tHelp=$pages
 
 # Overview
 $ovTitle=New-Control Label $tOverview 24 20 520 30 '';$ovTitle.Font=Get-Face 'Bahnschrift SemiBold' 15;$ovTitle.AutoEllipsis=$true
@@ -204,7 +248,7 @@ $ovDrive=New-Control Label $tOverview 25 52 520 20 '';$ovDrive.ForeColor=$ui.Mut
 $ovCheck=New-Link $tOverview 472 174 320 'Drive check: not checked yet';$ovCheck.Font=$small;$ovCheck.TextAlign='TopRight'
 $ageNumber=New-Control Label $tOverview 18 80 200 76 '';$ageNumber.Font=Get-Face 'Bahnschrift SemiBold' 44;$ageNumber.AutoSize=$true
 $ageUnit=New-Control Label $tOverview 140 96 380 26 '';$ageUnit.Font=Get-Face 'Bahnschrift' 15;$ageUnit.AutoEllipsis=$true
-$ageWhen=New-Control Label $tOverview 140 124 640 20 '';$ageWhen.ForeColor=$ui.Muted
+$ageWhen=New-Control Label $tOverview 140 124 410 20 '';$ageWhen.ForeColor=$ui.Muted;$ageWhen.AutoEllipsis=$true
 (New-Control Label $tOverview 560 26 120 22 'Mark as old after').ForeColor=$ui.Muted
 $oldDays=New-Control NumericUpDown $tOverview 682 22 52 26;$oldDays.Minimum=1;$oldDays.Maximum=365;$oldDays.BorderStyle='FixedSingle'
 (New-Control Label $tOverview 740 26 50 22 'days').ForeColor=$ui.Muted
@@ -215,7 +259,11 @@ $loadPick=New-Control ComboBox $tOverview 682 54 110 26;$loadPick.DropDownStyle=
 (New-Control Label $tOverview 560 94 120 22 'Keep deleted for').ForeColor=$ui.Muted
 $keepDeleted=New-Control NumericUpDown $tOverview 682 90 52 26;$keepDeleted.Minimum=0;$keepDeleted.Maximum=100;$keepDeleted.BorderStyle='FixedSingle'
 (New-Control Label $tOverview 740 94 60 22 'backups').ForeColor=$ui.Muted
+# Versions: keep everything, or clean up after each backup (one per day / week / month for a while).
+(New-Control Label $tOverview 560 130 120 22 'Keep versions').ForeColor=$ui.Muted
+$keepVersions=New-Link $tOverview 682 130 110 'every version'
 $keepTip=New-Object Windows.Forms.ToolTip;$keepTip.AutoPopDelay=20000
+$keepTip.SetToolTip($keepVersions,"For folders backed up as Versions or Both.`nEvery version: nothing is deleted; delete old ones by hand in Versions and restore.`nOr: after each backup keep one version per day, week and month for a while and delete the rest.")
 $keepTip.SetToolTip($keepDeleted,"0: files you delete stay in the plain copy.`nA number: each backup moves them out of the copy into a dated folder beside it`n(<copy folder>-recovery) and keeps only that many of these folders, the newest.`nOlder ones are deleted from the backup drive.")
 $meter=New-Control Panel $tOverview 24 166 768 6;$meter.BackColor=$ui.Line
 $meterFill=New-Control Panel $meter 0 0 0 6
@@ -306,20 +354,74 @@ $checkNote=New-Note $tCheck 24 594 640 44 'Quick check: a few minutes. Full surf
 # Help
 # Headings in ink and bold so the page can be scanned; a line length that stays readable.
 $helpText=New-Control RichTextBox $tHelp 24 20 660 618;$helpText.ReadOnly=$true;$helpText.BorderStyle='None';$helpText.BackColor=$tHelp.BackColor;$helpText.TabStop=$false;$helpText.DetectUrls=$false;$helpText.ScrollBars='Vertical'
-foreach($sec in @(@('How Backup Center works',$Help.General),@('How each folder can be backed up',$Help.Modes),@('Status colours',$Help.Freshness),@('Computer load',$Help.Load),@('Drive speed',$Help.Speed),@('Drive check',$Help.DriveCheck))){
- $helpText.SelectionFont=$bold;$helpText.SelectionColor=$ui.Ink;$helpText.AppendText($sec[0]+"`n`n")
- $helpText.SelectionFont=$font;$helpText.SelectionColor=$ui.Muted;$helpText.AppendText($sec[1].Trim().Replace("`r`n","`n")+"`n`n`n")
+# Rebuilt when the colours or the zoom change: each run of text keeps the font and colour it was written with.
+function Write-HelpText {
+ $helpText.Clear();$helpText.BackColor=$tHelp.BackColor
+ foreach($sec in @(@('How Backup Center works',$Help.General),@('How each folder can be backed up',$Help.Modes),@('Status colours',$Help.Freshness),@('Computer load',$Help.Load),@('Drive speed',$Help.Speed),@('Drive check',$Help.DriveCheck),@('Colours and size',$Help.Look))){
+  $helpText.SelectionFont=$bold;$helpText.SelectionColor=$ui.Ink;$helpText.AppendText($sec[0]+"`n`n")
+  $helpText.SelectionFont=$font;$helpText.SelectionColor=$ui.Muted;$helpText.AppendText($sec[1].Trim().Replace("`r`n","`n")+"`n`n`n")
+ }
+ $helpText.Select(0,0)
 }
-$helpText.Select(0,0)
+Write-HelpText
+
+# Look: themes, custom colours and how readable they are.
+(New-Control Label $tLook 24 20 400 24 'Colours').Font=$bold
+$lookIntro=New-Control Label $tLook 25 48 768 20 'Choose a look. It changes at once and is remembered on this computer.';$lookIntro.ForeColor=$ui.Muted
+$themeCards=[ordered]@{}
+function New-ThemeSwatch($Theme,[int]$W,[int]$H){
+ # A small picture of the theme: background, a panel with two lines of text, and the main button colour.
+ $bmp=[Drawing.Bitmap]::new($W,$H);$g=[Drawing.Graphics]::FromImage($bmp);$g.SmoothingMode='AntiAlias'
+ $c={param($r)ConvertTo-UiColor $Theme[$r]}
+ $g.Clear((& $c 'Paper'))
+ $g.FillRectangle([Drawing.SolidBrush]::new((& $c 'Surface')),[int]($W*0.08),[int]($H*0.14),[int]($W*0.84),[int]($H*0.72))
+ $g.FillRectangle([Drawing.SolidBrush]::new((& $c 'Ink')),[int]($W*0.16),[int]($H*0.28),[int]($W*0.46),[int]([math]::Max(2,$H*0.10)))
+ $g.FillRectangle([Drawing.SolidBrush]::new((& $c 'Muted')),[int]($W*0.16),[int]($H*0.46),[int]($W*0.32),[int]([math]::Max(2,$H*0.08)))
+ $g.FillRectangle([Drawing.SolidBrush]::new((& $c 'Accent')),[int]($W*0.16),[int]($H*0.62),[int]($W*0.30),[int]([math]::Max(3,$H*0.14)))
+ $g.Dispose();$bmp
+}
+# Cards are drawn by hand: Windows' dark mode would ignore a button's border colour, which marks the chosen one.
+$script:cardImages=@{}
+$i=0
+foreach($n in Get-CenterThemeNames){
+ $b=New-Control Panel $tLook (24+$i*129) 80 120 104;$b.BackColor=$ui.Surface;$b.Cursor='Hand';$b.Tag=$n
+ $b.Add_Click({param($s,$e)Set-Theme $s.Tag})
+ $b.Add_Paint({param($s,$e)
+  $g=$e.Graphics;$g.TextRenderingHint='ClearTypeGridFit';$z=$script:zoom;$r=$s.ClientRectangle;$on=($s.Tag -eq $ui.Name)
+  $img=$script:cardImages[$s.Tag];if($img){$g.DrawImage($img,[int](($r.Width-$img.Width)/2),[int](12*$z))}
+  $fnt=if($on){$script:lookBold}else{$font}
+  [Windows.Forms.TextRenderer]::DrawText($g,$s.Tag,$fnt,[Drawing.Rectangle]::new(0,[int]($r.Height-30*$z),$r.Width,[int](24*$z)),$ui.Ink,[Windows.Forms.TextFormatFlags]'HorizontalCenter,VerticalCenter,SingleLine')
+  $w=if($on){[math]::Max(2,[int][math]::Round(2*$z))}else{1};$pen=[Drawing.Pen]::new($(if($on){$ui.Accent}else{$ui.Line}),$w);$pen.Alignment='Inset'
+  $g.DrawRectangle($pen,0,0,$r.Width-1,$r.Height-1);$pen.Dispose()
+ })
+ $themeCards[$n]=$b;$i++
+}
+(New-Control Label $tLook 24 212 400 24 'Your own colours').Font=$bold
+$customIntro=New-Control Label $tLook 25 240 768 20 'Pick four colours; the rest is worked out from them so text stays readable. Picking one switches to Custom.';$customIntro.ForeColor=$ui.Muted
+$customChips=[ordered]@{}
+$j=0
+foreach($k in @(@('Background','Window background'),@('Panels','Panels and lists'),@('Text','Text'),@('Accent','Main buttons'))){
+ $y=272+$j*40
+ (New-Control Label $tLook 24 ($y+6) 150 22 $k[1]).ForeColor=$ui.Muted
+ $chip=New-Control Button $tLook 180 $y 130 30 '';$chip.FlatStyle='Flat';$chip.Cursor='Hand';$chip.Tag='Chip';$chip.FlatAppearance.BorderSize=1
+ $role=$k[0];$chip.Add_Click({Select-CustomColor $role}.GetNewClosure())
+ $customChips[$k[0]]=$chip;$j++
+}
+$btnFromTheme=New-Button $tLook 330 272 220 30 'Start from the current theme'
+$lookCheck=New-Control Label $tLook 24 440 768 44 ''
+$lookNote=New-Note $tLook 24 496 640 142 $Help.Look;$lookNote.ScrollBars='None'
 
 # --- State and refresh -------------------------------------------------------------------
 $script:data=Read-CenterProfiles
 $script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0;$script:waiting=$null
-$script:lastFree=$null;$script:lastTick=$null;$script:loadingModes=$false
+$script:lastFree=$null;$script:lastTick=$null;$script:loadingModes=$false;$script:meterRatio=0;$script:shown=$false;$script:zoomedFor=$null
 $script:check=$null;$script:install=$null
 $smartTool=Join-Path $PSScriptRoot 'bin\smartmontools\bin\smartctl.exe'
-$checkColor=@{OK=$stateColor.Fresh;Warning=$stateColor.Stale;Problem=$stateColor.Error;Unavailable=$stateColor.Never;NotRun=$stateColor.Never}
-$checkInk=@{OK=$stateInk.Fresh;Warning=$stateInk.Stale;Problem=$stateInk.Error;Unavailable=$stateInk.Never;NotRun=$stateInk.Never}
+$checkColor=@{};$checkInk=@{}
+function Update-CheckColors {
+ foreach($m in @(@('OK','Fresh'),@('Warning','Stale'),@('Problem','Error'),@('Unavailable','Never'),@('NotRun','Never'))){$checkColor[$m[0]]=$stateColor[$m[1]];$checkInk[$m[0]]=$stateInk[$m[1]]}
+}
+Update-CheckColors
 $checkWord=@{OK='No problems';Warning='Worth a look';Problem='Problem';Unavailable='Not available';NotRun='Not checked'}
 $stateText=@{Fresh='Fresh';OK='OK';Stale='Needs a backup';Never='Never backed up';'Nothing selected'='Nothing selected';Error='Settings cannot be read'}
 
@@ -364,7 +466,7 @@ function Update-ProfileList([string]$SelectId) {
 function Update-Details {
  $p=Get-SelectedProfile
  $has=[bool]$p
- foreach($c in @($btnBackup,$btnBackupOne,$btnVerify,$btnOpen,$btnRestore,$btnKeys,$btnAddSource,$btnRemoveSource,$btnSaveModes,$btnAddSub,$btnSpeed,$btnSaveLoad,$oldDays,$keepDeleted,$removeProfile)){$c.Enabled=$has -and -not $script:current -and -not $script:waiting}
+ foreach($c in @($btnBackup,$btnBackupOne,$btnVerify,$btnOpen,$btnRestore,$btnKeys,$btnAddSource,$btnRemoveSource,$btnSaveModes,$btnAddSub,$btnSpeed,$btnSaveLoad,$oldDays,$keepDeleted,$keepVersions,$removeProfile)){$c.Enabled=$has -and -not $script:current -and -not $script:waiting}
  $btnStop.Enabled=[bool]($script:current -or $script:waiting)
  $ovGrid.Rows.Clear();$runsGrid.Rows.Clear();$srcList.Items.Clear();$modeGrid.Rows.Clear()
  if(-not $p){$ovTitle.Text='No backup drive yet';$ovDrive.Text='Connect a backup drive and choose New profile.';$ageNumber.Text='';$ageUnit.Text='';$ageWhen.Text='';$meterFill.Width=0;$meterNote.Text='';$driveInfo.Text='';$driveFacts.Text='';Update-DriveCheck $null $null;return}
@@ -373,19 +475,20 @@ function Update-Details {
  $ovDrive.Text=if($d.Connected){"Connected as $($d.Letter):   $($p.DriveModel), $($d.FreeGB) GB free of $($d.SizeGB) GB"}else{"$($p.DriveModel). Not connected: connect it to back up, test its speed or restore."}
  $n,$u=Split-Age $f.LastComplete
  $ageNumber.Text=$n;$ageNumber.ForeColor=$stateColor[$f.State]
- $ageUnit.Left=$ageNumber.Right+6;$ageWhen.Left=$ageUnit.Left
+ $script:meterRatio=0
  if($f.LastComplete){
   $ageUnit.Text="$u since the last complete backup"
   $ageWhen.Text=('{0:dddd d MMMM yyyy, HH:mm}.  ' -f [datetime]$f.LastComplete)+$stateText[$f.State]+'.'
   $ageDays=((Get-Date)-[datetime]$f.LastComplete).TotalDays
-  $meterFill.Width=[int]($meter.Width*[math]::Min(1,$ageDays/[double]$p.ReminderDays));$meterFill.BackColor=$stateColor[$f.State]
+  $script:meterRatio=[math]::Min(1,$ageDays/[double]$p.ReminderDays);$meterFill.BackColor=$stateColor[$f.State]
   $left=[double]$p.ReminderDays-$ageDays
   $meterNote.Text=if($left -gt 1){"Counts as old after $($p.ReminderDays) days, in about $([int][math]::Floor($left)) days."}elseif($left -gt 0){"Counts as old after $($p.ReminderDays) days, within a day."}else{"Older than $($p.ReminderDays) days. Back up when you can."}
  }else{
   $ageUnit.Text=if($f.State -eq 'Nothing selected'){'nothing is selected for backup'}else{'no complete backup yet'}
   $ageWhen.Text=if($f.State -eq 'Nothing selected'){'Choose folders on the "What to back up" page.'}else{'A drive is complete when every source has its plain copy and versions, as chosen.'}
-  $meterFill.Width=0;$meterNote.Text=''
+  $meterNote.Text=''
  }
+ Update-RuntimeLayout
  foreach($r in $f.Rows){
   $mirror=if($r.Mirror){Format-CenterAge $r.LastMirror}else{'not used'}
   $vers=if($r.Versioned){Format-CenterAge $r.LastVersioned}else{'not used'}
@@ -398,7 +501,7 @@ function Update-Details {
   $speedResult.Text="Write, then read. Tested $(Format-CenterAge $t.When). Connection: $($t.Link)."
   if($t.PSObject.Properties['Notes'] -and $t.Notes){$speedResult.Text+="`n"+$t.Notes}
  }else{$speedWrite.Text='';$speedRead.Text='';$speedResult.Text='No speed test yet. It takes about half a minute and leaves nothing behind.'}
- $speedResult.Top=if($speedWrite.Text){122}else{93}
+ Update-RuntimeLayout
  if(-not $d.Connected){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnOpen.Enabled=$false;$btnRestore.Enabled=$false;$btnSpeed.Enabled=$false}
  # Say why the buttons are off; a connected drive keeps the result of its last run.
  $offline='Connect this drive to back up, check the backup or restore.'
@@ -413,13 +516,15 @@ function Update-Details {
  $driveFacts.Text=if($d.Connected){"Drive $($d.Letter):   $($p.DriveModel), $($d.FileSystem), $($d.FreeGB) GB free of $($d.SizeGB) GB"}else{"$($p.DriveModel). Not connected."}
  Update-LoadControls $p
  $script:loadingDays=$true;$oldDays.Value=[decimal]$p.ReminderDays;$keepDeleted.Value=[decimal](Get-CenterKeepDeleted $p);$script:loadingDays=$false
+ $keepVersions.Text=Format-CenterVersionRetention (Get-CenterVersionRetention $p)
  foreach($h in @($history|Where-Object {$_.ProfileId -eq $p.Id}|Sort-Object {[datetime]$_.Finished} -Descending|Select-Object -First 40)){
   $type=switch($h.Kind){'Mirror'{'Plain copy'}'Versioned'{'Versions'}'MirrorCheck'{'Copy check'}'VersionedCheck'{'Versions check'}default{$h.Kind}}
   $copied=if($h.Kind -like '*Check' -and $h.CheckedFiles){'{0:N0} checked' -f $h.CheckedFiles}elseif($null -ne $h.CopiedFiles){'{0:N0} files, {1}' -f $h.CopiedFiles,(Format-Size $h.CopiedBytes)}elseif($h.CheckedFiles){'{0:N0} checked' -f $h.CheckedFiles}else{''}
   $speed=if($h.CopiedBytes -ge 100MB -and $h.Minutes -gt 0.05){'{0:N0} MB/s' -f ($h.CopiedBytes/1MB/($h.Minutes*60))}else{''}
-  $result=if($h.Success){'OK'}else{'Failed: '+$h.Error}
+  $note=if($h.PSObject.Properties['Note'] -and $h.Note){' '+$h.Note}else{''}
+  $result=if($h.Success){'OK.'+$note}else{'Failed: '+$h.Error}
   $i=$runsGrid.Rows.Add(('{0:d MMM HH:mm}' -f [datetime]$h.Finished),$h.Label,$type,('{0:N1} min' -f $h.Minutes),$copied,$speed,$result)
-  if(-not $h.Success){$runsGrid.Rows[$i].DefaultCellStyle.ForeColor=[Drawing.Color]::Firebrick}
+  if(-not $h.Success){$runsGrid.Rows[$i].DefaultCellStyle.ForeColor=$stateInk.Error}
  }
 }
 
@@ -575,6 +680,7 @@ function Finish-Run {
  $ok=@($script:runResults|Where-Object {$_.Success}).Count;$bad=@($script:runResults|Where-Object {-not $_.Success})
  $msg="$ok of $($script:runResults.Count) steps finished successfully."
  foreach($b in $bad){$msg+="`n`n$($b.Label) ($($b.Kind)): $($b.Error)"}
+ foreach($n in @($script:runResults|Where-Object {$_.Success -and $_.PSObject.Properties['Note'] -and $_.Note})){$msg+="`n`n$($n.Label), versions: $($n.Note)"}
  # A first versioned backup creates a recovery key; say where it is so it gets copied somewhere safe.
  foreach($r in @($script:runResults|Where-Object {$_.Kind -eq 'Versioned' -and $_.Success})){
   $src=@($script:runProfile.Sources|Where-Object {$_.Id -eq $r.SourceId})[0]
@@ -643,11 +749,206 @@ $timer.Add_Tick({
  }
 })
 
+# --- Look: themes ----------------------------------------------------------------------------
+function Get-AllControls($Root){
+ # Every control in the window, parents before children. The insides of grids and number boxes are
+ # managed by those controls themselves.
+ foreach($c in $Root.Controls){$c;if($c -isnot [Windows.Forms.DataGridView] -and $c -isnot [Windows.Forms.NumericUpDown]){Get-AllControls $c}}
+}
+Add-Type -Namespace Center -Name Native -MemberDefinition @'
+[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(System.IntPtr h,int a,ref int v,int s);
+[DllImport("uxtheme.dll",CharSet=CharSet.Unicode)] public static extern int SetWindowTheme(System.IntPtr h,string app,string id);
+[DllImport("user32.dll")] public static extern System.IntPtr SendMessage(System.IntPtr h,int m,System.IntPtr w,System.IntPtr l);
+'@
+function Set-NativeDark($c){
+ # Dark title bar (Windows 10 2004+ and 11) and dark scroll bars; older Windows ignores both.
+ try{
+  if($c -is [Windows.Forms.Form]){$v=[int]$ui.Dark;[void][Center.Native]::DwmSetWindowAttribute($c.Handle,20,[ref]$v,4)}
+  elseif($c.IsHandleCreated){[void][Center.Native]::SetWindowTheme($c.Handle,$(if($ui.Dark){'DarkMode_Explorer'}else{'Explorer'}),$null)}
+ }catch{}
+}
+function Set-ControlTheme($c,$Old){
+ # A control takes the new colour of the role its old colour had (Get-RoleMap); state colours are
+ # set again by the refresh that follows.
+ $role={param($col)$k=$col.ToArgb();if($Old.ContainsKey($k)){$Old[$k]}else{$null}}
+ switch($c.GetType().Name){
+  'Button'{
+   if($c.Tag -eq 'Chip'){return}
+   Set-ButtonColors $c
+  }
+  'LinkLabel'{$c.LinkColor=$ui.Ink;$c.ActiveLinkColor=$ui.Ink;$c.DisabledLinkColor=$ui.Muted}
+  'Label'{$r=& $role $c.ForeColor;if($r){$c.ForeColor=$ui[$r]}}
+  'Panel'{$r=& $role $c.BackColor;if($r){$c.BackColor=$ui[$r]}}
+  'TextBox'{if($c.ReadOnly -and $c.BorderStyle -eq 'None'){$c.BackColor=$c.Parent.BackColor;$c.ForeColor=$ui.Muted}else{$c.BackColor=$ui.Surface;$c.ForeColor=$ui.Ink};Set-NativeDark $c}
+  'RichTextBox'{$c.BackColor=$c.Parent.BackColor;if($c -ne $helpText){$c.ForeColor=$ui.Ink};Set-NativeDark $c}
+  'DataGridView'{
+   # Set-Grid also sets sizes and borders; keep the current (zoomed) ones.
+   $keep=@($c.BorderStyle,$c.ColumnHeadersHeight,$c.RowTemplate.Height,$c.ColumnHeadersDefaultCellStyle.Font)
+   Set-Grid $c;$c.BorderStyle=$keep[0];$c.ColumnHeadersHeight=$keep[1];$c.RowTemplate.Height=$keep[2];$c.ColumnHeadersDefaultCellStyle.Font=$keep[3]
+   foreach($s in $c.Controls){Set-NativeDark $s}
+  }
+  default{
+   if($c -is [Windows.Forms.ListControl] -or $c -is [Windows.Forms.UpDownBase]){$c.BackColor=$ui.Surface;$c.ForeColor=$ui.Ink}
+   # The arrows of number boxes and the drop-down part of lists are drawn by Windows: ask for its dark style.
+   if($c -is [Windows.Forms.ComboBox] -and $c.IsHandleCreated){try{[void][Center.Native]::SetWindowTheme($c.Handle,$(if($ui.Dark){'DarkMode_CFD'}else{'Explorer'}),$null)}catch{}}
+   elseif($c -is [Windows.Forms.ListBox]){Set-NativeDark $c}
+   elseif($c -is [Windows.Forms.UpDownBase]){foreach($s in $c.Controls){Set-NativeDark $s}}
+  }
+ }
+}
+function Get-RoleMap {
+ # Old colour -> role. The basic roles come first, so a theme whose buttons share the text colour
+ # (Light) still recolours its text as text.
+ $m=@{};foreach($r in $uiRoles){$k=$ui[$r].ToArgb();if(-not $m.ContainsKey($k)){$m[$k]=$r}};$m
+}
+function Use-Theme($Theme){
+ $old=Get-RoleMap;$wasDark=[bool]$ui.Dark
+ Set-UiPalette $Theme;Update-CheckColors
+ if($wasDark -ne [bool]$ui.Dark){Set-SystemColorMode}
+ [void][Center.Native]::SendMessage($form.Handle,0x000B,[IntPtr]::Zero,[IntPtr]::Zero)  # pause drawing
+ try{
+  $form.BackColor=$ui.Paper;$form.ForeColor=$ui.Ink
+  foreach($c in @(Get-AllControls $form)){Set-ControlTheme $c $old}
+  Write-HelpText;Show-Page $script:page;Update-LookPage
+  if($script:shown){Update-Details}
+  Set-NativeDark $form
+ }finally{[void][Center.Native]::SendMessage($form.Handle,0x000B,[IntPtr]1,[IntPtr]::Zero);$form.Refresh()}
+}
+function Set-Theme([string]$Name){
+ $script:appearance.Theme=$Name
+ try{Save-CenterAppearance $script:appearance (Get-CenterPaths).Appearance}catch{$runStatus.Text='The colours could not be saved: '+$_.Exception.Message}
+ Use-Theme (Get-ChosenTheme)
+}
+function Select-CustomColor([string]$Role){
+ $dlg=[Windows.Forms.ColorDialog]::new();$dlg.FullOpen=$true;$dlg.AnyColor=$true
+ $dlg.Color=ConvertTo-UiColor $script:appearance.Custom.$Role
+ if($dlg.ShowDialog($form) -ne 'OK'){return}
+ $script:appearance.Custom.$Role=ConvertTo-CenterHex @($dlg.Color.R,$dlg.Color.G,$dlg.Color.B)
+ Set-Theme 'Custom'
+}
+function Update-LookPage {
+ $sw=[int](106*$script:zoom);$sh=[int](58*$script:zoom)
+ foreach($n in $themeCards.Keys){
+  $t=if($n -eq 'Custom'){Get-CenterTheme 'Custom' $script:appearance.Custom}else{Get-CenterTheme $n}
+  if($script:cardImages[$n]){$script:cardImages[$n].Dispose()};$script:cardImages[$n]=New-ThemeSwatch $t $sw $sh
+  $themeCards[$n].BackColor=$ui.Surface;$themeCards[$n].Invalidate()
+ }
+ foreach($k in $customChips.Keys){
+  $hex=$script:appearance.Custom.$k;$c=$customChips[$k];$c.BackColor=ConvertTo-UiColor $hex;$c.Text=$hex
+  $c.ForeColor=if((Get-CenterContrast $hex '#FFFFFF') -ge (Get-CenterContrast $hex '#000000')){[Drawing.Color]::White}else{[Drawing.Color]::Black}
+  $c.FlatAppearance.BorderColor=$ui.Line;$c.FlatAppearance.MouseOverBackColor=$c.BackColor
+ }
+ $report=@(Test-CenterTheme (Get-ChosenTheme));$bad=@($report|Where-Object {-not $_.Pass})
+ $low=($report|Sort-Object Ratio|Select-Object -First 1)
+ if($bad.Count){
+  $lookCheck.ForeColor=$stateInk.Stale
+  $lookCheck.Text="Hard to read in this theme: "+(@($bad|Select-Object -First 3|ForEach-Object {'{0} {1:N1}:1 (needs {2}:1)' -f $_.Pair.ToLower(),$_.Ratio,$_.Needs}) -join '; ')+$(if($bad.Count -gt 3){"; and $($bad.Count-3) more"}else{''})+'.'
+ }else{
+  $lookCheck.ForeColor=$stateInk.Fresh
+  $lookCheck.Text="Readable: all $($report.Count) text and colour pairs pass. The lowest is {0:N1}:1 ({1})." -f $low.Ratio,$low.Pair.ToLower()
+ }
+}
+$btnFromTheme.Add_Click({
+ $t=Get-ChosenTheme
+ $script:appearance.Custom=[pscustomobject]@{Background=$t.Paper;Panels=$t.Surface;Text=$t.Ink;Accent=$t.Accent}
+ Set-Theme 'Custom'
+})
+
+# --- Zoom: the whole window grows in proportion ------------------------------------------------
+# The layout is drawn for 1200 x 800. A larger window scales every position, size and font by the
+# same factor, keeps the proportions and centres the result; the smallest window is the original size.
+$baseClient=[Drawing.Size]::new(1200,800)
+$script:baseLayout=$null;$script:fontCache=@{}
+function Get-ZoomFont([Drawing.Font]$Base,[double]$Factor){
+ $size=[math]::Round($Base.Size*$Factor*4)/4;$key="$($Base.Name)|$size|$([int]$Base.Style)"
+ if(-not $script:fontCache.ContainsKey($key)){$script:fontCache[$key]=[Drawing.Font]::new($Base.FontFamily,[single]$size,$Base.Style)}
+ $script:fontCache[$key]
+}
+$script:baseFonts=@{font=$font;small=$small;bold=$bold;labelFace=$labelFace}
+$script:lookBold=Get-Face 'Segoe UI Semibold' 9.75
+function Save-BaseLayout {
+ $script:baseLayout=[Collections.Generic.List[object]]::new()
+ foreach($c in @(Get-AllControls $form)){
+  $e=[pscustomobject]@{C=$c;B=$c.Bounds;F=$c.Font;Item=0;Head=$null;HeadH=0;RowH=0}
+  if($c -is [Windows.Forms.ListBox]){$e.Item=$c.ItemHeight}
+  if($c -is [Windows.Forms.DataGridView]){$e.Head=$c.ColumnHeadersDefaultCellStyle.Font;$e.HeadH=$c.ColumnHeadersHeight;$e.RowH=$c.RowTemplate.Height}
+  $script:baseLayout.Add($e)
+ }
+}
+function Update-RuntimeLayout {
+ # Positions set while the window runs, in the current zoom.
+ $z=$script:zoom
+ $ageUnit.Left=$ageNumber.Right+[int](6*$z);$ageWhen.Left=$ageUnit.Left
+ $meterFill.SetBounds(0,0,[int]($meter.Width*$script:meterRatio),$meter.Height)
+ $speedResult.Top=[int]($(if($speedWrite.Text){122}else{93})*$z)
+ # Empty result labels would paint over the line below them.
+ $speedWrite.Visible=[bool]$speedWrite.Text;$speedRead.Visible=[bool]$speedRead.Text
+}
+function Set-Zoom {
+ if(-not $script:baseLayout -or $form.WindowState -eq 'Minimized'){return}
+ $cs=$form.ClientSize;$f=[math]::Max(1.0,[math]::Min($cs.Width/[double]$baseClient.Width,$cs.Height/[double]$baseClient.Height))
+ $f=[math]::Round($f,3);if($f -eq $script:zoom -and $script:zoomedFor -eq $cs){return}
+ $script:zoom=$f;$script:zoomedFor=$cs
+ $ox=[int](($cs.Width-$baseClient.Width*$f)/2);$oy=[int](($cs.Height-$baseClient.Height*$f)/2)
+ [void][Center.Native]::SendMessage($form.Handle,0x000B,[IntPtr]::Zero,[IntPtr]::Zero)
+ $form.SuspendLayout()
+ try{
+  foreach($e in $script:baseLayout){
+   $c=$e.C;$b=$e.B;$dx=0;$dy=0;if($c.Parent -eq $form){$dx=$ox;$dy=$oy}
+   $c.Font=Get-ZoomFont $e.F $f
+   $c.SetBounds($dx+[int][math]::Round($b.X*$f),$dy+[int][math]::Round($b.Y*$f),[int][math]::Round($b.Width*$f),[int][math]::Round($b.Height*$f))
+   if($e.Item -and $c.DrawMode -ne 'Normal'){$c.ItemHeight=[math]::Min(255,[int][math]::Round($e.Item*$f))}
+   if($e.Head){$c.ColumnHeadersDefaultCellStyle.Font=Get-ZoomFont $e.Head $f;$c.ColumnHeadersHeight=[int]($e.HeadH*$f);$c.RowTemplate.Height=[int]($e.RowH*$f);foreach($r in $c.Rows){$r.Height=$c.RowTemplate.Height}}
+  }
+  foreach($k in @($script:baseFonts.Keys)){Set-Variable -Scope Script -Name $k -Value (Get-ZoomFont $script:baseFonts[$k] $f)}
+  $script:lookBold=Get-ZoomFont (Get-Face 'Segoe UI Semibold' 9.75) $f
+  Write-HelpText;Show-Page $script:page;Update-LookPage;Update-RuntimeLayout
+ }finally{$form.ResumeLayout();[void][Center.Native]::SendMessage($form.Handle,0x000B,[IntPtr]1,[IntPtr]::Zero);$form.Refresh()}
+}
+$zoomTimer=[Windows.Forms.Timer]::new();$zoomTimer.Interval=120
+$zoomTimer.Add_Tick({$zoomTimer.Stop();try{Set-Zoom}catch{$runStatus.Text='Could not resize the window contents: '+$_.Exception.Message}})
+$form.Add_Resize({if($script:baseLayout){$zoomTimer.Stop();$zoomTimer.Start()}})
+
 # --- Dialogs -------------------------------------------------------------------------------
+function Show-VersionRetentionDialog($Profile) {
+ # Returns the new VersionRetention (Days, Weeks, Months; all 0 = keep every version) or $null on Cancel.
+ $cur=Get-CenterVersionRetention $Profile
+ $f=[Windows.Forms.Form]::new();$f.Text='Keep versions';$f.ClientSize=[Drawing.Size]::new(560,330);$f.Font=$dialogFont;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
+ $all=New-Control RadioButton $f 16 14 528 24 'Keep every version (delete old ones by hand in Versions and restore)'
+ $auto=New-Control RadioButton $f 16 44 528 24 'After each backup, keep these and delete older versions:'
+ $rows=@()
+ foreach($r in @(@('one a day, for the last','days',$cur.Days,7,3650),@('one a week, for the last','weeks',$cur.Weeks,4,520),@('one a month, for the last','months',$cur.Months,3,240))){
+  $y=78+$rows.Count*36
+  [void](New-Control Label $f 40 ($y+4) 170 22 $r[0])
+  $n=New-Control NumericUpDown $f 214 $y 70 26;$n.Minimum=0;$n.Maximum=$r[4];$n.Value=if($cur.Enabled){[decimal]$r[2]}else{[decimal]$r[3]}
+  [void](New-Control Label $f 292 ($y+4) 80 22 $r[1])
+  $rows+=$n
+ }
+ $note=New-Control Label $f 16 190 528 84 'Counted back from the newest version, not from today, so a long pause between backups never empties the history. The newest version is always kept. Deleted versions are removed from the drive to free space. Applies to folders backed up as Versions or Both; 0 turns a line off.'
+ $note.ForeColor=[Drawing.SystemColors]::GrayText
+ $all.Checked=-not $cur.Enabled;$auto.Checked=$cur.Enabled
+ $sync={foreach($n in $rows){$n.Enabled=$auto.Checked}};& $sync;$auto.Add_CheckedChanged($sync)
+ $ok=New-Control Button $f 344 284 96 32 'Save';$ok.DialogResult='OK';$cancel=New-Control Button $f 448 284 96 32 'Cancel';$cancel.DialogResult='Cancel';$f.AcceptButton=$ok;$f.CancelButton=$cancel
+ try{
+  if($f.ShowDialog($form) -ne 'OK'){return $null}
+  if($all.Checked){return [pscustomobject]@{Days=0;Weeks=0;Months=0}}
+  $v=[pscustomobject]@{Days=[int]$rows[0].Value;Weeks=[int]$rows[1].Value;Months=[int]$rows[2].Value}
+  if($v.Days+$v.Weeks+$v.Months -eq 0){[void][Windows.Forms.MessageBox]::Show('All three are 0, so nothing would be kept apart from the newest version. Choose at least one, or "Keep every version".','Backup Center');return $null}
+  $v
+ }finally{$f.Dispose()}
+}
+$keepVersions.Add_LinkClicked({try{
+ $p=Get-SelectedProfile;if(-not $p){return}
+ $v=Show-VersionRetentionDialog $p;if(-not $v){return}
+ $p|Add-Member -NotePropertyName VersionRetention -NotePropertyValue $v -Force;Save-CenterProfiles $script:data
+ $r=Get-CenterVersionRetention $p;$keepVersions.Text=Format-CenterVersionRetention $r
+ $runStatus.Text=if($r.Enabled){"Versions: after each backup, keep $(Format-CenterVersionRetention $r) (days / weeks / months) and delete older ones."}else{'Versions: every version is kept.'}
+}catch{Show-Error $_}})
+
 function Show-NewProfileDialog {
  $drives=@(Get-CenterCandidateDrives|Where-Object {$v=$_.VolumeId;-not @($script:data.Profiles|Where-Object {$_.DestinationVolumeId -eq $v}).Count})
  if(-not $drives.Count){[void][Windows.Forms.MessageBox]::Show('No connected drive without a profile was found. Connect the backup drive and try again.','Backup Center');return $null}
- $f=[Windows.Forms.Form]::new();$f.Text='New backup drive profile';$f.ClientSize=[Drawing.Size]::new(560,250);$f.Font=$font;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
+ $f=[Windows.Forms.Form]::new();$f.Text='New backup drive profile';$f.ClientSize=[Drawing.Size]::new(560,250);$f.Font=$dialogFont;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
  [void](New-Control Label $f 16 16 520 20 'Backup drive:')
  $combo=New-Control ComboBox $f 16 40 528 28;$combo.DropDownStyle='DropDownList'
  foreach($d in $drives){[void]$combo.Items.Add(('{0}:  {1}  -  {2}  -  {3} {4}, {5:N0} GB free of {6:N0} GB' -f $d.Letter,$(if($d.Label){$d.Label}else{'(no label)'}),$d.Model,$d.FileSystem,$d.BusType,$d.FreeGB,$d.SizeGB))}
@@ -662,7 +963,7 @@ function Show-NewProfileDialog {
  [pscustomobject]@{Name=$name.Text;Drive=$d}
 }
 function Show-SourceDialog([string]$Path){
- $f=[Windows.Forms.Form]::new();$f.Text='Add a folder to back up';$f.ClientSize=[Drawing.Size]::new(560,300);$f.Font=$font;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
+ $f=[Windows.Forms.Form]::new();$f.Text='Add a folder to back up';$f.ClientSize=[Drawing.Size]::new(560,300);$f.Font=$dialogFont;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
  [void](New-Control Label $f 16 16 528 20 "Folder: $Path")
  [void](New-Control Label $f 16 48 528 20 'Name shown in this window:')
  $label=New-Control TextBox $f 16 72 528 26;$label.Text=if($Path.Length -le 3){'Drive '+$Path.Substring(0,1)}else{Split-Path -Leaf $Path.TrimEnd('\')}
@@ -860,11 +1161,18 @@ $form.Add_FormClosing({param($s,$e)
 })
 
 $form.Add_Shown({
+ # Sizes are recorded before anything moves; the theme is applied once every window handle exists,
+ # because the dark title bar and scroll bars need them.
+ Save-BaseLayout
+ Use-Theme (Get-ChosenTheme)
  Show-Page 0
+ $script:shown=$true
  Update-ProfileList
  $stale=@(Get-CenterStaleProfiles)
  if($stale.Count -and -not $RenderPreview){$runStatus.Text='Needs a backup: '+(@($stale|ForEach-Object {$_.Profile.Name}) -join ', ')}
+ if($PreviewDialog -eq 'KeepVersions'){[void]$form.BeginInvoke([Action]{$p=Get-SelectedProfile;if($p){[void](Show-VersionRetentionDialog $p)}})}
  if($RenderPreview){
+  if($PreviewWidth -gt 0){$form.ClientSize=[Drawing.Size]::new($PreviewWidth,$PreviewHeight);[Windows.Forms.Application]::DoEvents();Set-Zoom}
   Show-Page $PreviewTab;[Windows.Forms.Application]::DoEvents()
   $bitmap=[Drawing.Bitmap]::new($form.Width,$form.Height);$form.DrawToBitmap($bitmap,[Drawing.Rectangle]::new(0,0,$form.Width,$form.Height));$bitmap.Save($RenderPreview);$bitmap.Dispose();$form.Close()
  }
