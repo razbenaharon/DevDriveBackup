@@ -1,10 +1,10 @@
 #Requires -Version 7.2
-# Backup Center data layer: profiles, sources, freshness, and real runs of both tools
+# DevDriveBackup data layer: profiles, sources, freshness, and real runs of both tools
 # against a disposable source, a disposable data folder and uniquely named folders on the
 # destination drive. The configured real profiles, history and backups are not touched.
 param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$DestinationDrive)
 $ErrorActionPreference='Stop'
-Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Data.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'DevDriveBackup.Data.psm1') -Force
 function Assert($ok,[string]$message){if(-not $ok){throw "FAIL $message"};Write-Output "PASS $message"}
 function Assert-Throws([scriptblock]$Block,[string]$Like,[string]$message){
  try{& $Block;throw "FAIL $message (no error)"}catch{if($_.Exception.Message -like "FAIL*"){throw};if($_.Exception.Message -notlike $Like){throw "FAIL $message (got: $($_.Exception.Message))"}}
@@ -12,7 +12,7 @@ function Assert-Throws([scriptblock]$Block,[string]$Like,[string]$message){
 }
 
 $id=[guid]::NewGuid().ToString('N').Substring(0,10)
-$dataRoot=Join-Path ([IO.Path]::GetTempPath()) ('backup-center-test-'+$id)
+$dataRoot=Join-Path ([IO.Path]::GetTempPath()) ('dev-drive-backup-test-'+$id)
 $source=Join-Path $PSScriptRoot ('.temporary-worker-test-center-'+$id)
 New-Item -ItemType Directory -Path $dataRoot,(Join-Path $source 'work\node_modules\x'),(Join-Path $source 'notes') -Force|Out-Null
 [IO.File]::WriteAllText((Join-Path $source 'work\עברית [1].txt'),'first')
@@ -114,7 +114,7 @@ try{
  Assert (@((Get-CenterProfile $data $p.Id).Sources).Count -eq 0 -and (Test-Path -LiteralPath $s.ConfigPath)) 'removing a source keeps its job file'
  Remove-CenterProfile $data $p.Id
  Assert ($data.Profiles.Count -eq 0) 'removing a profile forgets it'
- Write-Output 'All Backup Center tests passed.'
+ Write-Output 'All DevDriveBackup tests passed.'
 }finally{
  foreach($c in $created){if(Test-Path -LiteralPath $c){Get-ChildItem -LiteralPath $c -Recurse -Force -File|ForEach-Object {$_.IsReadOnly=$false};[IO.Directory]::Delete($c,$true)}}
  $marker=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+((Get-Volume -DriveLetter $DestinationDrive).UniqueId -replace '[^A-Za-z0-9-]+','_').Trim('_')+'-'+$label+'-Mirror.json')

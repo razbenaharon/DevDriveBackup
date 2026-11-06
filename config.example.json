@@ -4,7 +4,7 @@
   "DestinationVolumeId": "REPLACE_WITH_DESTINATION_VOLUME_UNIQUEID",
   "RepositoryFolder": "DevDrive-Backup",
   "PasswordDpapiPath": "C:\\Users\\YOUR_USER\\AppData\\Local\\DevDriveMirror\\repository-password.dpapi",
-  "RecoveryKeyPath": "C:\\Users\\YOUR_USER\\Backup Center recovery keys\\recovery-key.txt",
+  "RecoveryKeyPath": "C:\\Users\\YOUR_USER\\DevDriveBackup recovery keys\\recovery-key.txt",
   "Profile": "Balanced",
   "RateMBps": 45,
   "MemoryMiB": 1024,

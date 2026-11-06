@@ -1,5 +1,5 @@
 @echo off
-rem Starts Backup Center with PowerShell 7.2 or newer. Problems are shown, never swallowed.
+rem Starts DevDriveBackup with PowerShell 7.2 or newer. Problems are shown, never swallowed.
 where pwsh.exe >nul 2>&1
 if errorlevel 1 (
  echo PowerShell 7.2 or newer is required. Install it from https://aka.ms/powershell and try again.
@@ -12,4 +12,4 @@ if errorlevel 1 (
  pause
  exit /b 1
 )
-start "" /b pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Backup-Center.ps1"
+start "" /b pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0DevDriveBackup.ps1"

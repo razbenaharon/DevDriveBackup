@@ -1,8 +1,8 @@
 #Requires -Version 7.2
-# Draws the Backup Center icon: a slate drive label with a green status stripe and two
-# label lines, the same marks the window uses for a backup drive. Writes BackupCenter.ico
+# Draws the DevDriveBackup icon: a slate drive label with a green status stripe and two
+# label lines, the same marks the window uses for a backup drive. Writes DevDriveBackup.ico
 # with bitmap frames for small sizes and a PNG frame for 256 px.
-param([string]$OutputPath=(Join-Path $PSScriptRoot 'BackupCenter.ico'),[string]$PreviewPng)
+param([string]$OutputPath=(Join-Path $PSScriptRoot 'DevDriveBackup.ico'),[string]$PreviewPng)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
 

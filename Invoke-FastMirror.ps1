@@ -10,7 +10,7 @@
 # in the mirror and are listed in the summary. -Verify (default on the first run) re-reads
 # both copies and compares SHA-256 for every selected file; a selected source file missing from
 # the mirror is a difference. A selected folder that is missing or became a link fails the run.
-# Backup Center's own password, key and state folders are never copied.
+# DevDriveBackup's own password, key and state folders are never copied.
 param(
  [string]$ConfigPath=(Join-Path $PSScriptRoot 'backup.local.json'),
  [string]$Source,
@@ -57,12 +57,12 @@ foreach($entry in @(if($config.PSObject.Properties['Exclude']){$config.Exclude})
  }
  if($e){$skipPaths+=$e.TrimStart('\')}
 }
-# Backup Center's private folders (protected passwords, run state, plaintext recovery keys) are never
+# DevDriveBackup's private folders (protected passwords, run state, plaintext recovery keys) are never
 # copied, whatever the selection: the copy would not keep their private permissions. The job's own key
 # files count too, in case the configuration keeps them somewhere else.
-$privatePaths=@((Join-Path $env:LOCALAPPDATA 'DevDriveMirror'),(Join-Path $env:USERPROFILE 'Backup Center recovery keys'))+@('PasswordDpapiPath','RecoveryKeyPath'|Where-Object {$config.PSObject.Properties[$_] -and $config.$_}|ForEach-Object {[string]$config.$_})
+$privatePaths=@((Join-Path $env:LOCALAPPDATA 'DevDriveMirror'),(Join-Path $env:USERPROFILE 'DevDriveBackup recovery keys'),(Join-Path $env:USERPROFILE 'Backup Center recovery keys'))+@('PasswordDpapiPath','RecoveryKeyPath'|Where-Object {$config.PSObject.Properties[$_] -and $config.$_}|ForEach-Object {[string]$config.$_})
 foreach($p in @($privatePaths|ForEach-Object {[IO.Path]::GetFullPath($_).TrimEnd('\')})){
- if($srcRoot.StartsWith($p+'\',[StringComparison]::OrdinalIgnoreCase)){throw "The source is inside $p, which holds Backup Center's passwords and recovery keys and is never copied"}
+ if($srcRoot.StartsWith($p+'\',[StringComparison]::OrdinalIgnoreCase)){throw "The source is inside $p, which holds DevDriveBackup's passwords and recovery keys and is never copied"}
  if($p.StartsWith($srcRoot,[StringComparison]::OrdinalIgnoreCase)){$skipPaths+=$p.Substring($srcRoot.Length)}
 }
 

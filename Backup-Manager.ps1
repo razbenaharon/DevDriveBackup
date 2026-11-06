@@ -10,8 +10,8 @@ Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 if(-not(Test-Path -LiteralPath $ConfigPath)){throw 'Create backup.local.json from config.example.json. See BACKUP-SYSTEM.md.'}
 $config=Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json
-$form=[Windows.Forms.Form]::new();$form.Text='Backup Center — Versioned backup (advanced)';$form.ClientSize=[Drawing.Size]::new(1040,760);$form.StartPosition='CenterScreen';$form.Font=[Drawing.Font]::new('Segoe UI',10);$form.RightToLeft='No';$form.RightToLeftLayout=$false
-$iconFile=Join-Path $PSScriptRoot 'BackupCenter.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
+$form=[Windows.Forms.Form]::new();$form.Text='DevDriveBackup — Versioned backup (advanced)';$form.ClientSize=[Drawing.Size]::new(1040,760);$form.StartPosition='CenterScreen';$form.Font=[Drawing.Font]::new('Segoe UI',10);$form.RightToLeft='No';$form.RightToLeftLayout=$false
+$iconFile=Join-Path $PSScriptRoot 'DevDriveBackup.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
 function C($type,$x,$y,$w,$h,$text=''){$c=New-Object ('Windows.Forms.'+$type);$c.SetBounds($x,$y,$w,$h);$c.Text=$text;$form.Controls.Add($c);$c}
 $title=C Label 20 16 1000 32 'Dev Drive — Encrypted Versioned Backup';$title.Font=[Drawing.Font]::new('Segoe UI',16,[Drawing.FontStyle]::Bold)
 $subtitle=C Label 20 52 1000 30 ('Source: '+$config.Source+'    |    Repository: '+$config.RepositoryFolder+'    |    Existing mirror data is preserved')
@@ -52,7 +52,7 @@ switch($config.Profile){'Quiet'{$profile.SelectedIndex=0};'Fast'{$profile.Select
 $profile.Add_SelectedIndexChanged({Apply-Profile})
 function Save-Config {
  # Re-read the file under the lock and change only what this window edits, so changes made
- # elsewhere (Backup Center, a text editor) since this window opened are kept.
+ # elsewhere (DevDriveBackup, a text editor) since this window opened are kept.
  [void]$grid.EndEdit()
  New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($config.PasswordDpapiPath)) -Force|Out-Null
  $settingsLock=[IO.File]::Open($config.PasswordDpapiPath+'.run.lock',[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)

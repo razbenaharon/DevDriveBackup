@@ -90,7 +90,7 @@ try{
   # A new repository gets its own password and recovery file; the previous ones stay valid for the old drive.
   $keyId=[guid]::NewGuid().ToString('N')
   $fresh.PasswordDpapiPath=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\'+$keyId+'.dpapi')
-  $fresh.RecoveryKeyPath=Join-Path (Join-Path $env:USERPROFILE 'Backup Center recovery keys') ('DevDrive-'+$keyId+'-recovery-key.txt')
+  $fresh.RecoveryKeyPath=Join-Path (Join-Path $env:USERPROFILE $(if(Test-Path -LiteralPath (Join-Path $env:USERPROFILE 'Backup Center recovery keys')){'Backup Center recovery keys'}else{'DevDriveBackup recovery keys'})) ('DevDrive-'+$keyId+'-recovery-key.txt')
   $fresh.DestinationVolumeId=$volume.UniqueId
  }
  foreach($k in $rec.Keys){$fresh|Add-Member -NotePropertyName $k -NotePropertyValue $rec[$k] -Force}

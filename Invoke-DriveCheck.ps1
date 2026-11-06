@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Drive check of a backup drive. Runs as administrator: Backup Center asks Windows for that,
+# Drive check of a backup drive. Runs as administrator: DevDriveBackup asks Windows for that,
 # because the drive's own report, raw reads and the file system scan need it.
 #  Quick         the drive's health report and a short self-test, sample reads at the start,
 #                middle and end, Windows' log of disk errors, the link speed, a file system scan
@@ -110,7 +110,7 @@ function Read-DiskRegion([long]$Start,[long]$Length){[BackupDriveScanner]::Read(
 
 try{
  if(-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
-  throw 'The drive check needs administrator rights. Start it from Backup Center, which asks Windows for them.'
+  throw 'The drive check needs administrator rights. Start it from DevDriveBackup, which asks Windows for them.'
  }
  $letter=$Drive.ToUpperInvariant()
  $volume=Get-Volume -DriveLetter $letter

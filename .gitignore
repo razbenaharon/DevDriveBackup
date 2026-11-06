@@ -24,3 +24,20 @@ scan-completed.txt
 *-public-preview.zip
 jobs/
 research_notes/
+
+# Personal editor and AI-assistant settings
+.claude/
+.codex/
+.agents/
+.vscode/
+.idea/
+CLAUDE.local.md
+AGENTS.local.md
+*.code-workspace
+
+# Local leftovers: archives, old copies before a change, Windows/macOS clutter
+*.zip
+*.before-*
+Thumbs.db
+desktop.ini
+.DS_Store

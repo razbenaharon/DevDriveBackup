@@ -10,7 +10,7 @@ $config=Get-Content (Join-Path $PSScriptRoot 'config.example.json') -Raw|Convert
 $config.Source=$root;$config.SourceVolumeId=$src.UniqueId;$config.DestinationVolumeId=$dst.UniqueId
 $keyId=[guid]::NewGuid().ToString('N')
 $config.PasswordDpapiPath=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\'+$keyId+'.dpapi')
-$config.RecoveryKeyPath=Join-Path (Join-Path $env:USERPROFILE 'Backup Center recovery keys') ('DevDrive-'+$keyId+'-recovery-key.txt')
+$config.RecoveryKeyPath=Join-Path (Join-Path $env:USERPROFILE $(if(Test-Path -LiteralPath (Join-Path $env:USERPROFILE 'Backup Center recovery keys')){'Backup Center recovery keys'}else{'DevDriveBackup recovery keys'})) ('DevDrive-'+$keyId+'-recovery-key.txt')
 $config.Choices=@(Get-ChildItem -LiteralPath $root -Directory -Force|Where-Object {$_.Name -notin @('$RECYCLE.BIN','System Volume Information') -and -not($_.Attributes -band [IO.FileAttributes]::ReparsePoint)}|ForEach-Object {[pscustomobject]@{Path=$_.Name;Mode=$(if($_.Name -in @('Packages','.pnpm-store','Temp','tmp','node_modules','.venv','venv')){'Skip'}else{'Both'});Reason='Review: preserve unique source, data, configuration and local changes'}})
 if(@($config.Choices|Where-Object {$_.Mode -eq 'Both'}).Count -eq 0){foreach($c in $config.Choices){$c.Mode='Both'}}
 # Include is informational; both tools derive their selection from each Mode.

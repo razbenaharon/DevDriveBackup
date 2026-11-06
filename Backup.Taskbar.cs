@@ -1,7 +1,7 @@
-// Gives a window its own taskbar identity. Backup Center runs inside PowerShell, and the taskbar
+// Gives a window its own taskbar identity. DevDriveBackup runs inside PowerShell, and the taskbar
 // groups windows by the program that owns them, so without this the button shows PowerShell's icon
 // (a Store install of PowerShell always shows its own icon there). With an ID of its own the window
-// gets its own button with the window's icon, and pinning it starts Backup Center again rather than
+// gets its own button with the window's icon, and pinning it starts DevDriveBackup again rather than
 // a bare PowerShell.
 using System;
 using System.Runtime.InteropServices;

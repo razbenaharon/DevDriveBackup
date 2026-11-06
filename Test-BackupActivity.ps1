@@ -2,7 +2,7 @@
 # Checks the "are AI sessions still working" rule (Get-CenterAgentActivity) on disposable folders
 # shaped like Claude Code's and Codex's conversation stores. Needs no drive.
 $ErrorActionPreference='Stop'
-Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Data.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'DevDriveBackup.Data.psm1') -Force
 function Assert($ok,[string]$message){if(-not $ok){throw "FAIL $message"};Write-Output "PASS $message"}
 
 $root=Join-Path ([IO.Path]::GetTempPath()) ('backup-activity-test-'+[guid]::NewGuid().ToString('N').Substring(0,10))

@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Backup Center colours: built-in themes, a custom theme derived from four chosen colours, the
+# DevDriveBackup colours: built-in themes, a custom theme derived from four chosen colours, the
 # status colours that suit a light or dark theme, WCAG contrast, and the saved choice.
 # Colours are '#RRGGBB' strings here; the window turns them into System.Drawing colours.
 Set-StrictMode -Version Latest

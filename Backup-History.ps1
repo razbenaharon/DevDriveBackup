@@ -7,8 +7,8 @@ Import-Module (Join-Path $PSScriptRoot 'Backup.History.psm1') -Force
 [Globalization.CultureInfo]::CurrentUICulture=[Globalization.CultureInfo]::GetCultureInfo('en-US')
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
-$form=[Windows.Forms.Form]::new();$form.Text='Backup Center — Versions and restore';$form.ClientSize=[Drawing.Size]::new(1150,820);$form.StartPosition='CenterScreen';$form.Font=[Drawing.Font]::new('Segoe UI',10);$form.RightToLeft='No';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
-$iconFile=Join-Path $PSScriptRoot 'BackupCenter.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
+$form=[Windows.Forms.Form]::new();$form.Text='DevDriveBackup — Versions and restore';$form.ClientSize=[Drawing.Size]::new(1150,820);$form.StartPosition='CenterScreen';$form.Font=[Drawing.Font]::new('Segoe UI',10);$form.RightToLeft='No';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
+$iconFile=Join-Path $PSScriptRoot 'DevDriveBackup.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
 function C($type,$x,$y,$w,$h,$text=''){$c=New-Object ('Windows.Forms.'+$type);$c.SetBounds($x,$y,$w,$h);$c.Text=$text;$form.Controls.Add($c);$c}
 function Columns($grid,$specs){foreach($spec in $specs){$col=[Windows.Forms.DataGridViewTextBoxColumn]::new();$col.Name=$spec[0];$col.HeaderText=$spec[1];$col.FillWeight=$spec[2];$col.ReadOnly=$true;[void]$grid.Columns.Add($col)}}
 function Grid($x,$y,$w,$h){$g=C DataGridView $x $y $w $h;$g.AllowUserToAddRows=$false;$g.AllowUserToDeleteRows=$false;$g.RowHeadersVisible=$false;$g.AutoSizeColumnsMode='Fill';$g.BackgroundColor=[Drawing.Color]::White;$g.SelectionMode='FullRowSelect';$g.MultiSelect=$false;$g}

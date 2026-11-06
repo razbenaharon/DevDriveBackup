@@ -1,4 +1,4 @@
-# Backup Center: versioned engine
+# DevDriveBackup: versioned engine
 
 Windows backup workbench for development drives and large numbers of small files. It combines metadata inventory, USB link diagnostics, a bounded disk benchmark, and an encrypted, versioned [Restic](https://restic.net/) repository. The English Windows Forms manager provides source selection, progress, ETA, speed presets, and editable bandwidth/memory limits.
 
@@ -23,7 +23,7 @@ Edit `backup.local.json`: set the source, both volume identities, relative sourc
 
 The initializer fills volume identities and private key paths automatically, refuses to overwrite an existing configuration, and starts with non-system top-level folders, except common temporary/package-cache roots. Review these defaults. Alternatively copy `config.example.json` and fill in its placeholders manually. Each entry in `Choices` has a `Mode` (`Mirror`, `Versioned`, `Both` or `Skip`) shared with `Invoke-FastMirror.ps1`; `DefaultMode` covers paths no entry lists. Entries can be folders or single files (for example `README.md` at the root) and can nest. The worker derives its sources from `Versioned`/`Both` entries; `Include` is only kept up to date for other readers. See "Choose per folder" in README.md.
 
-Start `BackupCenter-Advanced.cmd` (or use the main Backup Center window) or:
+Start `DevDriveBackup-Advanced.cmd` (or use the main DevDriveBackup window) or:
 
 ```powershell
 pwsh -NoProfile -File ./Backup-Manager.ps1
@@ -47,7 +47,7 @@ The UI's preview is a Restic dry run and requires an initialized repository. The
 
 ## Password changes and portable key export
 
-Choose **Password and recovery key** in Backup Center or **Password and recovery** in the advanced window. The window does not contact the repository until an action is chosen. Saving a recovery key exports the current repository password to a new file and records the location in the local configuration. Existing files, linked paths, reserved credential/configuration paths, and paths inside the source, repository or project are refused. Recovery files are created with a protected current-user/SYSTEM ACL before any content is written. Exported files are plaintext and must be kept separately and privately.
+Choose **Password and recovery key** in DevDriveBackup or **Password and recovery** in the advanced window. The window does not contact the repository until an action is chosen. Saving a recovery key exports the current repository password to a new file and records the location in the local configuration. Existing files, linked paths, reserved credential/configuration paths, and paths inside the source, repository or project are refused. Recovery files are created with a protected current-user/SYSTEM ACL before any content is written. Exported files are plaintext and must be kept separately and privately.
 
 Password changes replace the access key currently used by this tool; independently added access keys remain intact. The repository master key, data packs and snapshots are not re-encrypted or recreated. Changing a password does not revoke access to an earlier independently copied repository. This feature does not repair an unhealthy backup drive.
 

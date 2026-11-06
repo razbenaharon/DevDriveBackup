@@ -1,16 +1,16 @@
 #Requires -Version 7.2
 # Plain copy rules that need no backup drive: the content check (Backup.MirrorVerifier.cs) on two
-# disposable folders, the drive identity check of Invoke-FastMirror.ps1, and how Backup Center names
-# plain copy folders and saves job files (BackupCenter.Data.psm1). Everything lives in one disposable
+# disposable folders, the drive identity check of Invoke-FastMirror.ps1, and how DevDriveBackup names
+# plain copy folders and saves job files (DevDriveBackup.Data.psm1). Everything lives in one disposable
 # folder under the temporary folder and is removed at the end.
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Backup.Selection.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Data.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'DevDriveBackup.Data.psm1') -Force
 Add-Type -Path (Join-Path $PSScriptRoot 'Backup.MirrorVerifier.cs')
 function Assert($ok,$message){if(-not $ok){throw "FAIL $message"};Write-Output ('PASS '+$message)}
 function Throws([scriptblock]$Block,[string]$Pattern){try{& $Block|Out-Null;$false}catch{$_.Exception.Message -match $Pattern}}
-$root=Join-Path ([IO.Path]::GetTempPath()) ('backup-center-copy-rules-'+[guid]::NewGuid().ToString('N'))
+$root=Join-Path ([IO.Path]::GetTempPath()) ('dev-drive-backup-copy-rules-'+[guid]::NewGuid().ToString('N'))
 function Put([string]$Path,[string]$Text){New-Item -ItemType Directory -Path (Split-Path $Path) -Force|Out-Null;[IO.File]::WriteAllText($Path,$Text)}
 try{
  # --- Content check ----------------------------------------------------------------------

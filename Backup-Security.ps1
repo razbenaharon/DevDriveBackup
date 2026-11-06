@@ -8,8 +8,8 @@ Import-Module (Join-Path $PSScriptRoot 'Backup.Security.psm1') -Force
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 $config=Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json
-$form=[Windows.Forms.Form]::new();$form.Text='Backup Center — Password and recovery key';$form.ClientSize=[Drawing.Size]::new(820,535);$form.Font=[Drawing.Font]::new('Segoe UI',10);$form.StartPosition='CenterScreen';$form.RightToLeft='No';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
-$iconFile=Join-Path $PSScriptRoot 'BackupCenter.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
+$form=[Windows.Forms.Form]::new();$form.Text='DevDriveBackup — Password and recovery key';$form.ClientSize=[Drawing.Size]::new(820,535);$form.Font=[Drawing.Font]::new('Segoe UI',10);$form.StartPosition='CenterScreen';$form.RightToLeft='No';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
+$iconFile=Join-Path $PSScriptRoot 'DevDriveBackup.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
 function C($type,$x,$y,$w,$h,$text=''){$c=New-Object ('Windows.Forms.'+$type);$c.SetBounds($x,$y,$w,$h);$c.Text=$text;$form.Controls.Add($c);$c}
 $title=C Label 20 15 780 32 'Password and Recovery';$title.Font=[Drawing.Font]::new('Segoe UI',17,[Drawing.FontStyle]::Bold)
 [void](C Label 20 58 780 48 'Save a portable recovery key or change the password for this repository. Existing backup versions and file data are preserved.')

@@ -205,9 +205,9 @@ try {
   $selectionExcludes=@($regions|ForEach-Object {$_.Excluded}|Where-Object {$_}|Sort-Object -Unique|ForEach-Object {Expand-Excluded $_}|ForEach-Object {
    [regex]::Replace([IO.Path]::GetFullPath((Join-Path $source $_)).Replace('\','/'),'[\[*?]',{param($m) '['+$m.Value+']'})
   })
-  # Backup Center's private folders (protected passwords, run state, recovery keys of every source)
+  # DevDriveBackup's private folders (protected passwords, run state, recovery keys of every source)
   # are never backed up, whatever the selection, as in the plain copy.
-  $privateExcludes=@((Join-Path $env:LOCALAPPDATA 'DevDriveMirror'),(Join-Path $env:USERPROFILE 'Backup Center recovery keys')|ForEach-Object {
+  $privateExcludes=@((Join-Path $env:LOCALAPPDATA 'DevDriveMirror'),(Join-Path $env:USERPROFILE 'DevDriveBackup recovery keys'),(Join-Path $env:USERPROFILE 'Backup Center recovery keys')|ForEach-Object {
    [regex]::Replace([IO.Path]::GetFullPath($_).TrimEnd('\').Replace('\','/'),'[\[*?]',{param($m) '['+$m.Value+']'})
   })
   $script:status.Sources=$sources;$script:status.SelectionExcludes=$selectionExcludes

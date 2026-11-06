@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Backup Center: one window for every backup drive, what goes on it, how fresh it is,
+# DevDriveBackup: one window for every backup drive, what goes on it, how fresh it is,
 # drive speed and explanations. It runs the existing tools underneath:
 # Invoke-FastMirror.ps1 (plain copy) and Backup-Worker.ps1 (versioned history).
 param(
@@ -13,11 +13,11 @@ param(
  [int]$AutoCloseSeconds=0    # tests: run normally, then close after this many seconds
 )
 $ErrorActionPreference='Stop'
-Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Data.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'DevDriveBackup.Data.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Selection.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Status.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.DriveCheck.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Theme.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'DevDriveBackup.Theme.psm1') -Force
 [void](Set-CenterPaths $DataRoot)
 [Globalization.CultureInfo]::CurrentCulture=[Globalization.CultureInfo]::GetCultureInfo('en-GB')
 [Globalization.CultureInfo]::CurrentUICulture=[Globalization.CultureInfo]::GetCultureInfo('en-US')
@@ -30,7 +30,7 @@ $script:errorLog=Join-Path $env:LOCALAPPDATA 'DevDriveMirror\center\ui-errors.lo
 [Windows.Forms.Application]::add_ThreadException({param($s,$e)
  $ex=$e.Exception;$where=if($ex -is [Management.Automation.RuntimeException] -and $ex.ErrorRecord){$ex.ErrorRecord.ScriptStackTrace}else{$ex.StackTrace}
  try{New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($script:errorLog)) -Force|Out-Null;Add-Content -LiteralPath $script:errorLog -Value ("[{0:o}] {1}`n{2}`n" -f (Get-Date),$ex.Message,$where)}catch{}
- [void][Windows.Forms.MessageBox]::Show("Something went wrong: $($ex.Message)`n`nThe details were saved to $($script:errorLog).",'Backup Center',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)
+ [void][Windows.Forms.MessageBox]::Show("Something went wrong: $($ex.Message)`n`nThe details were saved to $($script:errorLog).",'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)
 })
 
 # --- Texts ---------------------------------------------------------------------------------
@@ -97,7 +97,7 @@ Sources: any folder on this computer, such as a whole drive, a project or Docume
 
 Where things are on the backup drive: plain copies are in one folder per source (shown on the "What to back up" tab, for example DevDrive-Mirror). Versions are in one encrypted repository per source (for example DevDrive-Backup).
 
-Keys: versions are encrypted. The first versioned backup of a source creates a recovery key file in the "Backup Center recovery keys" folder in your user folder. Copy it to a password manager or print it. Without it, versions cannot be opened on another computer.
+Keys: versions are encrypted. The first versioned backup of a source creates a recovery key file in the "DevDriveBackup recovery keys" folder in your user folder. Copy it to a password manager or print it. Without it, versions cannot be opened on another computer.
 
 Never copied: rebuildable folders (node_modules, virtual environments, caches), shortcuts (junctions and links; their real folders are copied where they really are), the recycle bin and Windows system folders, and the runner folder that holds credentials.
 '@
@@ -114,7 +114,7 @@ Size: make the window larger or maximise it and everything grows in the same pro
 # Look: cool archival paper, white work surfaces, slate ink. Bahnschrift (an industrial,
 # label-like face shipped with Windows) for names and numbers; Segoe UI for reading.
 # One loud element: the age of the last complete backup on the overview.
-# Colours come from the chosen theme (BackupCenter.Theme.psm1, "Look" page). These tables are filled
+# Colours come from the chosen theme (DevDriveBackup.Theme.psm1, "Look" page). These tables are filled
 # in place, so every handler that reads them sees a new theme at once.
 $uiRoles='Paper','Surface','Ink','Muted','Line','Select','Accent','OnAccent','AccentHover'
 $ui=@{};$stateColor=@{};$stateInk=@{}
@@ -145,17 +145,17 @@ $bold=Get-Face 'Bahnschrift SemiBold' 11.5
 $labelFace=Get-Face 'Bahnschrift' 10
 # Dialogs keep the unzoomed font; the main window's fonts grow with it (see "Zoom" below).
 $dialogFont=$font
-$form=[Windows.Forms.Form]::new();$form.Text='Backup Center';$form.ClientSize=[Drawing.Size]::new(1200,800);$form.StartPosition='CenterScreen';$form.Font=$font;$form.MinimumSize=[Drawing.Size]::new(1216,839);$form.BackColor=$ui.Paper;$form.ForeColor=$ui.Ink
-$iconFile=Join-Path $PSScriptRoot 'BackupCenter.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
+$form=[Windows.Forms.Form]::new();$form.Text='DevDriveBackup';$form.ClientSize=[Drawing.Size]::new(1200,800);$form.StartPosition='CenterScreen';$form.Font=$font;$form.MinimumSize=[Drawing.Size]::new(1216,839);$form.BackColor=$ui.Paper;$form.ForeColor=$ui.Ink
+$iconFile=Join-Path $PSScriptRoot 'DevDriveBackup.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
 # A taskbar button of its own, with this icon, instead of PowerShell's (see Backup.Taskbar.cs).
 # Best effort: without it the window works the same, only under PowerShell's button.
 try{
  Add-Type -Path (Join-Path $PSScriptRoot 'Backup.Taskbar.cs')
- $script:taskbarId='BackupCenter.Window'
+ $script:taskbarId='DevDriveBackup.Window'
  $pwshCommand=(Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1).Source
  if(-not $pwshCommand){$pwshCommand=(Get-Process -Id $PID).Path}
- $script:relaunch='"'+$pwshCommand+'" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $PSScriptRoot 'Backup-Center.ps1')+'"'
- $form.Add_HandleCreated({try{[CenterTaskbar]::Set($form.Handle,$script:taskbarId,$script:relaunch,$iconFile+',0','Backup Center')}catch{}})
+ $script:relaunch='"'+$pwshCommand+'" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $PSScriptRoot 'DevDriveBackup.ps1')+'"'
+ $form.Add_HandleCreated({try{[CenterTaskbar]::Set($form.Handle,$script:taskbarId,$script:relaunch,$iconFile+',0','DevDriveBackup')}catch{}})
  $form.Add_FormClosed({try{[CenterTaskbar]::Set($form.Handle,$null,$null,$null,$null)}catch{}})
 }catch{}
 function New-Control([string]$Type,$Parent,[int]$X,[int]$Y,[int]$W,[int]$H,[string]$Text=''){
@@ -204,7 +204,7 @@ function Set-Grid($g){
 }
 function New-Surface($Parent,[int]$X,[int]$Y,[int]$W,[int]$H){$p=New-Control Panel $Parent $X $Y $W $H;$p.BackColor=$ui.Surface;$p}
 
-$title=New-Control Label $form 24 18 600 34 'Backup Center';$title.Font=Get-Face 'Bahnschrift SemiBold' 19
+$title=New-Control Label $form 24 18 600 34 'DevDriveBackup';$title.Font=Get-Face 'Bahnschrift SemiBold' 19
 $subtitle=New-Control Label $form 26 54 900 20 'Plain copies and versioned history of your folders. Each backup drive has its own profile and its own folders.';$subtitle.ForeColor=$ui.Muted
 
 # Left rail: the drives, drawn like labels with a status stripe.
@@ -368,7 +368,7 @@ $helpText=New-Control RichTextBox $tHelp 24 20 660 618;$helpText.ReadOnly=$true;
 # Rebuilt when the colours or the zoom change: each run of text keeps the font and colour it was written with.
 function Write-HelpText {
  $helpText.Clear();$helpText.BackColor=$tHelp.BackColor
- foreach($sec in @(@('How Backup Center works',$Help.General),@('How each folder can be backed up',$Help.Modes),@('Status colours',$Help.Freshness),@('Computer load',$Help.Load),@('Drive speed',$Help.Speed),@('Drive check',$Help.DriveCheck),@('Colours and size',$Help.Look))){
+ foreach($sec in @(@('How DevDriveBackup works',$Help.General),@('How each folder can be backed up',$Help.Modes),@('Status colours',$Help.Freshness),@('Computer load',$Help.Load),@('Drive speed',$Help.Speed),@('Drive check',$Help.DriveCheck),@('Colours and size',$Help.Look))){
   $helpText.SelectionFont=$bold;$helpText.SelectionColor=$ui.Ink;$helpText.AppendText($sec[0]+"`n`n")
   $helpText.SelectionFont=$font;$helpText.SelectionColor=$ui.Muted;$helpText.AppendText($sec[1].Trim().Replace("`r`n","`n")+"`n`n`n")
  }
@@ -573,9 +573,9 @@ function Start-DriveCheck([string]$Mode){
  $p=Get-SelectedProfile;if(-not $p){return};$d=Get-CenterDrive $p.DestinationVolumeId;if(-not $d.Connected){throw 'Connect the drive first.'}
  if($Mode -eq 'Surface'){
   $hours=[double]$d.SizeGB*1GB/150MB/3600
-  if([Windows.Forms.MessageBox]::Show(("Read every part of this drive?`n`nAt a typical 150 MB/s this takes about {0:N0} hours. It only reads; you can keep working, stop it any time and continue later. The computer stays awake while it runs." -f [math]::Max(1,$hours)),'Backup Center','YesNo','Question') -ne 'Yes'){return}
+  if([Windows.Forms.MessageBox]::Show(("Read every part of this drive?`n`nAt a typical 150 MB/s this takes about {0:N0} hours. It only reads; you can keep working, stop it any time and continue later. The computer stays awake while it runs." -f [math]::Max(1,$hours)),'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
  }
- if($Mode -eq 'LongSelfTest' -and [Windows.Forms.MessageBox]::Show("Ask the drive to read itself completely?`n`nThe drive does this on its own and it takes hours. Keep it connected and the computer awake; a USB box that goes to sleep stops the test. Run a quick check afterwards to see the result.",'Backup Center','YesNo','Question') -ne 'Yes'){return}
+ if($Mode -eq 'LongSelfTest' -and [Windows.Forms.MessageBox]::Show("Ask the drive to read itself completely?`n`nThe drive does this on its own and it takes hours. Keep it connected and the computer awake; a USB box that goes to sleep stops the test. Run a quick check afterwards to see the result.",'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
  $dir=Get-CheckFolder $p;New-Item -ItemType Directory -Path $dir -Force|Out-Null
  # A check keeps check.lock open while it runs, also one started by an earlier window that was closed.
  try{([IO.File]::Open((Join-Path $dir 'check.lock'),'OpenOrCreate','ReadWrite','None')).Dispose()}catch{throw 'A drive check of this drive is still running or finishing. Try again in a minute.'}
@@ -642,7 +642,7 @@ function Update-Modes {
 function Start-Run($Profile,[string[]]$SourceIds,[string]$Purpose){
  foreach($s in @($Profile.Sources|Where-Object {-not $SourceIds.Count -or $_.Id -in $SourceIds})){Sync-CenterJob $Profile $s}
  $steps=@(Get-CenterSteps $Profile $SourceIds $Purpose)
- if(-not $steps.Count){[void][Windows.Forms.MessageBox]::Show('Nothing is selected for backup in these sources. Choose folders on the "What to back up" tab.','Backup Center');return}
+ if(-not $steps.Count){[void][Windows.Forms.MessageBox]::Show('Nothing is selected for backup in these sources. Choose folders on the "What to back up" tab.','DevDriveBackup');return}
  $script:queue.Clear();foreach($s in $steps){$script:queue.Enqueue($s)}
  $script:totalSteps=$steps.Count;$script:runResults=@();$script:runProfile=$Profile
  $progress.Style='Marquee';$progress.MarqueeAnimationSpeed=30
@@ -703,7 +703,7 @@ function Finish-Run {
  }
  $runStatus.Text=$msg.Split("`n")[0]
  Update-ProfileList $script:runProfile.Id
- [void][Windows.Forms.MessageBox]::Show($msg,'Backup Center',[Windows.Forms.MessageBoxButtons]::OK,$(if($bad.Count){[Windows.Forms.MessageBoxIcon]::Warning}else{[Windows.Forms.MessageBoxIcon]::Information}))
+ [void][Windows.Forms.MessageBox]::Show($msg,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,$(if($bad.Count){[Windows.Forms.MessageBoxIcon]::Warning}else{[Windows.Forms.MessageBoxIcon]::Information}))
 }
 # --- Waiting for AI sessions -----------------------------------------------------------------
 # A backup taken while Claude Code or Codex sessions edit files catches them half-way. Before a
@@ -719,7 +719,7 @@ function Request-Backup($Profile,[string[]]$SourceIds){
  $a=Get-CenterAgentActivity -QuietMinutes $quietMinutes
  if(-not $a.Busy){Start-Run $Profile $SourceIds 'Backup';return}
  $msg="AI sessions worked on this computer in the last $quietMinutes minutes:`n`n$(Format-Sessions $a)`n`nA backup taken while they change files can catch them half-way.`n`nYes: wait, and start the backup by itself once nothing has worked for $quietMinutes minutes.`nNo: back up now anyway.`nCancel: do nothing."
- switch([Windows.Forms.MessageBox]::Show($msg,'Backup Center','YesNoCancel','Question')){
+ switch([Windows.Forms.MessageBox]::Show($msg,'DevDriveBackup','YesNoCancel','Question')){
   'No'{Start-Run $Profile $SourceIds 'Backup'}
   'Yes'{$script:waiting=[pscustomobject]@{Profile=$Profile;SourceIds=$SourceIds;Since=Get-Date};Update-WaitStatus $a;$waitTimer.Start();Update-Details}
  }
@@ -756,7 +756,7 @@ $timer.Add_Tick({
  }catch{
   # Keep following the running tool; only a failure to record its result ends this step.
   $runStatus.Text='Could not read the progress this time: '+$_.Exception.Message
-  if($script:current -and $script:current.Process.HasExited){$script:current=$null;$script:queue.Clear();$timer.Stop();Update-Details;[void][Windows.Forms.MessageBox]::Show('The step finished, but its result could not be recorded: '+$_.Exception.Message,'Backup Center')}
+  if($script:current -and $script:current.Process.HasExited){$script:current=$null;$script:queue.Clear();$timer.Stop();Update-Details;[void][Windows.Forms.MessageBox]::Show('The step finished, but its result could not be recorded: '+$_.Exception.Message,'DevDriveBackup')}
  }
 })
 
@@ -944,7 +944,7 @@ function Show-VersionRetentionDialog($Profile) {
   if($f.ShowDialog($form) -ne 'OK'){return $null}
   if($all.Checked){return [pscustomobject]@{Days=0;Weeks=0;Months=0}}
   $v=[pscustomobject]@{Days=[int]$rows[0].Value;Weeks=[int]$rows[1].Value;Months=[int]$rows[2].Value}
-  if($v.Days+$v.Weeks+$v.Months -eq 0){[void][Windows.Forms.MessageBox]::Show('All three are 0, so nothing would be kept apart from the newest version. Choose at least one, or "Keep every version".','Backup Center');return $null}
+  if($v.Days+$v.Weeks+$v.Months -eq 0){[void][Windows.Forms.MessageBox]::Show('All three are 0, so nothing would be kept apart from the newest version. Choose at least one, or "Keep every version".','DevDriveBackup');return $null}
   $v
  }finally{$f.Dispose()}
 }
@@ -958,7 +958,7 @@ $keepVersions.Add_LinkClicked({try{
 
 function Show-NewProfileDialog {
  $drives=@(Get-CenterCandidateDrives|Where-Object {$v=$_.VolumeId;-not @($script:data.Profiles|Where-Object {$_.DestinationVolumeId -eq $v}).Count})
- if(-not $drives.Count){[void][Windows.Forms.MessageBox]::Show('No connected drive without a profile was found. Connect the backup drive and try again.','Backup Center');return $null}
+ if(-not $drives.Count){[void][Windows.Forms.MessageBox]::Show('No connected drive without a profile was found. Connect the backup drive and try again.','DevDriveBackup');return $null}
  $f=[Windows.Forms.Form]::new();$f.Text='New backup drive profile';$f.ClientSize=[Drawing.Size]::new(560,250);$f.Font=$dialogFont;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
  [void](New-Control Label $f 16 16 520 20 'Backup drive:')
  $combo=New-Control ComboBox $f 16 40 528 28;$combo.DropDownStyle='DropDownList'
@@ -986,7 +986,7 @@ function Show-SourceDialog([string]$Path){
  if($f.ShowDialog($form) -ne 'OK'){return $null}
  [pscustomobject]@{Label=$label.Text;Mode=[string]$mode.SelectedValue}
 }
-function Show-Error($e){[void][Windows.Forms.MessageBox]::Show($e.Exception.Message,'Backup Center',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)}
+function Show-Error($e){[void][Windows.Forms.MessageBox]::Show($e.Exception.Message,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)}
 
 function Get-OverviewSource {
  $p=Get-SelectedProfile
@@ -1004,7 +1004,7 @@ $newProfile.Add_Click({try{
 }catch{Show-Error $_}})
 $removeProfile.Add_Click({try{
  $p=Get-SelectedProfile;if(-not $p){return}
- if([Windows.Forms.MessageBox]::Show("Remove the profile '$($p.Name)'?`n`nOnly the profile is forgotten. Nothing on the backup drive or on this computer is deleted, and the folder settings and keys are kept.",'Backup Center','YesNo','Question') -ne 'Yes'){return}
+ if([Windows.Forms.MessageBox]::Show("Remove the profile '$($p.Name)'?`n`nOnly the profile is forgotten. Nothing on the backup drive or on this computer is deleted, and the folder settings and keys are kept.",'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
  Remove-CenterProfile $script:data $p.Id;Save-CenterProfiles $script:data;Update-ProfileList
 }catch{Show-Error $_}})
 $btnAddSource.Add_Click({try{
@@ -1017,7 +1017,7 @@ $btnAddSource.Add_Click({try{
 }catch{Show-Error $_}})
 $btnRemoveSource.Add_Click({try{
  $p=Get-SelectedProfile;$s=Get-SelectedSource;if(-not $s){return}
- if([Windows.Forms.MessageBox]::Show("Stop backing up '$($s.Label)' to this drive?`n`nExisting copies and versions on the drive are kept, and so are its settings and keys.",'Backup Center','YesNo','Question') -ne 'Yes'){return}
+ if([Windows.Forms.MessageBox]::Show("Stop backing up '$($s.Label)' to this drive?`n`nExisting copies and versions on the drive are kept, and so are its settings and keys.",'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
  Remove-CenterSource $script:data $p.Id $s.Id;Save-CenterProfiles $script:data;Update-Details
 }catch{Show-Error $_}})
 $btnAddSub.Add_Click({try{
@@ -1046,23 +1046,23 @@ $btnSaveModes.Add_Click({try{
  $keepSource=$srcList.SelectedIndex
  Update-ProfileList;if($keepSource -ge 0 -and $keepSource -lt $srcList.Items.Count){$srcList.SelectedIndex=$keepSource}
  $runStatus.Text="Saved the folder choices for $($s.Label)."
- [void][Windows.Forms.MessageBox]::Show("Saved. The next backup of '$($s.Label)' uses these choices.",'Backup Center')
+ [void][Windows.Forms.MessageBox]::Show("Saved. The next backup of '$($s.Label)' uses these choices.",'DevDriveBackup')
 }catch{Show-Error $_}})
 $btnBackup.Add_Click({try{$p=Get-SelectedProfile;if($p){Request-Backup $p @()}}catch{Show-Error $_;Update-Details}})
 $btnBackupOne.Add_Click({try{
- $p=Get-SelectedProfile;if(-not $p -or $ovGrid.SelectedRows.Count -eq 0){[void][Windows.Forms.MessageBox]::Show('Select a source in the list first.','Backup Center');return}
+ $p=Get-SelectedProfile;if(-not $p -or $ovGrid.SelectedRows.Count -eq 0){[void][Windows.Forms.MessageBox]::Show('Select a source in the list first.','DevDriveBackup');return}
  Request-Backup $p @([string]$ovGrid.SelectedRows[0].Tag)
 }catch{Show-Error $_;Update-Details}})
 $btnVerify.Add_Click({try{
  $p=Get-SelectedProfile;if(-not $p){return}
- if([Windows.Forms.MessageBox]::Show('Check every backed-up file of this drive against its source? This reads everything again and can take much longer than a backup. Nothing is changed.','Backup Center','YesNo','Question') -ne 'Yes'){return}
- $ids=if($ovGrid.SelectedRows.Count -and [Windows.Forms.MessageBox]::Show('Only the selected source? (No = all sources)','Backup Center','YesNo','Question') -eq 'Yes'){@([string]$ovGrid.SelectedRows[0].Tag)}else{@()}
+ if([Windows.Forms.MessageBox]::Show('Check every backed-up file of this drive against its source? This reads everything again and can take much longer than a backup. Nothing is changed.','DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
+ $ids=if($ovGrid.SelectedRows.Count -and [Windows.Forms.MessageBox]::Show('Only the selected source? (No = all sources)','DevDriveBackup','YesNo','Question') -eq 'Yes'){@([string]$ovGrid.SelectedRows[0].Tag)}else{@()}
  Start-Run $p $ids 'Verify'
 }catch{Show-Error $_;Update-Details}})
 $btnStop.Add_Click({
  if($script:waiting -and -not $script:current){$waitTimer.Stop();$script:waiting=$null;$runStatus.Text='Stopped waiting. Nothing was backed up.';Update-Details;return}
  if(-not $script:current){return}
- if([Windows.Forms.MessageBox]::Show('Stop the running backup? Files already copied stay on the drive; the stopped step is recorded as not finished.','Backup Center','YesNo','Question') -ne 'Yes'){return}
+ if([Windows.Forms.MessageBox]::Show('Stop the running backup? Files already copied stay on the drive; the stopped step is recorded as not finished.','DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
  $script:queue.Clear();try{$script:current.Process.Kill($true)}catch{}
 })
 $btnOpen.Add_Click({try{
@@ -1114,7 +1114,7 @@ $btnCheckStop.Add_Click({
  if($script:check){New-Item -ItemType File -Path (Join-Path $script:check.Dir 'stop.request') -Force|Out-Null;$btnCheckStop.Enabled=$false;$checkStatus.Text='Stopping after the current step...'}
 })
 $btnInstallTool.Add_Click({try{
- if([Windows.Forms.MessageBox]::Show("Download and install the free smartmontools program (about 1.5 MB, from its official GitHub release, checked against a fixed checksum)?`n`nIt reads the drive's own health report and runs its self-tests. Only its command-line tool is installed, into the bin folder of Backup Center: no service, Start menu entry or system setting. Windows asks for administrator rights.",'Backup Center','YesNo','Question') -ne 'Yes'){return}
+ if([Windows.Forms.MessageBox]::Show("Download and install the free smartmontools program (about 1.5 MB, from its official GitHub release, checked against a fixed checksum)?`n`nIt reads the drive's own health report and runs its self-tests. Only its command-line tool is installed, into the bin folder of DevDriveBackup: no service, Start menu entry or system setting. Windows asks for administrator rights.",'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
  $script:install=Start-CenterStep ([pscustomobject]@{FilePath=(Get-Process -Id $PID).Path;Arguments=@('-NoProfile','-File',(Join-Path $PSScriptRoot 'Install-DriveTools.ps1'));Priority=$null}) $null
  $checkStatus.Text='Installing the health tool...';$checkTimer.Start();Update-Details
 }catch{Show-Error $_}})
@@ -1143,7 +1143,7 @@ $checkTimer.Add_Tick({
   $r=Read-CheckFile $c.Dir 'run.json'
   $script:check=$null;$checkProgress.Value=0
   Update-Details
-  if($r -and -not $r.Success -and $r.Message -notlike 'Stopped*'){[void][Windows.Forms.MessageBox]::Show('The drive check did not finish: '+$r.Message,'Backup Center',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)}
+  if($r -and -not $r.Success -and $r.Message -notlike 'Stopped*'){[void][Windows.Forms.MessageBox]::Show('The drive check did not finish: '+$r.Message,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)}
  }catch{$checkStatus.Text='Could not read the drive check progress this time: '+$_.Exception.Message}
 })
 $loadPick.Add_SelectedIndexChanged({try{if(-not $script:loadingLoad -and $loadPick.SelectedItem){Set-ProfileLoad ([string]$loadPick.SelectedItem)}}catch{Show-Error $_}})
@@ -1152,7 +1152,7 @@ $btnSaveLoad.Add_Click({try{
  $p=Get-SelectedProfile;if(-not $p){return}
  $p|Add-Member -NotePropertyName CustomLoad -NotePropertyValue ([pscustomobject]@{CpuThreads=[int]$customThreads.Value;MemoryMiB=[int]$customMemory.Value;CopyThreads=[int]$customFiles.Value;Priority=$(if([string]$customPriority.SelectedItem -eq 'Normal'){'Normal'}else{'BelowNormal'})}) -Force
  Set-ProfileLoad 'Custom'
- [void][Windows.Forms.MessageBox]::Show('Saved. '+(Format-Load (Get-CenterLoad $p)),'Backup Center')
+ [void][Windows.Forms.MessageBox]::Show('Saved. '+(Format-Load (Get-CenterLoad $p)),'DevDriveBackup')
 }catch{Show-Error $_}})
 $oldDays.Add_ValueChanged({try{
  if($script:loadingDays){return};$p=Get-SelectedProfile;if(-not $p){return}
@@ -1164,9 +1164,9 @@ $keepDeleted.Add_ValueChanged({try{
 }catch{Show-Error $_}})
 $form.Add_FormClosing({param($s,$e)
  # Ask about everything first; stop nothing unless the window really closes.
- if($script:current -and [Windows.Forms.MessageBox]::Show('A backup is running. Stop it and close?','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
- if($script:waiting -and -not $script:current -and [Windows.Forms.MessageBox]::Show('A backup is waiting for AI sessions to finish. Closing cancels it. Close anyway?','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
- if($script:check -and [Windows.Forms.MessageBox]::Show('A drive check is running. Stop it and close? A full scan continues later from where it stopped.','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
+ if($script:current -and [Windows.Forms.MessageBox]::Show('A backup is running. Stop it and close?','DevDriveBackup','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
+ if($script:waiting -and -not $script:current -and [Windows.Forms.MessageBox]::Show('A backup is waiting for AI sessions to finish. Closing cancels it. Close anyway?','DevDriveBackup','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
+ if($script:check -and [Windows.Forms.MessageBox]::Show('A drive check is running. Stop it and close? A full scan continues later from where it stopped.','DevDriveBackup','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
  if($script:current){$script:queue.Clear();try{$script:current.Process.Kill($true)}catch{}}
  if($script:check){New-Item -ItemType File -Path (Join-Path $script:check.Dir 'stop.request') -Force|Out-Null}
 })

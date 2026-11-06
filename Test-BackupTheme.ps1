@@ -1,8 +1,8 @@
 #Requires -Version 7.2
-# Colour themes (BackupCenter.Theme.psm1): every built-in theme is readable by WCAG 2.2, custom themes
+# Colour themes (DevDriveBackup.Theme.psm1): every built-in theme is readable by WCAG 2.2, custom themes
 # derive readable colours, roles never share a colour, and the saved choice survives bad files. Needs no drive.
 $ErrorActionPreference='Stop'
-Import-Module (Join-Path $PSScriptRoot 'BackupCenter.Theme.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'DevDriveBackup.Theme.psm1') -Force
 function Assert($ok,[string]$message){if(-not $ok){throw "FAIL $message"};Write-Output "PASS $message"}
 $roles='Paper','Surface','Ink','Muted','Line','Select','Accent','OnAccent','AccentHover'
 

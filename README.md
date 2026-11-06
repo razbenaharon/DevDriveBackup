@@ -1,15 +1,15 @@
-# Backup Center
+# DevDriveBackup
 
-**Backup Center is a free, open-source Windows backup tool for developers.** It backs up a Windows Dev Drive (ReFS or VHDX), code projects and any other folder to external drives, as plain file copies you can open anywhere, as encrypted versioned history, or both. You choose per folder. One window shows how fresh each drive's backup is, lets you set how much CPU and memory a backup may use, and explains every option in plain language.
+**DevDriveBackup is a free, open-source Windows backup tool for developers.** It backs up a Windows Dev Drive (ReFS or VHDX), code projects and any other folder to external drives, as plain file copies you can open anywhere, as encrypted versioned history, or both. You choose per folder. One window shows how fresh each drive's backup is, lets you set how much CPU and memory a backup may use, and explains every option in plain language.
 
 - **Platform:** Windows 10/11, PowerShell 7.2+
 - **Engines:** robocopy for plain copies, [restic](https://restic.net/) for encrypted versions
 - **License:** MIT
 - **Status:** working and tested on real drives; first public release
 
-## Why Backup Center
+## Why DevDriveBackup
 
-Most backup tools either copy everything slowly or hide your files in a format only they can read. Developer drives make this worse: hundreds of thousands of small files, `node_modules` and virtual environments that rebuild anyway, junctions, Git worktrees and files locked by running tools. Backup Center is built for exactly that.
+Most backup tools either copy everything slowly or hide your files in a format only they can read. Developer drives make this worse: hundreds of thousands of small files, `node_modules` and virtual environments that rebuild anyway, junctions, Git worktrees and files locked by running tools. DevDriveBackup is built for exactly that.
 
 | What you get | How |
 |---|---|
@@ -33,16 +33,16 @@ Most backup tools either copy everything slowly or hide your files in a format o
 ## Install
 
 1. Install [PowerShell 7.2 or newer](https://aka.ms/powershell).
-2. Get the code: `git clone https://github.com/razbenaharon/BackupCenter.git`, or download the ZIP and run `Get-ChildItem -Recurse | Unblock-File` in the folder so Windows allows the scripts.
+2. Get the code: `git clone https://github.com/razbenaharon/DevDriveBackup.git`, or download the ZIP and run `Get-ChildItem -Recurse | Unblock-File` in the folder so Windows allows the scripts.
 3. Only if you want versioned history: `pwsh -NoProfile -File ./Install-BackupEngine.ps1` downloads restic 0.19.1 into `bin\` and checks its pinned SHA-256.
 4. Only if you want the drive's own health report in *Drive check*: **Install health tool** on that page, or `pwsh -NoProfile -File ./Install-DriveTools.ps1`, downloads smartmontools 7.5, checks its pinned SHA-256 and installs only `smartctl` into `bin\smartmontools` (the installer asks for administrator rights; no service, Start menu entry or PATH change).
-5. Optional: `pwsh -NoProfile -File ./New-BackupCenterShortcut.ps1` puts a **Backup Center** shortcut with the program icon on the desktop.
+5. Optional: `pwsh -NoProfile -File ./New-DevDriveBackupShortcut.ps1` puts a **DevDriveBackup** shortcut with the program icon on the desktop.
 
 Backups need no administrator rights, PATH changes or services. Only *Drive check* asks Windows for administrator rights, each time it runs, because reading a drive directly needs them.
 
 ## Quick start
 
-1. Connect the backup drive (NTFS recommended) and start `BackupCenter.cmd`.
+1. Connect the backup drive (NTFS recommended) and start `DevDriveBackup.cmd`.
 2. **New profile...** and choose the drive.
 3. On **What to back up**, **Add folder...** for each drive or folder, and set each subfolder to *Plain copy*, *Versions*, *Both* or *Skip*.
 4. Choose a **Computer load** level and press **Back up now**.
@@ -51,7 +51,7 @@ The first plain copy is verified automatically, file by file. After that, back u
 
 ## How it works
 
-**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`, or **Keep deleted for** on the overview); `-KeepRecovery N` then deletes all but the newest N dated recovery folders. Nothing is moved aside after a run in which robocopy failed. Verification hashes both sides in parallel and counts selected files missing from the copy. Backup Center's own password, recovery-key and state folders are never copied by either engine.
+**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`, or **Keep deleted for** on the overview); `-KeepRecovery N` then deletes all but the newest N dated recovery folders. Nothing is moved aside after a run in which robocopy failed. Verification hashes both sides in parallel and counts selected files missing from the copy. DevDriveBackup's own password, recovery-key and state folders are never copied by either engine.
 
 **Versions** (`Backup-Worker.ps1`) run restic with a random 256-bit password stored for your Windows account (DPAPI) plus a portable recovery key file, a hard memory cap (Windows Job Object), CPU and I/O limits, and a structural `restic check` after every backup. Restore always goes to a new folder and verifies restored content.
 
@@ -70,12 +70,12 @@ The first plain copy is verified automatically, file by file. After that, back u
 
 | File | Purpose |
 |---|---|
-| `BackupCenter.cmd`, `Backup-Center.ps1` | The main window |
-| `BackupCenter.Data.psm1` | Profiles, sources, history, freshness, load levels |
+| `DevDriveBackup.cmd`, `DevDriveBackup.ps1` | The main window |
+| `DevDriveBackup.Data.psm1` | Profiles, sources, history, freshness, load levels |
 | `Invoke-FastMirror.ps1`, `Backup.MirrorVerifier.cs` | Plain copy and verification |
 | `Backup-Worker.ps1` | Versioned backup, check, restore, history, keys |
 | `Backup-History.ps1`, `Backup-Security.ps1` | Versions and restore; password and recovery key windows |
-| `BackupCenter-Advanced.cmd`, `Backup-Manager.ps1` | Advanced window for one versioned source |
+| `DevDriveBackup-Advanced.cmd`, `Backup-Manager.ps1` | Advanced window for one versioned source |
 | `Set-BackupDestination.ps1`, `Measure-BackupDisk.ps1` | Drive inspection, USB link speed, benchmark |
 | `Invoke-DriveCheck.ps1`, `Backup.DriveCheck.psm1`, `Install-DriveTools.ps1` | Drive check (runs as administrator, read only), its verdict rules, health tool installer |
 | `Inspect-DevDrive.ps1`, `Build-BackupReport.py` | Optional size inventory and offline HTML report |
@@ -86,7 +86,7 @@ Personal skips go in a job file: `Exclude` takes folder names (wildcards allowed
 ## Frequently asked questions
 
 **How do I back up a Windows Dev Drive?**
-Add the Dev Drive (for example `E:\`) as a source in Backup Center and back it up to an external drive. Back up the files inside the mounted drive, not the `.vhdx` file while it is in use. Backup Center refuses to put the backup on the physical disk that holds the VHDX.
+Add the Dev Drive (for example `E:\`) as a source in DevDriveBackup and back it up to an external drive. Back up the files inside the mounted drive, not the `.vhdx` file while it is in use. DevDriveBackup refuses to put the backup on the physical disk that holds the VHDX.
 
 **Does it compress my files?**
 The plain copy does not; it is an ordinary file-for-file copy. Versions are compressed, deduplicated and encrypted by restic.
@@ -117,7 +117,7 @@ No, by design. You decide when to back up; the window shows how old each backup 
 Each test uses disposable folders and uniquely named folders on the destination drive and never touches your real backups:
 
 ```powershell
-pwsh -NoProfile -File ./Test-BackupCenter.ps1 -DestinationDrive Y      # window data layer, both engines
+pwsh -NoProfile -File ./Test-DevDriveBackup.ps1 -DestinationDrive Y      # window data layer, both engines
 pwsh -NoProfile -File ./Test-BackupSelection.ps1 -DestinationDrive Y   # per-folder modes in both engines
 pwsh -NoProfile -File ./Test-BackupSystem.ps1 -DestinationDrive Y      # versions, restore, history, prune
 pwsh -NoProfile -File ./Test-BackupSecurity.ps1 -DestinationDrive Y    # password change and recovery keys

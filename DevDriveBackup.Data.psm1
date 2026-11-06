@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Data layer of the Backup Center: drive profiles, their sources, run history and freshness.
+# Data layer of the DevDriveBackup: drive profiles, their sources, run history and freshness.
 #
 # A profile belongs to one backup drive (matched by volume identity, not drive letter) and
 # lists the folders backed up to that drive. Each source is any folder on any local volume
@@ -67,7 +67,7 @@ function Set-CenterPaths([string]$Root) {
   $script:Paths=[pscustomobject]@{Profiles=(Join-Path $Root 'profiles.local.json');Jobs=(Join-Path $Root 'jobs');History=(Join-Path $Root 'history.jsonl');Keys=(Join-Path $Root 'keys');Documents=(Join-Path $Root 'documents');DriveCheck=(Join-Path $Root 'drive-check');Appearance=(Join-Path $Root 'appearance.json')}
  }else{
   $app=Join-Path $env:LOCALAPPDATA 'DevDriveMirror'
-  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $script:ToolRoot 'profiles.local.json');Jobs=(Join-Path $script:ToolRoot 'jobs');History=(Join-Path $app 'center\history.jsonl');Keys=$app;Documents=(Join-Path $env:USERPROFILE 'Backup Center recovery keys');DriveCheck=(Join-Path $app 'drive-check');Appearance=(Join-Path $app 'center\appearance.json')}  # local, not a synced Documents folder
+  $script:Paths=[pscustomobject]@{Profiles=(Join-Path $script:ToolRoot 'profiles.local.json');Jobs=(Join-Path $script:ToolRoot 'jobs');History=(Join-Path $app 'center\history.jsonl');Keys=$app;Documents=(Join-Path $env:USERPROFILE $(if(Test-Path -LiteralPath (Join-Path $env:USERPROFILE 'Backup Center recovery keys')){'Backup Center recovery keys'}else{'DevDriveBackup recovery keys'}));DriveCheck=(Join-Path $app 'drive-check');Appearance=(Join-Path $app 'center\appearance.json')}  # local, not a synced Documents folder
  }
  $script:Paths
 }
@@ -223,7 +223,7 @@ function Save-CenterJob($Job,[string]$ConfigPath,[scriptblock]$Update) {
   if($fresh -and (& $key $fresh) -ine $keyPath){throw 'The password settings of this source changed while saving. Try again.'}
   if($Update){if(-not $fresh){throw "Job file not found: $ConfigPath"};[void](& $Update $fresh);$Job=$fresh}
   elseif($fresh){
-   if((& $key $Job) -ine $keyPath){throw 'The password settings of this source changed elsewhere. Close and reopen Backup Center.'}
+   if((& $key $Job) -ine $keyPath){throw 'The password settings of this source changed elsewhere. Close and reopen DevDriveBackup.'}
    if($fresh.PSObject.Properties['RecoveryKeyPath']){$Job|Add-Member -NotePropertyName RecoveryKeyPath -NotePropertyValue $fresh.RecoveryKeyPath -Force}
   }
   [void](Write-BackupStatus $Job $ConfigPath)
