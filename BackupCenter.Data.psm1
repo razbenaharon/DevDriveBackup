@@ -300,6 +300,53 @@ function Get-CenterFreshness($Profile,$History,[datetime]$Now=(Get-Date)) {
  [pscustomobject]@{Rows=$rows;LastComplete=$profileComplete;State=$state}
 }
 
+# --- Other work on this computer -----------------------------------------------------------
+function Get-CenterAgentActivity {
+ # Are AI coding sessions (Claude Code, Codex) still working? A backup taken while they edit files
+ # catches them half-way. A working session appends to its conversation file every few seconds, which
+ # is a reliable sign: the app's own "running" flag and the list of open programs are not (helper
+ # programs stay open while idle). A Codex program that is running also counts as work.
+ param([int]$QuietMinutes=10,[datetime]$Now=(Get-Date),
+  [string]$ClaudeRoot=(Join-Path $env:USERPROFILE '.claude\projects'),
+  [string]$CodexRoot=(Join-Path $env:USERPROFILE '.codex\sessions'),
+  [switch]$SkipProcesses)
+ $cut=$Now.AddMinutes(-$QuietMinutes);$recent=@();$newest=$null
+ foreach($root in @($ClaudeRoot,$CodexRoot)){
+  if(-not $root -or -not(Test-Path -LiteralPath $root -PathType Container)){continue}
+  foreach($f in [IO.Directory]::EnumerateFiles($root,'*.jsonl',[IO.SearchOption]::AllDirectories)){
+   $t=[IO.File]::GetLastWriteTime($f)
+   if($t -gt $Now){$t=$Now}
+   if(-not $newest -or $t -gt $newest){$newest=$t}
+   if($t -gt $cut){$recent+=[pscustomobject]@{Path=$f;LastWrite=$t;Codex=($root -eq $CodexRoot)}}
+  }
+ }
+ $sessions=@()
+ foreach($r in @($recent|Sort-Object LastWrite -Descending)){
+  # A helper agent writes under <session>\subagents; it belongs to its parent session.
+  $owner=$r.Path;if($owner -match '^(.*)\\subagents\\[^\\]+$'){$owner=[IO.Path]::GetDirectoryName($matches[1])+'\'+[IO.Path]::GetFileName($matches[1])+'.jsonl'}
+  if(@($sessions|Where-Object {$_.Owner -eq $owner}).Count){continue}
+  $name=if($r.Codex){'Codex session'}else{Get-CenterSessionTitle $owner}
+  $sessions+=[pscustomobject]@{Owner=$owner;Name=$name;LastWrite=$r.LastWrite}
+ }
+ $codex=if($SkipProcesses){0}else{@(Get-Process -Name codex -ErrorAction SilentlyContinue).Count}
+ [pscustomobject]@{
+  Busy=($sessions.Count -gt 0 -or $codex -gt 0);Sessions=$sessions;CodexPrograms=$codex
+  LastActivity=$newest;QuietMinutes=$QuietMinutes
+ }
+}
+function Get-CenterSessionTitle([string]$Path) {
+ # The newest title in the last part of a conversation file; otherwise the project folder name.
+ $fallback=[IO.Path]::GetFileName([IO.Path]::GetDirectoryName($Path)) -replace '^[A-Za-z]--',''
+ if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return $fallback}
+ try{
+  $fs=[IO.File]::Open($Path,'Open','Read','ReadWrite,Delete')
+  try{$len=[Math]::Min($fs.Length,262144);[void]$fs.Seek(-$len,'End');$buf=[byte[]]::new($len);[void]$fs.Read($buf,0,$len);$text=[Text.Encoding]::UTF8.GetString($buf)}finally{$fs.Dispose()}
+  $m=[regex]::Matches($text,'"(?:customTitle|aiTitle)":"((?:[^"\\]|\\.)*)"')
+  if($m.Count){return [regex]::Unescape($m[$m.Count-1].Groups[1].Value)}
+ }catch{}
+ $fallback
+}
+
 # --- Running ------------------------------------------------------------------------------
 function Get-CenterKeepDeleted($Profile) {
  # KeepDeleted N (1-100): files deleted from the source are moved out of the plain copy into a dated
@@ -391,4 +438,4 @@ function Get-CenterStaleProfiles([datetime]$Now=(Get-Date)) {
 Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterDrive,Get-CenterCandidateDrives,
  New-CenterProfile,Remove-CenterProfile,Add-CenterSource,Remove-CenterSource,Read-CenterJob,Save-CenterJob,Get-CenterSourceKinds,Sync-CenterJob,
  Add-CenterHistory,Get-CenterHistory,Get-LastSuccess,Get-FreshnessState,Format-CenterAge,Get-CenterFreshness,
- Get-CenterSteps,Start-CenterStep,Complete-CenterStep,Get-CenterStaleProfiles
+ Get-CenterSteps,Start-CenterStep,Complete-CenterStep,Get-CenterStaleProfiles,Get-CenterAgentActivity,Get-CenterSessionTitle

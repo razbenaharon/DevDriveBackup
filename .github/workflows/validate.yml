@@ -39,6 +39,9 @@ jobs:
       - name: Verify drive check rules
         shell: pwsh
         run: ./Test-BackupDriveCheck.ps1
+      - name: Verify the AI session activity rule
+        shell: pwsh
+        run: ./Test-BackupActivity.ps1
       - name: Verify history selection safeguards
         shell: pwsh
         run: ./Test-BackupHistory.ps1

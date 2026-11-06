@@ -19,6 +19,7 @@ Most backup tools either copy everything slowly or hide your files in a format o
 | **Per-folder choice** | Each folder is *Plain copy*, *Versions*, *Both* or *Skip*. A folder inside a skipped folder can still be backed up. |
 | **Proof, not hope** | *Check backup content* re-reads both sides of every file and compares SHA-256 hashes (plain copy) or verifies all repository data (versions). |
 | **Nothing deleted by surprise** | Files you delete from the source stay in the copy, or, with *Keep deleted for N backups*, move to a dated recovery folder beside it; only the newest N recovery folders are kept. |
+| **Waits for AI sessions** | Before a backup it looks for Claude Code or Codex sessions that worked in the last 10 minutes (their conversation files change while they work). If there are any, it names them and offers to wait and start by itself once all have been quiet for 10 minutes. |
 | **Load control for your hardware** | Detects your processor and memory and offers Light, Balanced, Strong and Maximum levels, or your own threads, memory limit, parallel files and priority. You can lower the load while a backup runs. |
 | **Several backup drives, each with its own content** | One profile per drive, recognised by the drive itself rather than its letter. |
 | **Knows how fresh each backup is** | The age of the last complete backup, coloured green, blue or orange against the number of days you choose. |
@@ -120,7 +121,7 @@ pwsh -NoProfile -File ./Test-BackupSystem.ps1 -DestinationDrive Y      # version
 pwsh -NoProfile -File ./Test-BackupSecurity.ps1 -DestinationDrive Y    # password change and recovery keys
 ```
 
-`Test-BackupCopyRules.ps1`, `Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
+`Test-BackupCopyRules.ps1`, `Test-BackupActivity.ps1`, `Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
 
 ### Keeping your own details out of a fork
 

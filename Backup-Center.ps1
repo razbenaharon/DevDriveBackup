@@ -50,7 +50,7 @@ Grey: never backed up, or nothing selected.
 A drive is only as fresh as its oldest source. A source using Both is only as fresh as the older of its copy and its versions.
 '@
  Overview=@'
-Back up now runs every source of this drive, one after another: first the plain copy, then the versions, as each source's folder choices say. The drive must be connected.
+Back up now runs every source of this drive, one after another: first the plain copy, then the versions, as each source's folder choices say. The drive must be connected. If AI coding sessions (Claude Code, Codex) worked in the last 10 minutes, it asks first, and can wait for them and start by itself.
 
 Check backup content reads every file again on both sides and compares them (plain copy), or reads every stored piece back and checks it (versions). It takes much longer than a backup and changes nothing.
 '@
@@ -314,7 +314,7 @@ $helpText.Select(0,0)
 
 # --- State and refresh -------------------------------------------------------------------
 $script:data=Read-CenterProfiles
-$script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0
+$script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0;$script:waiting=$null
 $script:lastFree=$null;$script:lastTick=$null;$script:loadingModes=$false
 $script:check=$null;$script:install=$null
 $smartTool=Join-Path $PSScriptRoot 'bin\smartmontools\bin\smartctl.exe'
@@ -364,8 +364,8 @@ function Update-ProfileList([string]$SelectId) {
 function Update-Details {
  $p=Get-SelectedProfile
  $has=[bool]$p
- foreach($c in @($btnBackup,$btnBackupOne,$btnVerify,$btnOpen,$btnRestore,$btnKeys,$btnAddSource,$btnRemoveSource,$btnSaveModes,$btnAddSub,$btnSpeed,$btnSaveLoad,$oldDays,$keepDeleted,$removeProfile)){$c.Enabled=$has -and -not $script:current}
- $btnStop.Enabled=[bool]$script:current
+ foreach($c in @($btnBackup,$btnBackupOne,$btnVerify,$btnOpen,$btnRestore,$btnKeys,$btnAddSource,$btnRemoveSource,$btnSaveModes,$btnAddSub,$btnSpeed,$btnSaveLoad,$oldDays,$keepDeleted,$removeProfile)){$c.Enabled=$has -and -not $script:current -and -not $script:waiting}
+ $btnStop.Enabled=[bool]($script:current -or $script:waiting)
  $ovGrid.Rows.Clear();$runsGrid.Rows.Clear();$srcList.Items.Clear();$modeGrid.Rows.Clear()
  if(-not $p){$ovTitle.Text='No backup drive yet';$ovDrive.Text='Connect a backup drive and choose New profile.';$ageNumber.Text='';$ageUnit.Text='';$ageWhen.Text='';$meterFill.Width=0;$meterNote.Text='';$driveInfo.Text='';$driveFacts.Text='';Update-DriveCheck $null $null;return}
  $history=@(Get-CenterHistory);$d=Get-CenterDrive $p.DestinationVolumeId;$f=Get-CenterFreshness $p $history
@@ -402,7 +402,7 @@ function Update-Details {
  if(-not $d.Connected){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnOpen.Enabled=$false;$btnRestore.Enabled=$false;$btnSpeed.Enabled=$false}
  # Say why the buttons are off; a connected drive keeps the result of its last run.
  $offline='Connect this drive to back up, check the backup or restore.'
- if(-not $script:current){if(-not $d.Connected){$runStatus.Text=$offline}elseif($runStatus.Text -eq $offline){$runStatus.Text='Ready.'}}
+ if(-not $script:current -and -not $script:waiting){if(-not $d.Connected){$runStatus.Text=$offline}elseif($runStatus.Text -eq $offline){$runStatus.Text='Ready.'}}
  # A backup and a drive check of the same drive would compete for it and slow each other down.
  if($script:check -and $script:check.ProfileId -eq $p.Id){$btnBackup.Enabled=$false;$btnBackupOne.Enabled=$false;$btnVerify.Enabled=$false;$btnSpeed.Enabled=$false;$removeProfile.Enabled=$false}
  if($script:speedRun){$btnSpeed.Enabled=$false;if($script:speedProfile.Id -eq $p.Id){$removeProfile.Enabled=$false}}
@@ -588,6 +588,44 @@ function Finish-Run {
  Update-ProfileList $script:runProfile.Id
  [void][Windows.Forms.MessageBox]::Show($msg,'Backup Center',[Windows.Forms.MessageBoxButtons]::OK,$(if($bad.Count){[Windows.Forms.MessageBoxIcon]::Warning}else{[Windows.Forms.MessageBoxIcon]::Information}))
 }
+# --- Waiting for AI sessions -----------------------------------------------------------------
+# A backup taken while Claude Code or Codex sessions edit files catches them half-way. Before a
+# backup, ask; on Wait, check every 30 s and start once nothing has worked for $quietMinutes.
+$quietMinutes=10
+function Format-Sessions($A){
+ $names=@($A.Sessions|Select-Object -First 4|ForEach-Object {'  - {0} (last active {1:HH:mm})' -f $_.Name,$_.LastWrite})
+ if($A.Sessions.Count -gt 4){$names+="  - and $($A.Sessions.Count-4) more"}
+ if($A.CodexPrograms){$names+='  - a Codex program is running'}
+ $names -join "`n"
+}
+function Request-Backup($Profile,[string[]]$SourceIds){
+ $a=Get-CenterAgentActivity -QuietMinutes $quietMinutes
+ if(-not $a.Busy){Start-Run $Profile $SourceIds 'Backup';return}
+ $msg="AI sessions worked on this computer in the last $quietMinutes minutes:`n`n$(Format-Sessions $a)`n`nA backup taken while they change files can catch them half-way.`n`nYes: wait, and start the backup by itself once nothing has worked for $quietMinutes minutes.`nNo: back up now anyway.`nCancel: do nothing."
+ switch([Windows.Forms.MessageBox]::Show($msg,'Backup Center','YesNoCancel','Question')){
+  'No'{Start-Run $Profile $SourceIds 'Backup'}
+  'Yes'{$script:waiting=[pscustomobject]@{Profile=$Profile;SourceIds=$SourceIds;Since=Get-Date};Update-WaitStatus $a;$waitTimer.Start();Update-Details}
+ }
+}
+function Update-WaitStatus($A){
+ $w=$script:waiting;$mins=[int]((Get-Date)-$w.Since).TotalMinutes
+ $who=@($A.Sessions|Select-Object -First 3|ForEach-Object Name) -join ', ';if($A.CodexPrograms){$who=(@($who,'Codex')|Where-Object {$_}) -join ', '}
+ $last=if($A.LastActivity){' Last activity {0:HH:mm}.' -f $A.LastActivity}else{''}
+ $runStatus.Text="Waiting $mins min for AI sessions to finish: $who.$last The backup starts by itself after $quietMinutes quiet minutes. Stop cancels the wait."
+}
+$waitTimer=[Windows.Forms.Timer]::new();$waitTimer.Interval=30000
+$waitTimer.Add_Tick({
+ try{
+  if(-not $script:waiting){$waitTimer.Stop();return}
+  $a=Get-CenterAgentActivity -QuietMinutes $quietMinutes
+  if($a.Busy){Update-WaitStatus $a;return}
+  $waitTimer.Stop();$w=$script:waiting;$script:waiting=$null
+  $fresh=@($script:data.Profiles|Where-Object {$_.Id -eq $w.Profile.Id})[0];if(-not $fresh){$fresh=$w.Profile}
+  if(-not (Get-CenterDrive $fresh.DestinationVolumeId).Connected){$runStatus.Text='The AI sessions finished, but the backup drive is not connected. Nothing was backed up.';Update-Details;return}
+  Start-Run $fresh $w.SourceIds 'Backup'
+ }catch{$waitTimer.Stop();$script:waiting=$null;Show-Error $_;Update-Details}
+})
+
 $timer=[Windows.Forms.Timer]::new();$timer.Interval=1000
 $timer.Add_Tick({
  try{
@@ -698,10 +736,10 @@ $btnSaveModes.Add_Click({try{
  $runStatus.Text="Saved the folder choices for $($s.Label)."
  [void][Windows.Forms.MessageBox]::Show("Saved. The next backup of '$($s.Label)' uses these choices.",'Backup Center')
 }catch{Show-Error $_}})
-$btnBackup.Add_Click({try{$p=Get-SelectedProfile;if($p){Start-Run $p @() 'Backup'}}catch{Show-Error $_;Update-Details}})
+$btnBackup.Add_Click({try{$p=Get-SelectedProfile;if($p){Request-Backup $p @()}}catch{Show-Error $_;Update-Details}})
 $btnBackupOne.Add_Click({try{
  $p=Get-SelectedProfile;if(-not $p -or $ovGrid.SelectedRows.Count -eq 0){[void][Windows.Forms.MessageBox]::Show('Select a source in the list first.','Backup Center');return}
- Start-Run $p @([string]$ovGrid.SelectedRows[0].Tag) 'Backup'
+ Request-Backup $p @([string]$ovGrid.SelectedRows[0].Tag)
 }catch{Show-Error $_;Update-Details}})
 $btnVerify.Add_Click({try{
  $p=Get-SelectedProfile;if(-not $p){return}
@@ -710,6 +748,7 @@ $btnVerify.Add_Click({try{
  Start-Run $p $ids 'Verify'
 }catch{Show-Error $_;Update-Details}})
 $btnStop.Add_Click({
+ if($script:waiting -and -not $script:current){$waitTimer.Stop();$script:waiting=$null;$runStatus.Text='Stopped waiting. Nothing was backed up.';Update-Details;return}
  if(-not $script:current){return}
  if([Windows.Forms.MessageBox]::Show('Stop the running backup? Files already copied stay on the drive; the stopped step is recorded as not finished.','Backup Center','YesNo','Question') -ne 'Yes'){return}
  $script:queue.Clear();try{$script:current.Process.Kill($true)}catch{}
@@ -814,6 +853,7 @@ $keepDeleted.Add_ValueChanged({try{
 $form.Add_FormClosing({param($s,$e)
  # Ask about everything first; stop nothing unless the window really closes.
  if($script:current -and [Windows.Forms.MessageBox]::Show('A backup is running. Stop it and close?','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
+ if($script:waiting -and -not $script:current -and [Windows.Forms.MessageBox]::Show('A backup is waiting for AI sessions to finish. Closing cancels it. Close anyway?','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
  if($script:check -and [Windows.Forms.MessageBox]::Show('A drive check is running. Stop it and close? A full scan continues later from where it stopped.','Backup Center','YesNo','Warning') -ne 'Yes'){$e.Cancel=$true;return}
  if($script:current){$script:queue.Clear();try{$script:current.Process.Kill($true)}catch{}}
  if($script:check){New-Item -ItemType File -Path (Join-Path $script:check.Dir 'stop.request') -Force|Out-Null}
