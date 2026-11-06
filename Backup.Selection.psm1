@@ -93,4 +93,23 @@ function Get-BackupRegions($Selection,[ValidateSet('Mirror','Versioned')][string
  }
 }
 
-Export-ModuleMember -Function Get-BackupModeNames,Test-BackupModeIncludes,ConvertTo-SelectionPath,Get-BackupSelection,Get-BackupMode,Get-BackupRegions
+function Get-RoboExtraPaths([string[]]$Lines,[string]$Root) {
+ # The paths under Root that a robocopy /L /PURGE listing reports as extra. With /MT several threads
+ # write into one log, so a record is not always one line: its path can land on the next line on its
+ # own, and one line can hold the end of one record and the start of the next. Every tab-separated
+ # field is therefore read, and a field is split again wherever a new path under Root starts.
+ # Error lines are skipped: they can name a destination folder that is not extra.
+ $prefix=$Root.TrimEnd('\')+'\'
+ $split='(?='+[regex]::Escape($prefix)+')'
+ foreach($line in $Lines){
+  if($line -match '\sERROR \d+ '){continue}
+  foreach($field in ($line -split "`t")){
+   foreach($p in ($field -split $split)){
+    $p=$p.Trim()
+    if($p.Length -gt $prefix.Length -and $p.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){$p}
+   }
+  }
+ }
+}
+
+Export-ModuleMember -Function Get-BackupModeNames,Test-BackupModeIncludes,ConvertTo-SelectionPath,Get-BackupSelection,Get-BackupMode,Get-BackupRegions,Get-RoboExtraPaths

@@ -35,6 +35,26 @@ try{
  $bad=@([MirrorVerifier]::Compare((Join-Path $root 'flat-copy'),(Join-Path $root 'flat'),2,$ep,$eo,$true,[string[]]@(),[string[]]@(),[string[]]@(),[ref]$vf,[ref]$vb))
  Assert ($bad.Count -eq 0 -and $vf -eq 1) 'a source with no subfolders listed is checked in full'
 
+ # --- Files gone from the source (robocopy /MT listing) --------------------------------------
+ # Line shapes seen in a real /MT log: a record's path on the next line, a path followed by the
+ # next record, two records on one line, and an error line that names a folder that is not extra.
+ $m='G:\Mirror'
+ $log=@(
+  "`t  *EXTRA File `t`t     251`tG:\Mirror\a\plain.txt",
+  "`t  *EXTRA File `t`t     251`tG:\Mirror\a\first.cmd`t*EXTRA Dir        -1`tG:\Mirror\b\dir\",
+  "`t  *EXTRA File `t`t    1382`t",
+  "G:\Mirror\c\own-line.py`t  *EXTRA File `t`t    2930`tG:\Mirror\c\after.tsx",
+  "`t*EXTRA Dir        -1`tG:\Mirror\d\`t  *EXTRA File `t`t 4`tG:\Mirror\d\G:\Mirror\e\glued.txt",
+  '2026/11/06 17:34:00 ERROR 5 (0x00000005) Scanning Destination Directory G:\Mirror\locked\',
+  'Access is denied.',
+  "`t  *EXTRA File `t`t     9`tG:\Mirror-recovery\elsewhere.txt",
+  '')
+ $found=@(Get-RoboExtraPaths $log $m|Sort-Object -Unique)
+ $want=@('G:\Mirror\a\first.cmd','G:\Mirror\a\plain.txt','G:\Mirror\b\dir\','G:\Mirror\c\after.tsx','G:\Mirror\c\own-line.py','G:\Mirror\d\','G:\Mirror\e\glued.txt')
+ Assert (($found -join '|') -eq (($want|Sort-Object) -join '|')) 'every extra in a /MT listing is found, split lines included'
+ Assert ('G:\Mirror\locked\' -notin $found) 'a folder named on an error line is not an extra'
+ Assert ('G:\Mirror-recovery\elsewhere.txt' -notin $found) 'a path beside the mirror folder is not an extra'
+
  # --- Drive identity -----------------------------------------------------------------------
  $letter=$src.Substring(0,1)
  $other=@(Get-Volume|Where-Object {$_.DriveLetter -and [string]$_.DriveLetter -ne $letter -and $_.FileSystem}|Select-Object -First 1)

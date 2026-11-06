@@ -147,6 +147,17 @@ $labelFace=Get-Face 'Bahnschrift' 10
 $dialogFont=$font
 $form=[Windows.Forms.Form]::new();$form.Text='Backup Center';$form.ClientSize=[Drawing.Size]::new(1200,800);$form.StartPosition='CenterScreen';$form.Font=$font;$form.MinimumSize=[Drawing.Size]::new(1216,839);$form.BackColor=$ui.Paper;$form.ForeColor=$ui.Ink
 $iconFile=Join-Path $PSScriptRoot 'BackupCenter.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
+# A taskbar button of its own, with this icon, instead of PowerShell's (see Backup.Taskbar.cs).
+# Best effort: without it the window works the same, only under PowerShell's button.
+try{
+ Add-Type -Path (Join-Path $PSScriptRoot 'Backup.Taskbar.cs')
+ $script:taskbarId='BackupCenter.Window'
+ $pwshCommand=(Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1).Source
+ if(-not $pwshCommand){$pwshCommand=(Get-Process -Id $PID).Path}
+ $script:relaunch='"'+$pwshCommand+'" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $PSScriptRoot 'Backup-Center.ps1')+'"'
+ $form.Add_HandleCreated({try{[CenterTaskbar]::Set($form.Handle,$script:taskbarId,$script:relaunch,$iconFile+',0','Backup Center')}catch{}})
+ $form.Add_FormClosed({try{[CenterTaskbar]::Set($form.Handle,$null,$null,$null,$null)}catch{}})
+}catch{}
 function New-Control([string]$Type,$Parent,[int]$X,[int]$Y,[int]$W,[int]$H,[string]$Text=''){
  $c=New-Object ('Windows.Forms.'+$Type);$c.SetBounds($X,$Y,$W,$H);if($Text){$c.Text=$Text};$Parent.Controls.Add($c);$c
 }

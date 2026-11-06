@@ -153,14 +153,14 @@ foreach($c in @($copied|Where-Object {$_.IsFolder -and -not $VerifyOnly})){
  $extrasLog=Join-Path $run ('extras-'+(Get-LogName $c.Region.Path).Substring(5))
  # Directory names must be listed here (no /NDL) so extra directories are reported too.
  & robocopy.exe @(@(Get-RoboArgs (Join-Rel $src $c.Region.Path) (Join-Rel $dst $c.Region.Path) $extrasLog $c.Region.Excluded @('/L','/PURGE','/NJH','/NJS'))|Where-Object {$_ -ne '/NDL'})|Out-Null
- # With /MT, robocopy can write two records on one line ("*EXTRA Dir ... *EXTRA File ... <dir><file>"),
- # so the path field is split again wherever a new mirror path starts.
- $extras+=@(Get-Content -LiteralPath $extrasLog -Encoding Unicode|Where-Object {$_ -match '\*EXTRA (File|Dir)'}|ForEach-Object {($_ -split "`t")[-1].Trim() -split ('(?='+[regex]::Escape($dst)+')')}|ForEach-Object {$_.Trim()}|Where-Object {$_.StartsWith($dst,[StringComparison]::OrdinalIgnoreCase)})
+ # With /MT, robocopy's records can be split over lines or share one; see Get-RoboExtraPaths.
+ $extras+=@(Get-RoboExtraPaths (Get-Content -LiteralPath $extrasLog -Encoding Unicode) $dst)
 }
 # Only selected paths count as extras; old copies of unselected folders are reported separately below.
+# A path that still exists in the source is never an extra, whatever the log seems to say.
 $extras=@($extras|Sort-Object -Unique|Where-Object {
  $rel=$_.Substring($dst.Length).Trim('\')
- $rel -and (Test-BackupModeIncludes (Get-BackupMode $selection $rel) 'Mirror')
+ $rel -and (Test-BackupModeIncludes (Get-BackupMode $selection $rel) 'Mirror') -and -not(Test-Path -LiteralPath (Join-Rel $src $rel))
 })
 $summary.ExtrasFound=$extras.Count
 # Files are moved aside only after a copy that could read the source: a run where robocopy failed
@@ -172,6 +172,8 @@ if($MoveExtras -and $extras.Count -and -not $VerifyOnly -and -not $copyFailed){
  foreach($item in $extras){
   if(-not(Test-Path -LiteralPath $item)){continue}
   $relative=$item.Substring($dst.Length).TrimStart('\')
+  # Checked again here: a file put back in the source while earlier items were moved stays in the copy.
+  if(Test-Path -LiteralPath (Join-Rel $src $relative.TrimEnd('\'))){continue}
   $target=Join-Path $stamp $relative
   New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target.TrimEnd('\'))) -Force|Out-Null
   Move-Item -LiteralPath $item -Destination $target
