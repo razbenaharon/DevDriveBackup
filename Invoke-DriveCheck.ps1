@@ -6,7 +6,8 @@
 #  Surface       reads every part of the disk; stops on request and later continues from there
 #  LongSelfTest  asks the drive to read itself completely. The drive works alone for hours;
 #                the next quick check shows the result.
-# Only reads. Nothing on the drive is written, moved or repaired.
+# Only reads. Nothing on the drive is written, moved or repaired. The bundled smartctl runs only
+# when its SHA-256 matches the official 7.5 build.
 # Into -OutputDirectory it writes progress.json while it runs and run.json at the end, plus
 # report.json (quick check) and surface.json (full scan). A file named stop.request ends the run.
 param(
@@ -27,6 +28,18 @@ $started=Get-Date
 # here without touching the first one's files.
 try{$lock=[IO.File]::Open((Join-Path $OutputDirectory 'check.lock'),'OpenOrCreate','ReadWrite','None')}
 catch{[Console]::Error.WriteLine('Another drive check of this drive is running.');exit 1}
+# smartctl runs as administrator here, so the bundled copy must be the official 7.5 build. It stays
+# open (others may only read it) until this check ends, so it cannot be replaced after the check.
+# A tool that is missing now is never run later in this check, even if a file appears meanwhile.
+$script:smartProblem='The health tool is not installed. Use "Install health tool" on this page, then check again.'
+if(Test-Path -LiteralPath $SmartTool -PathType Leaf){
+ $script:smartProblem=''
+ $script:smartHold=[IO.File]::Open($SmartTool,'Open','Read','Read')
+ $bundled=[IO.Path]::GetFullPath($SmartTool) -ieq [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'bin\smartmontools\bin\smartctl.exe'))
+ if($bundled -and (Get-FileHash -InputStream $script:smartHold -Algorithm SHA256).Hash -ne (Get-DriveCheckSmartToolHash)){
+  $script:smartProblem='The health tool in bin\smartmontools is not the official smartctl 7.5, so it was not run. Use "Install health tool" on this page again, then check again.'
+ }
+}
 
 Add-Type -TypeDefinition @'
 using System; using System.Collections.Generic; using System.ComponentModel; using System.Diagnostics; using System.Globalization; using System.Runtime.InteropServices; using System.Text; using Microsoft.Win32.SafeHandles;
@@ -93,12 +106,14 @@ function Complete-Check([bool]$Success,[string]$Message){
 # A request left over from an earlier run does not count, only one made after this run started.
 function Test-StopRequested{(Test-Path -LiteralPath $stopFile) -and (Get-Item -LiteralPath $stopFile).LastWriteTime -ge $started}
 function Invoke-Smart([string[]]$Arguments){
+ if($script:smartProblem){return [pscustomobject]@{Code=-1;Json=$null}}
  $out=& $SmartTool @Arguments '--json' 2>$null;$code=$LASTEXITCODE;$json=$null
  try{$json=($out -join "`n")|ConvertFrom-Json}catch{}
  [pscustomobject]@{Code=$code;Json=$json}
 }
 function Get-SmartReport{
- if(-not(Test-Path -LiteralPath $SmartTool)){return [pscustomobject]@{Json=$null;Type=$null;Why='The health tool is not installed. Use "Install health tool" on this page, then check again.'}}
+ # Decided once at the start: missing, not the official build, or held open and checked.
+ if($script:smartProblem){return [pscustomobject]@{Json=$null;Type=$null;Why=$script:smartProblem}}
  # First the type smartctl detects itself; many USB boxes answer only when the standard SAT pass-through is named.
  foreach($t in @('auto','sat')){
   $r=Invoke-Smart @('-a','-d',$t,$script:smartDevice)

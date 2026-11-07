@@ -10,7 +10,8 @@
 # in the mirror and are listed in the summary. -Verify (default on the first run) re-reads
 # both copies and compares SHA-256 for every selected file; a selected source file missing from
 # the mirror is a difference. A selected folder that is missing or became a link fails the run.
-# DevDriveBackup's own password, key and state folders are never copied.
+# DevDriveBackup's own password, key and state folders are never copied, even when one of them is
+# selected itself; an older copy of one found on the backup drive is reported.
 param(
  [string]$ConfigPath=(Join-Path $PSScriptRoot 'backup.local.json'),
  [string]$Source,
@@ -61,9 +62,11 @@ foreach($entry in @(if($config.PSObject.Properties['Exclude']){$config.Exclude})
 # copied, whatever the selection: the copy would not keep their private permissions. The job's own key
 # files count too, in case the configuration keeps them somewhere else.
 $privatePaths=@((Join-Path $env:LOCALAPPDATA 'DevDriveMirror'),(Join-Path $env:USERPROFILE 'DevDriveBackup recovery keys'),(Join-Path $env:USERPROFILE 'Backup Center recovery keys'))+@('PasswordDpapiPath','RecoveryKeyPath'|Where-Object {$config.PSObject.Properties[$_] -and $config.$_}|ForEach-Object {[string]$config.$_})
-foreach($p in @($privatePaths|ForEach-Object {[IO.Path]::GetFullPath($_).TrimEnd('\')})){
+$privateRoots=@($privatePaths|ForEach-Object {[IO.Path]::GetFullPath($_).TrimEnd('\')})
+$privateInSource=@()
+foreach($p in $privateRoots){
  if($srcRoot.StartsWith($p+'\',[StringComparison]::OrdinalIgnoreCase)){throw "The source is inside $p, which holds DevDriveBackup's passwords and recovery keys and is never copied"}
- if($p.StartsWith($srcRoot,[StringComparison]::OrdinalIgnoreCase)){$skipPaths+=$p.Substring($srcRoot.Length)}
+ if($p.StartsWith($srcRoot,[StringComparison]::OrdinalIgnoreCase)){$skipPaths+=$p.Substring($srcRoot.Length);$privateInSource+=$p.Substring($srcRoot.Length)}
 }
 
 $src=[IO.Path]::GetFullPath($Source).TrimEnd('\')+'\'
@@ -126,10 +129,14 @@ function Get-RoboTotals([string]$Log){
 function Get-LogName([string]$Relative){'copy-'+$(if($Relative){$Relative -replace '[\\/:*?"<>|]','_'}else{'main'})+'.log'}
 
 $started=Get-Date
-$summary=[ordered]@{Source=$src;Destination=$dst;Started=$started.ToString('o');DefaultMode=$selection.DefaultMode;Selected=@($regions|ForEach-Object {if($_.Path){$_.Path}else{'(source root)'}});Runs=@();SelectionsMissing=@();SelectionsSkippedAsLinks=@()}
+$summary=[ordered]@{Source=$src;Destination=$dst;Started=$started.ToString('o');DefaultMode=$selection.DefaultMode;Selected=@($regions|ForEach-Object {if($_.Path){$_.Path}else{'(source root)'}});Runs=@();SelectionsMissing=@();SelectionsSkippedAsLinks=@();SelectionsSkippedAsPrivate=@()}
 $copied=@()
 foreach($region in $regions){
  $from=Join-Rel $src $region.Path;$to=Join-Rel $dst $region.Path
+ # /XD only skips folders below the one robocopy copies, never that folder itself, and a file selected
+ # on its own gets no /XF at all. So a selection that is a private folder or key file, or lies inside
+ # one, is skipped here, whatever its mode says.
+ if($region.Path -and (Test-BackupPathInside ([IO.Path]::GetFullPath($from)) $privateRoots)){$summary.SelectionsSkippedAsPrivate+=$region.Path;continue}
  if(-not(Test-Path -LiteralPath $from)){$summary.SelectionsMissing+=$region.Path;continue}
  $item=Get-Item -LiteralPath $from -Force
  if($region.Path -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){$summary.SelectionsSkippedAsLinks+=$region.Path;continue}
@@ -142,6 +149,13 @@ foreach($region in $regions){
  $part=if($region.Path){$region.Path}else{'main'}
  if(-not $VerifyOnly){$summary.Runs+=[ordered]@{Part=$part;ExitCode=(Invoke-Robo $a $part);Log=$log}}
  $copied+=[pscustomobject]@{Region=$region;IsFolder=$item.PSIsContainer}
+}
+# An earlier version could copy a private folder. Such a copy holds readable recovery keys; it is
+# reported so it can be deleted by hand, never deleted here.
+$summary.PrivateCopiesOnDrive=@($privateInSource|Where-Object {$_ -and (Test-Path -LiteralPath (Join-Rel $dst $_))})
+if($copied.Count -eq 0 -and $summary.SelectionsSkippedAsPrivate.Count){
+ $old=if($summary.PrivateCopiesOnDrive.Count){' An older copy of one is still on the backup drive and holds readable recovery keys; delete it: '+(@($summary.PrivateCopiesOnDrive|ForEach-Object {Join-Rel $dst $_}) -join ', ')+'.'}else{''}
+ throw ("Everything selected is one of DevDriveBackup's private folders, which hold passwords and recovery keys and are never copied: "+($summary.SelectionsSkippedAsPrivate -join ', ')+'.'+$old)
 }
 if($copied.Count -eq 0){throw ('None of the selected paths exist under '+$src+': '+($summary.Selected -join ', '))}
 # robocopy gives a folder copied from a drive root the root's hidden/system attributes.

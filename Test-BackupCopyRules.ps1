@@ -13,6 +13,16 @@ function Throws([scriptblock]$Block,[string]$Pattern){try{& $Block|Out-Null;$fal
 $root=Join-Path ([IO.Path]::GetTempPath()) ('dev-drive-backup-copy-rules-'+[guid]::NewGuid().ToString('N'))
 function Put([string]$Path,[string]$Text){New-Item -ItemType Directory -Path (Split-Path $Path) -Force|Out-Null;[IO.File]::WriteAllText($Path,$Text)}
 try{
+ # --- Private folders: a selection that is one of them, or lies inside one, is never copied ----
+ $keys='C:\Users\YOUR_USER\DevDriveBackup recovery keys'
+ Assert (Test-BackupPathInside $keys @($keys)) 'a selection that is the private folder itself counts as private'
+ Assert (Test-BackupPathInside ($keys+'\old') @($keys)) 'a folder inside a private folder counts as private'
+ Assert (Test-BackupPathInside 'c:\users\your_user\appdata\local\devdrivemirror\' @('C:\Users\YOUR_USER\AppData\Local\DevDriveMirror')) 'case and a trailing backslash do not matter'
+ Assert (Test-BackupPathInside 'D:\Safe\recovery-key.txt' @('C:\Elsewhere','D:\Safe\recovery-key.txt')) 'a key file selected on its own counts as private'
+ Assert (-not (Test-BackupPathInside ($keys+' 2') @($keys))) 'a folder whose name only starts the same is not private'
+ Assert (-not (Test-BackupPathInside 'C:\Users\YOUR_USER' @($keys))) 'a parent folder is copied (robocopy skips the private folder below it)'
+ Assert (-not (Test-BackupPathInside 'C:\Users\YOUR_USER\Projects' @('',$null))) 'empty private paths are ignored'
+
  # --- Content check ----------------------------------------------------------------------
  $src=Join-Path $root 'source';$dst=Join-Path $root 'mirror'
  foreach($f in 'work\same.txt','work\changed.txt','work\resized.txt','work\not-copied.txt','work\node_modules\x.js','work\build\cache\c.bin','work\notes.secret','private\keys\k.txt','skipped\s.txt'){Put (Join-Path $src $f) $f}
@@ -82,6 +92,24 @@ try{
  Assert (Throws {Add-CenterSource -Data $data -ProfileId $p.Id -Path (Join-Path $root 'one\app') -MirrorFolder $a.MirrorFolder} 'already used') 'a plain copy folder another source uses is refused'
  $adopted=Add-CenterSource -Data $data -ProfileId $p.Id -Path (Join-Path $root 'one\app')
  Assert ($adopted.ConfigPath -eq $a.ConfigPath -and $adopted.MirrorFolder -ne $c.MirrorFolder) 'an adopted job whose folder name is now used by another source gets a new one'
+
+ # A removed source keeps its copy and versions on the drive, so another folder with the same name,
+ # added while the drive is unplugged, must not get its folders.
+ $q=New-CenterProfile $data 'Test 2' 'volume-not-connected-2'
+ foreach($f in 'three\work','four\work'){New-Item -ItemType Directory -Path (Join-Path $root $f) -Force|Out-Null}
+ $x=Add-CenterSource -Data $data -ProfileId $q.Id -Path (Join-Path $root 'three\work')
+ Remove-CenterSource $data $q.Id $x.Id
+ $y=Add-CenterSource -Data $data -ProfileId $q.Id -Path (Join-Path $root 'four\work')
+ $xJob=Read-CenterJob $x.ConfigPath;$yJob=Read-CenterJob $y.ConfigPath
+ Assert ($y.MirrorFolder -ne $x.MirrorFolder -and $yJob.RepositoryFolder -ne $xJob.RepositoryFolder) 'a new folder never gets the plain copy or versions folder of a removed source'
+ $back=Add-CenterSource -Data $data -ProfileId $q.Id -Path (Join-Path $root 'three\work')
+ Assert ($back.ConfigPath -eq $x.ConfigPath -and $back.MirrorFolder -eq $x.MirrorFolder) 'the removed folder added again still gets its own job and folders back'
+ # Before this rule, a new source could already share a removed source's repository. Adding the removed
+ # folder again must then start fresh instead of a second source writing to the same repository.
+ Remove-CenterSource $data $q.Id $back.Id
+ $yJob.RepositoryFolder=$xJob.RepositoryFolder;[IO.File]::WriteAllText($y.ConfigPath,($yJob|ConvertTo-Json -Depth 8))
+ $fresh2=Add-CenterSource -Data $data -ProfileId $q.Id -Path (Join-Path $root 'three\work')
+ Assert ($fresh2.ConfigPath -ne $x.ConfigPath -and (Read-CenterJob $fresh2.ConfigPath).RepositoryFolder -ne $xJob.RepositoryFolder) 'a job whose repository another source uses now is not adopted'
 
  # Saving a job never reverts a recovery-key location written meanwhile (by a password change).
  $stale=Read-CenterJob $c.ConfigPath

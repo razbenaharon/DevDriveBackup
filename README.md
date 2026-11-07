@@ -19,10 +19,10 @@ Most backup tools either copy everything slowly or hide your files in a format o
 | **Per-folder choice** | Each folder is *Plain copy*, *Versions*, *Both* or *Skip*. A folder inside a skipped folder can still be backed up. |
 | **Proof, not hope** | *Check backup content* re-reads both sides of every file and compares SHA-256 hashes (plain copy) or verifies all repository data (versions). |
 | **Nothing deleted by surprise** | Files you delete from the source stay in the copy, or, with *Keep deleted for N backups*, move to a dated recovery folder beside it; only the newest N recovery folders are kept. |
-| **Keep versions** | Optional clean-up after each versioned backup: one version a day for *N* days, a week for *N* weeks and a month for *N* months (restic `--keep-within-daily/weekly/monthly`, counted back from the newest version so a long pause never empties the history). Dry run first; the newest version, the one just made and versions from other tools are never deleted; deleted versions free their space and the repository is checked again. |
+| **Keep versions** | Optional clean-up after each versioned backup: one version a day for *N* days, a week for *N* weeks and a month for *N* months (restic `--keep-within-daily/weekly/monthly`, counted back from the newest version so a long pause never empties the history). Dry run first; the newest version, the one just made and versions from other tools are never deleted; deleted versions free their space and the repository is checked again, and a failed check there marks the backup as failed. |
 | **Themes and size** | The *Look* page offers Light, Dark, Sand, Ocean and High contrast, each checked for WCAG 2.2 contrast, plus *Custom*: pick four colours and the rest is derived so text stays readable; the page reports any pair that is hard to read. Dark themes darken the title bar, scroll bars and drop-downs too. A larger or maximised window scales everything, text included, in proportion. |
 | **Waits for AI sessions** | Before a backup it looks for Claude Code or Codex sessions that worked in the last 10 minutes (their conversation files change while they work). If there are any, it names them and offers to wait and start by itself once all have been quiet for 10 minutes. |
-| **Load control for your hardware** | Detects your processor and memory and offers Light, Balanced, Strong and Maximum levels, or your own threads, memory limit, parallel files and priority. You can lower the load while a backup runs. |
+| **Load control for your hardware** | Detects your processor and memory and offers Light, Balanced, Strong and Maximum levels, or your own threads, memory limit, parallel files and priority. You can lower the load while a backup runs: the priority changes at once, the other settings from the next step. |
 | **Several backup drives, each with its own content** | One profile per drive, recognised by the drive itself rather than its letter. |
 | **Knows how fresh each backup is** | The age of the last complete backup, coloured green, blue or orange against the number of days you choose. |
 | **Skips what rebuilds** | `node_modules`, `.venv`, `__pycache__`, test and build caches, recycle bin and system folders are skipped by default; your own skips go in a personal settings file. |
@@ -40,6 +40,8 @@ Most backup tools either copy everything slowly or hide your files in a format o
 
 Backups need no administrator rights, PATH changes or services. Only *Drive check* asks Windows for administrator rights, each time it runs, because reading a drive directly needs them.
 
+Keep DevDriveBackup in a folder only you can change, for example `C:\Users\YOUR_USER\DevDriveBackup`. Anyone who can change its files, or rename a folder above it, can make it run their own code, and the drive check runs as administrator. A secondary drive such as a Dev Drive usually lets every signed-in account change files, sandbox accounts that tools create included, so before a drive check starts the window lists such accounts and asks first. The drive check also runs `smartctl` only when its SHA-256 matches the official 7.5 build.
+
 ## Quick start
 
 1. Connect the backup drive (NTFS recommended) and start `DevDriveBackup.cmd`.
@@ -51,7 +53,7 @@ The first plain copy is verified automatically, file by file. After that, back u
 
 ## How it works
 
-**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`, or **Keep deleted for** on the overview); `-KeepRecovery N` then deletes all but the newest N dated recovery folders. Nothing is moved aside after a run in which robocopy failed. Verification hashes both sides in parallel and counts selected files missing from the copy. DevDriveBackup's own password, recovery-key and state folders are never copied by either engine.
+**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`, or **Keep deleted for** on the overview); `-KeepRecovery N` then deletes all but the newest N dated recovery folders. Nothing is moved aside after a run in which robocopy failed. Verification hashes both sides in parallel and counts selected files missing from the copy. DevDriveBackup's own password, recovery-key and state folders are never copied by either engine, even when one of them is selected itself; an older copy of one found in the plain copy is named in the run's result so you can delete it.
 
 **Versions** (`Backup-Worker.ps1`) run restic with a random 256-bit password stored for your Windows account (DPAPI) plus a portable recovery key file, a hard memory cap (Windows Job Object), CPU and I/O limits, and a structural `restic check` after every backup. Restore always goes to a new folder and verifies restored content.
 
@@ -71,14 +73,20 @@ The first plain copy is verified automatically, file by file. After that, back u
 | File | Purpose |
 |---|---|
 | `DevDriveBackup.cmd`, `DevDriveBackup.ps1` | The main window |
+| `DevDriveBackup.Theme.psm1`, `Backup.Taskbar.cs` | Colour themes and contrast checks; the window's own taskbar button |
 | `DevDriveBackup.Data.psm1` | Profiles, sources, history, freshness, load levels |
+| `Backup.Selection.psm1` | Folder modes, read by both engines |
 | `Invoke-FastMirror.ps1`, `Backup.MirrorVerifier.cs` | Plain copy and verification |
-| `Backup-Worker.ps1` | Versioned backup, check, restore, history, keys |
-| `Backup-History.ps1`, `Backup-Security.ps1` | Versions and restore; password and recovery key windows |
-| `DevDriveBackup-Advanced.cmd`, `Backup-Manager.ps1` | Advanced window for one versioned source |
-| `Set-BackupDestination.ps1`, `Measure-BackupDisk.ps1` | Drive inspection, USB link speed, benchmark |
+| `Backup-Worker.ps1`, `Backup.Process.cs`, `Backup.Status.psm1` | Versioned backup, check, restore, history, keys; hard memory cap; progress files |
+| `Backup-History.ps1`, `Backup-Security.ps1`, `Backup.History.psm1`, `Backup.Security.psm1` | Versions and restore; password and recovery key windows; their safety rules |
+| `DevDriveBackup-Advanced.cmd`, `Backup-Manager.ps1`, `Initialize-BackupConfig.ps1` | Advanced window for one versioned source, and its first configuration |
+| `Install-BackupEngine.ps1` | Downloads restic into `bin\` and checks its pinned SHA-256 |
+| `Set-BackupDestination.ps1`, `Measure-BackupDisk.ps1`, `Get-BackupHardware.ps1` | Drive inspection, USB link speed, benchmark, hardware summary |
 | `Invoke-DriveCheck.ps1`, `Backup.DriveCheck.psm1`, `Install-DriveTools.ps1` | Drive check (runs as administrator, read only), its verdict rules, health tool installer |
 | `Inspect-DevDrive.ps1`, `Build-BackupReport.py` | Optional size inventory and offline HTML report |
+| `New-DevDriveBackupShortcut.ps1`, `New-DevDriveBackupIcon.ps1`, `DevDriveBackup.ico`, `design/icon` | Desktop shortcut; the program icon and its vector sources |
+| `Test-*.ps1`, `.githooks`, `.github/workflows` | Tests, the privacy hooks and the checks that run on every push |
+| `config.example.json`, `BACKUP-SYSTEM.md`, `CHANGELOG.md`, `THIRD-PARTY.md`, `LICENSE` | Example configuration, versioned engine details, changes, third-party software, license |
 | `profiles.local.json`, `jobs\*.local.json`, `backup.local.json` | Your personal settings (git-ignored) |
 
 Personal skips go in a job file: `Exclude` takes folder names (wildcards allowed) or paths below the source, and `NeverBackUp` lists folders that are never backed up by either engine, such as a folder holding credentials. See [config.example.json](config.example.json) and [BACKUP-SYSTEM.md](BACKUP-SYSTEM.md).
@@ -107,7 +115,7 @@ Plain copy: open the folder on the backup drive and copy files back. Versions: *
 Yes. Each drive has its own profile with its own folders and its own freshness.
 
 **How do I know the backup drive itself is healthy?**
-Open **Drive check** and run a **Quick check** (a few minutes). For a full answer, run a **Full surface scan**: it reads every part of the drive, takes hours, and can stop and continue later. Many USB boxes do not pass the drive's own health report on; then that part shows *Not available* and the full scan answers the same question: are there places that cannot be read. Nothing is written to the drive.
+Open **Drive check** and run a **Quick check** (a few minutes). For a full answer, run a **Full surface scan**: it reads every part of the drive, takes hours, and can stop and continue later. Many USB boxes do not pass the drive's own health report on; then that part shows *Not available* and the full scan answers the same question: are there places that cannot be read. DevDriveBackup writes nothing to the drive; only Windows' own file system scan may note problems it finds.
 
 **Is there a scheduler or reminder?**
 No, by design. You decide when to back up; the window shows how old each backup is.

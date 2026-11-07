@@ -95,4 +95,55 @@ $fix=Get-DriveFileSystemFindings 'E' 'NTFS' 'SpotFixNeeded' '' 'Healthy'
 Assert ($fix.Status -eq 'Warning' -and $fix.Lines[0] -match 'chkdsk E: /spotfix') 'a small repair is a warning and names the command'
 Assert ((Get-DriveFileSystemFindings 'E' 'NTFS' 'FullRepairNeeded' '' 'Healthy').Status -eq 'Problem') 'a full repair is a problem'
 Assert ((Get-DriveFileSystemFindings 'E' 'exFAT' '' '' 'Healthy').Status -eq 'Unavailable') 'a file system Windows cannot scan online is unavailable'
+# --- Self-tests: the newest of each kind counts --------------------------------------------------
+function SelfTest([string]$Type,[int]$Status,[int]$Hours){[pscustomobject]@{type=[pscustomobject]@{string=$Type};status=[pscustomobject]@{value=$Status;string=$(if($Status){'Completed: read failure'}else{'Completed without error'})};lifetime_hours=$Hours}}
+$masked=Ata @{5=0};$masked.ata_smart_self_test_log.standard.table=@((SelfTest 'Short offline' 0 19999),(SelfTest 'Extended offline' 0x70 19900))
+$m=Get-DriveHealthFindings $masked
+Assert ($m.Status -eq 'Problem' -and ($m.Lines -join ' ') -match 'Long self-test: failed' -and ($m.Lines -join ' ') -match 'Short self-test: passed') 'a short self-test that passed does not hide a long one that failed before it'
+$healed=Ata @{5=0};$healed.ata_smart_self_test_log.standard.table=@((SelfTest 'Extended offline' 0 19999),(SelfTest 'Extended offline' 0x70 19900))
+Assert ((Get-DriveHealthFindings $healed).Status -eq 'OK') 'a newer long self-test that passed replaces an older one that failed'
+$shorts=Ata @{5=0};$shorts.ata_smart_self_test_log.standard.table=@((SelfTest 'Short offline' 0 19999),(SelfTest 'Short offline' 0x70 19900))
+Assert ((Get-DriveHealthFindings $shorts).Status -eq 'OK') 'only the newest short self-test counts'
+$cut=Ata @{5=0};$cut.ata_smart_self_test_log.standard.table=@((SelfTest 'Extended offline' 0x10 19999),(SelfTest 'Extended offline' 0x70 19900))
+$c=Get-DriveHealthFindings $cut
+Assert ($c.Status -eq 'Problem' -and ($c.Lines -join ' ') -match 'did not finish') 'an interrupted long self-test does not hide an earlier one that failed'
+$noLog=Ata @{5=0};$noLog.ata_smart_self_test_log.standard.table=@()
+$n=Get-DriveSelfTest $noLog
+Assert ($null -eq $n.Last -and $null -eq $n.LastShort -and $null -eq $n.LastLong -and (Get-DriveHealthFindings $noLog).Status -eq 'OK') 'a drive with an empty self-test log is fine'
+$nvme.nvme_self_test_log.table=@([pscustomobject]@{self_test_code=[pscustomobject]@{value=1};self_test_result=[pscustomobject]@{value=0;string='Completed without error'};power_on_hours=99},[pscustomobject]@{self_test_code=[pscustomobject]@{value=2};self_test_result=[pscustomobject]@{value=7;string='Completed: failed segments'};power_on_hours=90})
+Assert ((Get-DriveHealthFindings $nvme).Status -eq 'Problem') 'on NVMe too, a short self-test that passed does not hide a failed long one'
+
+# --- Running as administrator: who could change what the check runs ---------------------------
+$me='S-1-5-21-1-2-3-1001'
+function Rule([string]$Sid,[long]$Rights,[switch]$Deny,[switch]$InheritOnly){[pscustomobject]@{Sid=$Sid;Allow=-not $Deny;Rights=$Rights;InheritOnly=[bool]$InheritOnly}}
+function Item([string]$Path,[string]$Role,[string]$Owner,$Rules){[pscustomobject]@{Path=$Path;Role=$Role;Owner=$Owner;Rules=@($Rules)}}
+$modify=0x1301BF;$readOnly=0x1200A9;$full=0x1F01FF
+$safe=@((Rule 'S-1-5-18' $full),(Rule 'S-1-5-32-544' $full),(Rule $me $full),(Rule 'S-1-5-32-545' $readOnly))
+Assert (@(Get-DriveCheckPathRisks @(Item 'C:\Tool' 'Run' $me $safe) $me).Count -eq 0) 'only this user, SYSTEM and Administrators may change it and everyone may read: safe'
+$open=@(Get-DriveCheckPathRisks @(Item 'E:\Tool\Invoke-DriveCheck.ps1' 'Run' $me ($safe+@(Rule 'S-1-5-11' $modify))) $me)
+Assert ($open.Count -eq 1 -and $open[0].Sids -contains 'S-1-5-11') 'a file every signed-in account may change is reported with that account'
+Assert (@(Get-DriveCheckPathRisks @(Item 'E:\Projects' 'Above' $me ($safe+@(Rule 'S-1-5-11' $modify))) $me).Count -eq 1) 'a folder above that other accounts may rename is reported'
+Assert (@(Get-DriveCheckPathRisks @(Item 'E:\' 'Root' 'S-1-5-32-544' ($safe+@(Rule 'S-1-5-11' $modify))) $me).Count -eq 0) 'change rights on the drive root itself cannot swap a folder below it'
+Assert (@(Get-DriveCheckPathRisks @(Item 'E:\' 'Root' 'S-1-5-32-544' ($safe+@(Rule 'S-1-5-11' $full))) $me).Count -eq 1) 'full control of the drive root can delete the folder below it'
+Assert (@(Get-DriveCheckPathRisks @(Item 'C:\Tool\bin' 'Run' $me ($safe+@(Rule 'S-1-5-11' $modify -InheritOnly))) $me).Count -eq 0) 'a rule only for new files below does not count for the folder itself'
+Assert (@(Get-DriveCheckPathRisks @(Item 'C:\Tool' 'Run' $me ($safe+@(Rule 'S-1-5-11' $modify -Deny))) $me).Count -eq 0) 'a deny rule is never a risk'
+Assert (@(Get-DriveCheckPathRisks @(Item 'C:\Tool' 'Run' 'S-1-5-21-1-2-3-1003' $safe) $me).Count -eq 1) 'a file owned by another account is reported, since an owner can change its permissions'
+$linked=Item 'E:\Tool' 'Run' $me $safe;$linked|Add-Member Link $true
+Assert (@(Get-DriveCheckPathRisks @($linked) $me).Count -eq 1) 'a junction or link on the way counts as a risk, since what it leads to is not checked'
+Assert ((Get-DriveCheckSmartToolHash) -match '^[0-9A-F]{64}$') 'the pinned smartctl hash is a SHA-256'
+# The same rule on a real folder. Its permissions are set first: the temporary folder's own vary between computers.
+$tool=Join-Path ([IO.Path]::GetTempPath()) ('drive-check-acl-'+[guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $tool 'bin\smartmontools\bin') -Force|Out-Null
+Set-Content -LiteralPath (Join-Path $tool 'Invoke-DriveCheck.ps1') -Value '# test'
+try{
+ $user=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+ # The folder gets its own rules; everything inside inherits them.
+ & icacls.exe $tool /inheritance:r /grant:r "*${user}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q|Out-Null
+ & icacls.exe (Join-Path $tool '*') /reset /T /Q|Out-Null
+ $mine=@(Get-DriveCheckPathRisks (Read-DriveCheckPathAccess $tool) $user|Where-Object {$_.Role -eq 'Run'})
+ Assert ($mine.Count -eq 0) 'a tool folder only this user and administrators may change is safe to run as administrator'
+ & icacls.exe $tool /grant '*S-1-5-11:(OI)(CI)M' /Q|Out-Null
+ $opened=@(Get-DriveCheckPathRisks (Read-DriveCheckPathAccess $tool) $user|Where-Object {$_.Role -eq 'Run'})
+ Assert ((@($opened|Where-Object {$_.Path -eq $tool}).Sids -contains 'S-1-5-11') -and @($opened|Where-Object {$_.Path -like '*\Invoke-DriveCheck.ps1'}).Count) 'once every signed-in account may change it, the folder and its files are reported'
+}finally{if(Test-Path -LiteralPath $tool){& icacls.exe $tool /reset /T /Q|Out-Null;Remove-Item -LiteralPath $tool -Recurse -Force}}
 Write-Output 'All drive-check rule tests passed.'

@@ -65,6 +65,16 @@ function Test-IsUnder([string]$Path,[string]$Parent) {
  $Path.StartsWith($Parent+'\',[StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-BackupPathInside([string]$Path,[string[]]$Roots) {
+ # True when the full path Path is one of Roots or lies below one of them. Whole folder names count,
+ # in any case, trailing backslashes ignored: C:\Data2 is not inside C:\Data.
+ $p=$Path.TrimEnd('\')
+ foreach($r in @($Roots|Where-Object {$_}|ForEach-Object {([string]$_).TrimEnd('\')})){
+  if([string]::Equals($p,$r,[StringComparison]::OrdinalIgnoreCase) -or $p.StartsWith($r+'\',[StringComparison]::OrdinalIgnoreCase)){return $true}
+ }
+ $false
+}
+
 function Get-BackupMode($Selection,[string]$Path) {
  $p=if($Path){ConvertTo-SelectionPath $Path}else{''}
  $best=$null
@@ -112,4 +122,4 @@ function Get-RoboExtraPaths([string[]]$Lines,[string]$Root) {
  }
 }
 
-Export-ModuleMember -Function Get-BackupModeNames,Test-BackupModeIncludes,ConvertTo-SelectionPath,Get-BackupSelection,Get-BackupMode,Get-BackupRegions,Get-RoboExtraPaths
+Export-ModuleMember -Function Get-BackupModeNames,Test-BackupModeIncludes,ConvertTo-SelectionPath,Get-BackupSelection,Get-BackupMode,Get-BackupRegions,Get-RoboExtraPaths,Test-BackupPathInside

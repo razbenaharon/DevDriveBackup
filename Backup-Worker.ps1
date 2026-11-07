@@ -35,7 +35,8 @@ function Assert-PlainAncestors([string]$Path) {
 function Run-Engine([string[]]$EngineArguments,[string]$Stage,[string]$InputSecret) {
  $script:status.State=$Stage;Save-Status
  $psi=[Diagnostics.ProcessStartInfo]::new($script:engine);$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
- $connections=if($Stage -in 'DeletingHistory','DeletingOldVersions' -and $EngineArguments -contains '--prune'){[math]::Max(2,$script:backendConnections)}else{$script:backendConnections}
+ # Pruning needs at least two connections, whether it runs with forget or on its own.
+ $connections=if(($Stage -in 'DeletingHistory','DeletingOldVersions' -and $EngineArguments -contains '--prune') -or $Stage -eq 'FreeingSpace'){[math]::Max(2,$script:backendConnections)}else{$script:backendConnections}
  foreach($a in @('-r',$script:repository,'--json','--cache-dir',$script:cache,'--pack-size',[string]$script:config.PackMiB,'--compression','auto','--limit-upload',[string][int]($script:config.RateMBps*1000000/1024),'--limit-download',[string][int]($script:config.RateMBps*1000000/1024),'-o',('local.connections='+$connections))+$EngineArguments){[void]$psi.ArgumentList.Add($a)}
  $psi.Environment['RESTIC_PASSWORD']=$script:password
  foreach($name in @('RESTIC_PASSWORD_FILE','RESTIC_PASSWORD_COMMAND','RESTIC_REPOSITORY_FILE','RESTIC_KEY_HINT')){[void]$psi.Environment.Remove($name)}
@@ -252,8 +253,13 @@ try {
   'Backup' {
    Run-Engine ($base+@('--')+$sources) 'BackingUp';Run-Engine @('check') 'CheckingStructure'
    if($KeepDays+$KeepWeeks+$KeepMonths -gt 0){
-    # The backup itself has succeeded and been checked. A failed clean-up is reported, not a failed backup.
+    # The backup itself has succeeded and been checked. A clean-up that fails is reported, not a failed
+    # backup. Old versions are deleted first and their space freed in a second step, so the result says
+    # how far it got. Once versions were deleted the repository is checked again, outside that report:
+    # a repository that fails this check fails the run, since it may be damaged.
     $new=$script:status.Snapshot
+    $retention=[ordered]@{Days=$KeepDays;Weeks=$KeepWeeks;Months=$KeepMonths;Removed=0;Kept=$null;SpaceFreed=$false}
+    $remove=@();$deleting=$false
     try{
      Run-Engine (Get-RetentionArguments $KeepDays $KeepWeeks $KeepMonths) 'PlanningCleanUp'
      $plan=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'PlanningCleanUp.jsonl') -Raw|ConvertFrom-Json)
@@ -261,10 +267,31 @@ try {
      $available=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistory.jsonl') -Raw|ConvertFrom-Json)
      $remove=@(Get-RetentionRemovals $plan $new $available)
      [IO.File]::WriteAllText((Join-Path $RunDirectory 'clean-up-plan.json'),(ConvertTo-Json @($remove) -Depth 8))
-     if($remove.Count){Run-Engine (@('forget')+@($remove|ForEach-Object {$_.id})+'--prune') 'DeletingOldVersions';Run-Engine @('check') 'CheckingStructure'}
-     $script:status.Retention=[ordered]@{Days=$KeepDays;Weeks=$KeepWeeks;Months=$KeepMonths;Removed=$remove.Count;Kept=($available.Count-$remove.Count)}
+     $retention.Kept=$available.Count-$remove.Count
+     if($remove.Count){
+      $deleting=$true
+      Run-Engine (@('forget')+@($remove|ForEach-Object {$_.id})) 'DeletingOldVersions'
+      $retention.Removed=$remove.Count
+      Run-Engine @('prune') 'FreeingSpace'
+      $retention.SpaceFreed=$true
+     }
     }catch{
-     $script:status.Retention=[ordered]@{Days=$KeepDays;Weeks=$KeepWeeks;Months=$KeepMonths;Removed=0;Error=$_.Exception.Message}
+     $retention.Error=$_.Exception.Message
+     # Deleting may have stopped part way: count the versions that are really gone.
+     if($remove.Count -and -not $retention.Removed){
+      try{
+       Run-Engine @('snapshots','--tag','devdrive') 'ReadingHistoryAgain'
+       $still=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistoryAgain.jsonl') -Raw|ConvertFrom-Json|ForEach-Object {$_.id})
+       $retention.Removed=@($remove|Where-Object {$_.id -notin $still}).Count
+       $retention.Kept=@($still).Count
+      }catch{}
+     }
+    }
+    $script:status.Retention=$retention
+    # Checked whenever deleting started, also when how far it got is unknown.
+    if($deleting){
+     try{Run-Engine @('check') 'CheckingAfterCleanUp'}
+     catch{throw "The new version was saved, but the repository check after deleting old versions failed, so the repository may be damaged. Run a full check of the versions before relying on them. $($_.Exception.Message)"}
     }
    }
   }
