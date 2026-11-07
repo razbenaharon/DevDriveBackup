@@ -102,7 +102,9 @@ if($MessageFile){
   Test-Text $e.Path ([Text.UTF8Encoding]::new($false).GetString($bytes))
  }
  if($Staged){foreach($v in 'GIT_AUTHOR_IDENT','GIT_COMMITTER_IDENT'){Test-Text $v ((Invoke-Git var $v) -replace '\s+\d+\s+[+-]\d{4}$','')}}
- else{& git -C $PSScriptRoot rev-parse --verify -q HEAD *>$null;if(-not $LASTEXITCODE){Test-Text 'last commit' ((Invoke-Git log -1 --format='%an <%ae>%n%cn <%ce>%n%B') -join "`n")}}
+ # The last commit's author and committer emails are not checked: merges on GitHub (and its pull request
+ # test merges) carry the account's own email, which the owner chose to show. Names and the message still are.
+ else{& git -C $PSScriptRoot rev-parse --verify -q HEAD *>$null;if(-not $LASTEXITCODE){Test-Text 'last commit' ((Invoke-Git log -1 --format='%an%n%cn%n%B') -join "`n")}}
 }
 
 if($findings.Count){
