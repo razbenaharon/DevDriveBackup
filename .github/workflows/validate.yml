@@ -6,7 +6,7 @@ jobs:
   syntax:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check for private backup details
         shell: pwsh
         run: ./Test-PrivacyGuard.ps1
@@ -22,11 +22,12 @@ jobs:
             if ([IO.File]::ReadAllText($_.FullName) -match '[\x00-\x08\x0B\x0C\x0E-\x1F]') { Write-Error "Control character in $($_.Name)"; $failed = $true }
           }
           if ($failed) { exit 1 }
-      - name: Compile native helper and report generator
+      - name: Compile native helpers and report generator
         shell: pwsh
         run: |
           Add-Type -Path ./Backup.Process.cs
           Add-Type -Path ./Backup.MirrorVerifier.cs
+          Add-Type -Path ./Backup.Taskbar.cs
           python -m py_compile ./Build-BackupReport.py
       - name: Check example configuration
         shell: pwsh
@@ -57,3 +58,6 @@ jobs:
       - name: Verify plain copy rules
         shell: pwsh
         run: ./Test-BackupCopyRules.ps1
+      - name: Verify the hard memory limit
+        shell: pwsh
+        run: ./Test-BackupResourceControls.ps1

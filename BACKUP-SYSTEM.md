@@ -1,6 +1,6 @@
 # DevDriveBackup: versioned engine
 
-Windows backup workbench for development drives and large numbers of small files. It combines metadata inventory, USB link diagnostics, a bounded disk benchmark, and an encrypted, versioned [Restic](https://restic.net/) repository. The English Windows Forms manager provides source selection, progress, ETA, speed presets, and editable bandwidth/memory limits.
+Windows backup workbench for development drives and large numbers of small files. It combines metadata inventory, USB link diagnostics, a bounded disk benchmark, and an encrypted, versioned [Restic](https://restic.net/) repository. The advanced window (`Backup-Manager.ps1`) provides source selection, progress, ETA, speed presets, and editable bandwidth/memory limits.
 
 The plain copy (`Invoke-FastMirror.ps1`) is a separate engine; both read the same per-folder selection. This document covers the versioned engine.
 
@@ -21,7 +21,7 @@ pwsh -NoProfile -File ./Initialize-BackupConfig.ps1 -Source X:\ -DestinationDriv
 
 Edit `backup.local.json`: set the source, both volume identities, relative source selections, and two absolute key-file paths. Keep the password and recovery file outside the backed-up source. `RepositoryFolder` is a new folder on the selected destination, not the existing mirror. Destination drive-letter changes are supported through volume identity lookup; source identity changes fail closed.
 
-The initializer fills volume identities and private key paths automatically, refuses to overwrite an existing configuration, and starts with non-system top-level folders, except common temporary/package-cache roots. Review these defaults. Alternatively copy `config.example.json` and fill in its placeholders manually. Each entry in `Choices` has a `Mode` (`Mirror`, `Versioned`, `Both` or `Skip`) shared with `Invoke-FastMirror.ps1`; `DefaultMode` covers paths no entry lists. Entries can be folders or single files (for example `README.md` at the root) and can nest. The worker derives its sources from `Versioned`/`Both` entries; `Include` is only kept up to date for other readers. See "Choose per folder" in README.md.
+The initializer fills volume identities and private key paths automatically, refuses to overwrite an existing configuration, and starts with non-system top-level folders, except common temporary/package-cache roots. Review these defaults. Alternatively copy `config.example.json` and fill in its placeholders manually. Each entry in `Choices` has a `Mode` (`Mirror`, `Versioned`, `Both` or `Skip`) shared with `Invoke-FastMirror.ps1`; `DefaultMode` covers paths no entry lists. Entries can be folders or single files (for example `README.md` at the root) and can nest. The worker derives its sources from `Versioned`/`Both` entries; `Include` is only kept up to date for other readers. See "How it works" in README.md.
 
 Start `DevDriveBackup-Advanced.cmd` (or use the main DevDriveBackup window) or:
 
@@ -29,7 +29,7 @@ Start `DevDriveBackup-Advanced.cmd` (or use the main DevDriveBackup window) or:
 pwsh -NoProfile -File ./Backup-Manager.ps1
 ```
 
-Profiles are starting points, not a hardware-independent optimum. Review exclusions and deselect anything you do not want backed up. Backup runs create snapshots; source deletions do not automatically delete older snapshots. No scheduled task or automatic retention/pruning is installed. Manual history deletion and optional pruning are available through **History and restore**.
+Profiles are starting points, not a hardware-independent optimum. Review exclusions and deselect anything you do not want backed up. Backup runs create snapshots; source deletions do not automatically delete older snapshots. No scheduled task is installed. Old versions are deleted automatically only when **Keep versions** is set on the main window's overview (`Backup-Worker.ps1 -KeepDays -KeepWeeks -KeepMonths`; off by default). Manual history deletion and optional pruning are available through **History and restore**.
 
 ## History browser
 
@@ -65,14 +65,14 @@ Interruption leaves the protected journal available for **Resume interrupted cha
 | Balanced | 45 MB/s | 1024 MiB | 2 | 2 | 16 MiB |
 | Fast | Unlimited | 2048 MiB | 4 | 4 | 32 MiB |
 
-MB/s means decimal bytes; MiB means binary bytes. Bandwidth and memory are editable. The worker converts the rate to Restic's KiB/s units. `0` means no bandwidth cap. Local backend concurrency defaults to 1 to keep a rotational destination's writes mostly sequential, except history deletion with prune, which requires at least 2 connections. Set `BackendConnections` (1–8) in the configuration for an SSD; `Set-BackupDestination.ps1 -Apply` sets 4 when it detects one. Restic packs small objects together and avoids storing identical chunks again; this addresses much of the per-file destination overhead.
+These presets belong to the advanced window. The main window instead computes Light, Balanced, Strong, Maximum or Custom from the detected processor and memory and writes it into the job when a backup starts: threads, memory and file reads from the level, no bandwidth cap, 16 MiB packs for Light and 32 MiB otherwise, 2 backend connections for Light and Balanced and 4 otherwise, and the level's priority. MB/s means decimal bytes; MiB means binary bytes. Bandwidth and memory are editable. The worker converts the rate to Restic's KiB/s units. `0` means no bandwidth cap. Local backend concurrency defaults to 1 to keep a rotational destination's writes mostly sequential, except history deletion with prune and the automatic clean-up of old versions, which use at least 2 connections. Set `BackendConnections` (1–8) in the configuration for an SSD; `Set-BackupDestination.ps1 -Apply` sets 4 when it detects one. Restic packs small objects together and avoids storing identical chunks again; this addresses much of the per-file destination overhead.
 
 - `GOMAXPROCS` limits Go execution parallelism. Quiet/balanced processes use BelowNormal CPU priority. This is not a hard CPU-time quota.
 - `GOMEMLIMIT` is a soft Go target at 70% of the selected budget. A Windows Job Object enforces the selected hard per-process committed-memory limit. Exceeding it can cause allocation failure and an incomplete run. Increase the budget rather than assuming every repository fits in 512 MiB.
 - Job-object accounting does **not** include the Windows system file cache, the GUI, or unrelated processes. Peak resident memory is reported separately from the committed-memory cap.
 - Restic bandwidth limits constrain repository transfers; they do not throttle every source metadata/read operation. Compression and deduplication can make processed source MB/s exceed repository MB/s.
 - There is no promise of zero impact on interactive work. Measure with the actual development workload, not just an idle desktop. More RAM does not inherently make a USB HDD faster.
-- The current version chooses presets manually; it does not implement an adaptive load controller, pause/resume, or an automatic hard free-space floor during the run. It refuses to start below 5 GiB free. Disk-full/I/O failures are reported.
+- The current version chooses presets manually; it does not implement an adaptive load controller, pause/resume, or an automatic hard free-space floor during the run. A backup or preview refuses to start below 5 GiB free; deleting old versions has no such floor. Disk-full/I/O failures are reported.
 
 See [Restic tuning guidance](https://restic.readthedocs.io/en/stable/047_tuning_parameters.html).
 
@@ -109,9 +109,9 @@ pwsh -NoProfile -File ./Invoke-DriveCheck.ps1 -Drive Y -OutputDirectory ./audit/
 pwsh -NoProfile -File ./Invoke-DriveCheck.ps1 -Drive Y -OutputDirectory ./audit/check -Mode LongSelfTest
 ```
 
-The window runs these through a Windows administrator prompt and keeps the results per profile in `%LOCALAPPDATA%\DevDriveMirror\drive-check\<profile>`: `report.json` (last quick check), `surface.json` (full scan position and findings), `run.json` (last run), `progress.json` (live). An elevated process cannot be ended by the window, so *Stop* creates `stop.request` and the check stops itself after the current step; a full scan saves its position every 512 MiB and continues from there.
+Before it asks Windows for administrator rights, the window checks who could change what the check runs: `Invoke-DriveCheck.ps1`, the modules and script it loads, `smartctl` and its folder, and every folder above the tool folder (whoever can rename one of those can swap the tool folder itself). When an account other than you, SYSTEM or Administrators can, it names those accounts and asks before it starts; keep the tool under your user folder to avoid that. The check runs the bundled `smartctl.exe` only when its SHA-256 matches the 64-bit build in the official 7.5 installer, and keeps the file open, readable only, until it ends. The window runs these through a Windows administrator prompt and keeps the results per profile in `%LOCALAPPDATA%\DevDriveMirror\drive-check\<profile>`: `report.json` (last quick check), `surface.json` (full scan position and findings), `run.json` (last run), `progress.json` (live). An elevated process cannot be ended by the window, so *Stop* creates `stop.request` and the check stops itself after the current step; a full scan saves its position every 512 MiB and continues from there.
 
-Reads use `\\.\PhysicalDriveN` with unbuffered aligned 4 MiB reads. A failing chunk is read again in 64 KiB pieces to locate the damaged place. A chunk over one second counts as very slow (the drive retried), over ten times the median and 250 ms as slow; many slow places (over 0.2% of what was read, at least 20) are a warning. Errors that mean the drive disappeared (not ready, no such device, disconnected) end the run instead of being recorded as bad areas. Nothing is written. The health report tries smartctl's own device-type detection, then standard SAT pass-through; vendor-specific USB bridge commands are not tried blindly. Windows log entries (warnings and errors of the last 30 days) name a disk by number, and numbers move between drives as they are plugged in. Each entry is matched to the drive that held that number at the time, using Windows' own record of drive arrivals (`Microsoft-Windows-Partition/Diagnostic`, event 1006: disk number, serial number, model, size), so another drive's errors are not held against this one. The verdict rules live in `Backup.DriveCheck.psm1` and are tested by `Test-BackupDriveCheck.ps1` without hardware.
+Reads use `\\.\PhysicalDriveN` with unbuffered aligned 4 MiB reads. A failing chunk is read again in 64 KiB pieces to locate the damaged place. A chunk over one second counts as very slow (the drive retried); one over 250 ms and over ten times the median of its 512 MiB stretch counts as slow; many slow places (more than 20, and more than 0.2% of what was read) are a warning. Errors that mean the drive disappeared (not ready, no such device, disconnected) end the run instead of being recorded as bad areas. The check itself writes nothing to the drive; Windows' online file system scan may note what it finds in the file system's own records. The health report tries smartctl's own device-type detection, then standard SAT pass-through; vendor-specific USB bridge commands are not tried blindly. Windows log entries (warnings and errors of the last 30 days) name a disk by number, and numbers move between drives as they are plugged in. Each entry is matched to the drive that held that number at the time, using Windows' own record of drive arrivals (`Microsoft-Windows-Partition/Diagnostic`, event 1006: disk number, serial number, model, size), so another drive's errors are not held against this one. The verdict rules live in `Backup.DriveCheck.psm1` and are tested by `Test-BackupDriveCheck.ps1` without hardware.
 
 ## What to preserve
 
@@ -127,7 +127,7 @@ Live-file backups are not application-consistent snapshots. This wrapper does no
 
 Every successful Backup is followed by structural `restic check`. The **Full verification** button runs `check --read-data`, which reads and verifies all repository data and takes additional time. Restic's default pre-upload verification remains enabled.
 
-Incremental backups normally use Restic's metadata change detection. On Windows, unchanged path, size and modification time can cause content to be reused without reading it again. That can miss a source change preserving all those fields. **Re-read all content** in the UI, or `-ForceRead` with `Backup-Worker.ps1`, disables that shortcut. Use it periodically or when source-integrity concerns warrant a full read. Repository verification and a fresh source-content scan answer different questions; neither should be presented as the other.
+Incremental backups normally use Restic's metadata change detection. On Windows, unchanged path, size and modification time can cause content to be reused without reading it again. That can miss a source change preserving all those fields. **Re-read all file contents** in the advanced window, or `-ForceRead` with `Backup-Worker.ps1`, disables that shortcut. Use it periodically or when source-integrity concerns warrant a full read. Repository verification and a fresh source-content scan answer different questions; neither should be presented as the other.
 
 ```powershell
 pwsh -NoProfile -File ./Backup-Worker.ps1 -ConfigPath ./backup.local.json -Action Snapshots
@@ -135,7 +135,7 @@ pwsh -NoProfile -File ./Backup-Worker.ps1 -ConfigPath ./backup.local.json -Actio
 pwsh -NoProfile -File ./Backup-Worker.ps1 -ConfigPath ./backup.local.json -Action Restore -Snapshot latest -RestoreTarget C:\Backup-Restore-Test
 ```
 
-Restore requires a **new, nonexistent folder** outside the source and repository. `--verify` validates restored file contents. Do a real restore test and inspect the application/data. Retain a second independently stored backup; a single USB drive cannot protect against its own failure or theft. The history window offers explicit selected-version deletion and optional prune with confirmation; automatic retention remains unimplemented.
+Restore requires a **new, nonexistent folder** outside the source and repository. `--verify` validates restored file contents. Do a real restore test and inspect the application/data. Retain a second independently stored backup; a single USB drive cannot protect against its own failure or theft. The history window offers explicit selected-version deletion and optional prune with confirmation; automatic clean-up is the optional **Keep versions** setting on the main window's overview.
 
 If the original computer/account is lost, install Restic on another Windows computer and use the portable recovery password directly; do not depend on the old DPAPI file or source drive being present:
 
@@ -144,7 +144,7 @@ If the original computer/account is lost, install Restic on another Windows comp
 ./bin/restic_0.19.1_windows_amd64.exe -r Y:\DevDrive-Backup restore latest --target C:\Recovered-DevDrive --verify
 ```
 
-Enter the saved repository password at Restic's prompt. Drive letters may differ. Recreate a local configuration only if you want to continue using the manager on that machine.
+Enter the saved repository password at Restic's prompt. Drive letters may differ. Use your repository's own folder name: `DevDrive-Backup` is the `RepositoryFolder` that `Initialize-BackupConfig.ps1` writes, and the main window names each repository `<source name>-Versions`. Recreate a local configuration only if you want to continue using the manager on that machine.
 
 ## Validation and public repository hygiene
 
@@ -152,12 +152,12 @@ Enter the saved repository password at Restic's prompt. Drive letters may differ
 pwsh -NoProfile -File ./Test-BackupSystem.ps1 -DestinationDrive Y
 ```
 
-This cross-volume integration test creates disposable source/repository/key directories. It verifies encrypted snapshots, cache exclusions, Hebrew/bracket filenames, SHA-256 of a restored binary, a full data check, old-version restoration, literal selected-file restore, history listing, rejection of unconfirmed/newest/empty deletions, explicit old-history deletion and prune, and restoration of the retained version. Artifacts are printed and left for inspection. It does not touch the configured real repository. `Test-BackupHistory.ps1` tests deletion-plan protection without a repository. The legacy suite is `Test-DevDriveMirror.ps1`.
+This cross-volume integration test creates disposable source/repository/key directories. It verifies encrypted snapshots, cache exclusions, Hebrew/bracket filenames, SHA-256 of a restored binary, a full data check, old-version restoration, literal selected-file restore, history listing, rejection of unconfirmed/newest/empty deletions, explicit old-history deletion and prune, and restoration of the retained version. Artifacts are printed and left for inspection. It does not touch the configured real repository. `Test-BackupHistory.ps1` tests deletion-plan protection without a repository, and `Test-BackupRetention.ps1` tests the automatic clean-up against a disposable repository.
 
 `Test-BackupStatus.ps1` exercises Windows reader-lock contention. Progress publication uses atomic replacement with bounded retries and is best effort, so a locked progress file cannot abort the backup engine. Each worker also publishes an independent terminal `result.json`; the manager and external monitors should prefer it over `status.json`. Readers should use `Read-BackupStatus` from `Backup.Status.psm1`, which permits delete sharing.
 
 `Test-BackupResourceControls.ps1` checks the native hard memory cap by requesting a 512 MiB allocation inside a process limited to 256 MiB. The integration suite also covers forced rereads of same-size/same-time changes and rejection of wrong source identities and existing restore destinations. Partial restore tests can use `Backup-Worker.ps1 -Action Restore -RestoreInclude /X/Projects/example/README.md`; this is a Restic snapshot-path pattern, not a Windows source path.
 
-Before publishing, review `git status` and the full staged diff. `.gitignore` excludes local configs, audit/reports, engine binaries, logs, protected passwords, recovery keys and temporary test sources. The example config contains placeholders only. Audit CSV/HTML can reveal private names and paths even when no file contents were read. Never use `git add -f` on them. Downloaded Restic is a separate BSD-licensed dependency; its official source/license/release are linked in `THIRD-PARTY.md`.
+Before publishing, review `git status` and the full staged diff. `.gitignore` excludes local configs, audit/reports, engine binaries, logs, protected passwords, recovery keys and temporary test sources. The example config contains placeholders only. Audit CSV/HTML can reveal private names and paths even when no file contents were read. Never use `git add -f` on them. Downloaded restic (BSD-2-Clause) and smartmontools (GPL-2.0-or-later) are separate dependencies; their official sources, licenses and releases are linked in `THIRD-PARTY.md`.
 
 This wrapper is MIT-licensed (see `LICENSE`). Real-drive backup, full verification, restore evidence and unresolved limitations should remain visible in release notes.

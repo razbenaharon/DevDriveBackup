@@ -7,8 +7,9 @@
 #  Connection  the way to the drive: link speed, transfer errors, resets and disconnections
 #  FileSystem  the file system's own structures (Windows online scan)
 #
-# Pure functions over data that Test-BackupDrive.ps1 collects as administrator, so the rules
-# are tested without hardware. Statuses: OK, Warning, Problem, Unavailable, NotRun.
+# Pure functions over data that Invoke-DriveCheck.ps1 collects as administrator, so the rules
+# are tested without hardware. Statuses: OK, Warning, Problem, Unavailable, NotRun. The one
+# exception, Read-DriveCheckPathAccess, reads who may change the files the check runs.
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 
@@ -36,25 +37,40 @@ function Test-DriveSmartAnswer($Smart) {
  ($null -ne (Get-Field $Smart 'smart_status','passed')) -or [bool](Get-Field $Smart 'ata_smart_attributes','table') -or [bool](Get-Field $Smart 'nvme_smart_health_information_log')
 }
 function Get-DriveSelfTest($Smart) {
- # The self-test running now, if any, and the newest finished one from the drive's own log.
- $now=$null;$last=$null
+ # The self-test running now, if any, and from the drive's own log (newest first) the newest entry
+ # (Last) and the newest finished short and long test (LastShort, LastLong). Each kind is judged on
+ # its own: a short test that passes says nothing about a long one that failed before it.
+ $now=$null
  $ataNow=Get-Field $Smart 'ata_smart_data','self_test','status','value'
  if($null -ne $ataNow -and ([int]$ataNow -band 0xF0) -eq 0xF0){$now=[pscustomobject]@{Remaining=[int](Get-Field $Smart 'ata_smart_data','self_test','status','remaining_percent')}}
  $nvmeNow=Get-Field $Smart 'nvme_self_test_log','current_self_test_operation','value'
  if($nvmeNow){$now=[pscustomobject]@{Remaining=100-[int](Get-Field $Smart 'nvme_self_test_log','current_self_test_completion_percent')}}
- $ata=@(Get-Field $Smart 'ata_smart_self_test_log','standard','table')
- $nvme=@(Get-Field $Smart 'nvme_self_test_log','table')
- if($ata.Count -and $ata[0]){
-  $e=$ata[0];$code=[int](Get-Field $e 'status','value') -shr 4
-  $outcome=switch($code){0{'Passed'}{$_ -in 1,2}{'Interrupted'}15{'Running'}default{'Failed'}}
-  $last=[pscustomobject]@{Kind=if([string](Get-Field $e 'type','string') -match 'Extended|Long'){'Long'}else{'Short'};Outcome=$outcome;Text=[string](Get-Field $e 'status','string');Hours=Get-Field $e 'lifetime_hours'}
- }elseif($nvme.Count -and $nvme[0]){
-  $e=$nvme[0];$code=[int](Get-Field $e 'self_test_result','value')
-  $outcome=switch($code){0{'Passed'}{$_ -in 5,6,7}{'Failed'}default{'Interrupted'}}
-  $last=[pscustomobject]@{Kind=if([int](Get-Field $e 'self_test_code','value') -eq 2){'Long'}else{'Short'};Outcome=$outcome;Text=[string](Get-Field $e 'self_test_result','string');Hours=Get-Field $e 'power_on_hours'}
- }
+ $ata=@(Get-Field $Smart 'ata_smart_self_test_log','standard','table'|Where-Object {$_})
+ $nvme=@(Get-Field $Smart 'nvme_self_test_log','table'|Where-Object {$_})
+ $entries=@(if($ata.Count){
+  foreach($e in $ata){
+   $code=[int](Get-Field $e 'status','value') -shr 4
+   $outcome=switch($code){0{'Passed'}{$_ -in 1,2}{'Interrupted'}15{'Running'}default{'Failed'}}
+   [pscustomobject]@{Kind=if([string](Get-Field $e 'type','string') -match 'Extended|Long'){'Long'}else{'Short'};Outcome=$outcome;Text=[string](Get-Field $e 'status','string');Hours=Get-Field $e 'lifetime_hours'}
+  }
+ }else{
+  foreach($e in $nvme){
+   $code=[int](Get-Field $e 'self_test_result','value')
+   $outcome=switch($code){0{'Passed'}{$_ -in 5,6,7}{'Failed'}default{'Interrupted'}}
+   [pscustomobject]@{Kind=if([int](Get-Field $e 'self_test_code','value') -eq 2){'Long'}else{'Short'};Outcome=$outcome;Text=[string](Get-Field $e 'self_test_result','string');Hours=Get-Field $e 'power_on_hours'}
+  }
+ })
+ $last=if($entries.Count){$entries[0]}else{$null}
+ # A test that was interrupted proves nothing either way, so the verdict of each kind comes from its
+ # newest test that passed or failed; a newer interrupted one is only mentioned (ShortInterrupted, LongInterrupted).
+ $lastShort=@($entries|Where-Object {$_.Kind -eq 'Short' -and $_.Outcome -in 'Passed','Failed'})|Select-Object -First 1
+ $lastLong=@($entries|Where-Object {$_.Kind -eq 'Long' -and $_.Outcome -in 'Passed','Failed'})|Select-Object -First 1
+ $newestShort=@($entries|Where-Object {$_.Kind -eq 'Short' -and $_.Outcome -ne 'Running'})|Select-Object -First 1
+ $newestLong=@($entries|Where-Object {$_.Kind -eq 'Long' -and $_.Outcome -ne 'Running'})|Select-Object -First 1
+ $shortInterrupted=if($newestShort -and $newestShort.Outcome -eq 'Interrupted'){$newestShort}else{$null}
+ $longInterrupted=if($newestLong -and $newestLong.Outcome -eq 'Interrupted'){$newestLong}else{$null}
  $supported=[bool](Get-Field $Smart 'ata_smart_data','capabilities','self_tests_supported') -or [bool](Get-Field $Smart 'nvme_optional_admin_commands','self_test')
- [pscustomobject]@{Supported=$supported;Running=$now;Last=$last;ShortMinutes=Get-Field $Smart 'ata_smart_data','self_test','polling_minutes','short';LongMinutes=Get-Field $Smart 'ata_smart_data','self_test','polling_minutes','extended'}
+ [pscustomobject]@{Supported=$supported;Running=$now;Last=$last;LastShort=$lastShort;LastLong=$lastLong;ShortInterrupted=$shortInterrupted;LongInterrupted=$longInterrupted;ShortMinutes=Get-Field $Smart 'ata_smart_data','self_test','polling_minutes','short';LongMinutes=Get-Field $Smart 'ata_smart_data','self_test','polling_minutes','extended'}
 }
 
 function Get-DriveHealthFindings($Smart,[string]$Unavailable='') {
@@ -99,15 +115,19 @@ function Get-DriveHealthFindings($Smart,[string]$Unavailable='') {
  }
  $t=Get-DriveSelfTest $Smart
  if($t.Running){$info.Add("A self-test is running now, about $($t.Running.Remaining)% left.")}
- if($t.Last){
-  $kind=if($t.Last.Kind -eq 'Long'){'Long self-test'}else{'Short self-test'}
-  $when=if($null -ne $t.Last.Hours -and $null -ne $hours){$ago=[double]$hours-[double]$t.Last.Hours;if($ago -lt 1){', just now'}else{' {0:N0} running hours ago' -f $ago}}else{''}
-  switch($t.Last.Outcome){
+ # The newest finished test of each kind counts, so a quick check's short test cannot hide a long
+ # test that failed: that stays a problem until a newer long test passes.
+ $tests=@(@($t.LongInterrupted,$t.LastLong,$t.ShortInterrupted,$t.LastShort)|Where-Object {$_})
+ foreach($test in $tests){
+  $kind=if($test.Kind -eq 'Long'){'Long self-test'}else{'Short self-test'}
+  $when=if($null -ne $test.Hours -and $null -ne $hours){$ago=[double]$hours-[double]$test.Hours;if($ago -lt 1){', just now'}else{' {0:N0} running hours ago' -f $ago}}else{''}
+  switch($test.Outcome){
    'Passed'{$info.Add("${kind}: passed$when.")}
-   'Failed'{$bad.Add("${kind}: failed$when ($($t.Last.Text)).")}
-   'Interrupted'{$info.Add("${kind}: did not finish$when ($($t.Last.Text)). Run it again when the drive can stay on.")}
+   'Failed'{$bad.Add("${kind}: failed$when ($($test.Text)).$(if($test.Kind -eq 'Long'){' This counts until a newer long self-test passes.'})")}
+   'Interrupted'{$info.Add("${kind}: did not finish$when ($($test.Text)). Run it again when the drive can stay on.")}
   }
- }elseif(-not $t.Supported){$info.Add('This drive does not offer self-tests.')}
+ }
+ if(-not $tests.Count -and -not $t.Supported){$info.Add('This drive does not offer self-tests.')}
  $status=if($bad.Count){'Problem'}elseif($warn.Count){'Warning'}else{'OK'}
  New-DriveGroup $status @(@($bad)+@($warn)+@($info))
 }
@@ -251,10 +271,61 @@ function Get-DriveCheckView($Report,$Scan) {
  [pscustomobject]@{Groups=$groups;Overall=Get-WorstStatus @($groups.Values.Status);When=if($Report){$Report.Finished}else{$null}}
 }
 
+# --- Running as administrator -----------------------------------------------------------------
+# The check runs as administrator. Whoever can change a file it runs or loads, put a file next to
+# smartctl.exe, or rename a folder above them could make it run anything as administrator.
+
+# SHA-256 of bin\smartctl.exe (64-bit) inside the official smartmontools 7.5 installer, whose own
+# hash Install-DriveTools.ps1 checks before it runs it.
+function Get-DriveCheckSmartToolHash {'B5DB94E5082C042BE44994B7A4FA8F7B5C8E713B2AB1C9A560D8F7A7995EA27D'}
+
+function Get-DriveCheckPathRisks($Items,[string]$UserSid) {
+ # Pure rule over what Read-DriveCheckPathAccess reads. Items: Path, Role, Owner (a SID) and Rules
+ # (Sid, Allow, Rights as a number, InheritOnly). Role Run: a file the check runs or loads, or a
+ # folder holding them. Above: a folder further up the path, which must not be renamed. Root: the
+ # drive's root folder, which cannot be renamed itself. Returns each path that an account other than
+ # this user, SYSTEM, Administrators, TrustedInstaller or the owner placeholders could change, with
+ # those accounts. Deny rules are ignored, which can only report more, never less.
+ $trusted=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464','S-1-3-0','S-1-3-4',$UserSid)
+ $masks=@{
+  # Add a file or folder, delete children or itself, change permissions or owner, generic all/write.
+  Run=(0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
+  # Rename it (delete) or the folder below it (delete children), or take it over.
+  Above=(0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000)
+  Root=(0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000)}
+ foreach($i in @($Items)){
+  if(-not $masks.ContainsKey([string]$i.Role)){throw "Unknown role $($i.Role) for $($i.Path)"}
+  $mask=[long]$masks[[string]$i.Role];$who=@()
+  if($i.Owner -and $i.Owner -notin $trusted){$who+=[string]$i.Owner}
+  foreach($r in @($i.Rules)){if($r.Allow -and -not $r.InheritOnly -and $r.Sid -notin $trusted -and (([long]$r.Rights -band $mask) -ne 0)){$who+=[string]$r.Sid}}
+  # A junction or symbolic link leads somewhere whose folders above are not checked here, so a link
+  # anywhere on the way counts as a risk by itself.
+  $link=[bool]($i.PSObject.Properties['Link'] -and $i.Link)
+  if($who.Count -or $link){[pscustomobject]@{Path=[string]$i.Path;Role=[string]$i.Role;Sids=@($who|Sort-Object -Unique);Link=$link}}
+ }
+}
+
+function Read-DriveCheckPathAccess([string]$ToolRoot) {
+ # The one function here that reads the computer: owner and access rules of what the check runs or
+ # loads (Invoke-DriveCheck.ps1, its modules, Measure-BackupDisk.ps1, smartctl and its folder), and
+ # of every folder above the tool's folder.
+ $root=[IO.Path]::GetFullPath($ToolRoot).TrimEnd('\')
+ $run=@($root)+@('Invoke-DriveCheck.ps1','Backup.Status.psm1','Backup.DriveCheck.psm1','Measure-BackupDisk.ps1','bin','bin\smartmontools','bin\smartmontools\bin','bin\smartmontools\bin\smartctl.exe','bin\smartmontools\bin\drivedb.h'|ForEach-Object {Join-Path $root $_})
+ $read={param($Path,$Role)
+  $acl=Get-Acl -LiteralPath $Path
+  $isLink=[bool]((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)
+  [pscustomobject]@{Path=$Path;Role=$Role;Link=$isLink;Owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+   Rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object {[pscustomobject]@{Sid=$_.IdentityReference.Value;Allow=($_.AccessControlType -eq 'Allow');Rights=[long]$_.FileSystemRights;InheritOnly=[bool]($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)}})}
+ }
+ foreach($p in $run){if(Test-Path -LiteralPath $p){& $read $p 'Run'}}
+ $d=[IO.DirectoryInfo]::new($root).Parent
+ while($d){& $read $d.FullName $(if($d.Parent){'Above'}else{'Root'});$d=$d.Parent}
+}
+
 function Format-DriveAge($When) {
  if(-not $When){return 'at an unknown time'}
  $span=(Get-Date)-[datetime]$When
  if($span.TotalMinutes -lt 2){'just now'}elseif($span.TotalHours -lt 1){'{0:N0} minutes ago' -f $span.TotalMinutes}elseif($span.TotalHours -lt 36){'{0:N0} hours ago' -f $span.TotalHours}else{'{0:N0} days ago' -f $span.TotalDays}
 }
 
-Export-ModuleMember -Function Get-Field,New-DriveGroup,Get-WorstStatus,Test-DriveSmartAnswer,Get-DriveSelfTest,Get-DriveHealthFindings,Get-DriveSurfaceFindings,Get-DriveConnectionKey,Get-DriveEventFindings,Get-DriveConnectionFindings,Get-DriveFileSystemFindings,Merge-DriveEvents,Get-DriveCheckView,Format-DriveOffset,Format-DriveAge
+Export-ModuleMember -Function Get-Field,New-DriveGroup,Get-WorstStatus,Test-DriveSmartAnswer,Get-DriveSelfTest,Get-DriveHealthFindings,Get-DriveSurfaceFindings,Get-DriveConnectionKey,Get-DriveEventFindings,Get-DriveConnectionFindings,Get-DriveFileSystemFindings,Merge-DriveEvents,Get-DriveCheckView,Format-DriveOffset,Format-DriveAge,Get-DriveCheckSmartToolHash,Get-DriveCheckPathRisks,Read-DriveCheckPathAccess

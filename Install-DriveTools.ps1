@@ -20,10 +20,21 @@ if(-not(Test-Path -LiteralPath $setup)){
   Move-Item -LiteralPath $part -Destination $setup
  }finally{if(Test-Path -LiteralPath $part){Remove-Item -LiteralPath $part}}
 }
-if((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -ne $expected){throw 'The health tool installer in bin does not match the pinned checksum. Delete it and run this script again.'}
-# NSIS rules: /D= comes last and is never quoted, even when the path has spaces.
-$p=Start-Process -FilePath $setup -ArgumentList "/S /SO x64,smartctl,drivedb /D=$target" -Verb RunAs -Wait -PassThru
+# The installer runs as administrator. It stays open (others may only read it) from the checksum
+# check until it has finished, so the file that runs is the file that was checked.
+$hold=[IO.File]::Open($setup,'Open','Read','Read')
+try{
+ if((Get-FileHash -InputStream $hold -Algorithm SHA256).Hash -ne $expected){throw 'The health tool installer in bin does not match the pinned checksum. Delete it and run this script again.'}
+ # NSIS rules: /D= comes last and is never quoted, even when the path has spaces.
+ $p=Start-Process -FilePath $setup -ArgumentList "/S /SO x64,smartctl,drivedb /D=$target" -Verb RunAs -Wait -PassThru
+}finally{$hold.Dispose()}
 if($p.ExitCode){throw "The health tool installer stopped with code $($p.ExitCode)."}
-$v=& $tool -V
+# The drive check runs only the official build, so the installed file is checked the same way.
+Import-Module (Join-Path $PSScriptRoot 'Backup.DriveCheck.psm1') -Force
+$toolHold=[IO.File]::Open($tool,'Open','Read','Read')
+try{
+ if((Get-FileHash -InputStream $toolHold -Algorithm SHA256).Hash -ne (Get-DriveCheckSmartToolHash)){throw 'Health tool self-check failed: the installed smartctl.exe is not the official 7.5 build.'}
+ $v=& $tool -V
+}finally{$toolHold.Dispose()}
 if($LASTEXITCODE -ne 0 -or -not ($v -match "smartctl $([regex]::Escape($version))")){throw 'Health tool self-check failed'}
 Write-Output ($v|Select-Object -First 1)

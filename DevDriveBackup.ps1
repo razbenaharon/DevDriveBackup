@@ -95,7 +95,7 @@ Profiles: each backup drive has its own profile, recognised by the drive itself 
 
 Sources: any folder on this computer, such as a whole drive, a project or Documents. Inside each source you choose per folder how it is backed up.
 
-Where things are on the backup drive: plain copies are in one folder per source (shown on the "What to back up" tab, for example DevDrive-Mirror). Versions are in one encrypted repository per source (for example DevDrive-Backup).
+Where things are on the backup drive: plain copies are in one folder per source (shown on the "What to back up" tab, for example DevDrive-Mirror). Versions are in one encrypted repository per source (for example DevDrive-Versions).
 
 Keys: versions are encrypted. The first versioned backup of a source creates a recovery key file in the "DevDriveBackup recovery keys" folder in your user folder. Copy it to a password manager or print it. Without it, versions cannot be opened on another computer.
 
@@ -426,7 +426,7 @@ $lookNote=New-Note $tLook 24 496 640 142 $Help.Look;$lookNote.ScrollBars='None'
 $script:data=Read-CenterProfiles
 $script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0;$script:waiting=$null
 $script:lastFree=$null;$script:lastTick=$null;$script:loadingModes=$false;$script:meterRatio=0;$script:shown=$false;$script:zoomedFor=$null
-$script:check=$null;$script:install=$null
+$script:check=$null;$script:install=$null;$script:adminRiskAccepted=$false
 $smartTool=Join-Path $PSScriptRoot 'bin\smartmontools\bin\smartctl.exe'
 $checkColor=@{};$checkInk=@{}
 function Update-CheckColors {
@@ -576,6 +576,19 @@ function Start-DriveCheck([string]$Mode){
   if([Windows.Forms.MessageBox]::Show(("Read every part of this drive?`n`nAt a typical 150 MB/s this takes about {0:N0} hours. It only reads; you can keep working, stop it any time and continue later. The computer stays awake while it runs." -f [math]::Max(1,$hours)),'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
  }
  if($Mode -eq 'LongSelfTest' -and [Windows.Forms.MessageBox]::Show("Ask the drive to read itself completely?`n`nThe drive does this on its own and it takes hours. Keep it connected and the computer awake; a USB box that goes to sleep stops the test. Run a quick check afterwards to see the result.",'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
+ # The check runs as administrator. If other accounts can change what it runs, or rename a folder above
+ # it, they could run anything as administrator through it: say so before Windows is asked, once per window.
+ if(-not $script:adminRiskAccepted){
+  $risks=@(Get-DriveCheckPathRisks (Read-DriveCheckPathAccess $PSScriptRoot) ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value))
+  if($risks.Count){
+   $names=@($risks|ForEach-Object {$_.Sids}|Sort-Object -Unique|ForEach-Object {$sid=$_;try{([Security.Principal.SecurityIdentifier]::new($sid)).Translate([Security.Principal.NTAccount]).Value}catch{$sid}})
+   $where=@($risks|Select-Object -First 3|ForEach-Object {if($_.Link){$_.Path+' (a link to another place)'}else{$_.Path}})+@(if($risks.Count -gt 3){"and $($risks.Count-3) more"})
+   if(-not $names.Count){$names=@('none found, but a link on the way leads to folders that were not checked')}
+   $ask="Other accounts on this computer can change the files this check runs as administrator, or rename a folder above them:`n`n$($where -join "`n")`n`nAccounts: $($names -join ', ')`n`nThat includes accounts other people or sandboxed tools use. If someone else could use one of them, choose No and move DevDriveBackup into your own user folder first (see README). If only you use this computer, the check is safe.`n`nRun the check as administrator anyway?"
+   if([Windows.Forms.MessageBox]::Show($ask,'DevDriveBackup','YesNo','Warning','Button2') -ne 'Yes'){$checkStatus.Text='Not started: other accounts can change the drive check files. Move DevDriveBackup into your user folder, then try again.';return}
+   $script:adminRiskAccepted=$true
+  }
+ }
  $dir=Get-CheckFolder $p;New-Item -ItemType Directory -Path $dir -Force|Out-Null
  # A check keeps check.lock open while it runs, also one started by an earlier window that was closed.
  try{([IO.File]::Open((Join-Path $dir 'check.lock'),'OpenOrCreate','ReadWrite','None')).Dispose()}catch{throw 'A drive check of this drive is still running or finishing. Try again in a minute.'}
@@ -691,7 +704,7 @@ function Finish-Run {
  $ok=@($script:runResults|Where-Object {$_.Success}).Count;$bad=@($script:runResults|Where-Object {-not $_.Success})
  $msg="$ok of $($script:runResults.Count) steps finished successfully."
  foreach($b in $bad){$msg+="`n`n$($b.Label) ($($b.Kind)): $($b.Error)"}
- foreach($n in @($script:runResults|Where-Object {$_.Success -and $_.PSObject.Properties['Note'] -and $_.Note})){$msg+="`n`n$($n.Label), versions: $($n.Note)"}
+ foreach($n in @($script:runResults|Where-Object {$_.Success -and $_.PSObject.Properties['Note'] -and $_.Note})){$msg+="`n`n$($n.Label), $(if($n.Kind -like 'Mirror*'){'plain copy'}else{'versions'}): $($n.Note)"}
  # A first versioned backup creates a recovery key; say where it is so it gets copied somewhere safe.
  foreach($r in @($script:runResults|Where-Object {$_.Kind -eq 'Versioned' -and $_.Success})){
   $src=@($script:runProfile.Sources|Where-Object {$_.Id -eq $r.SourceId})[0]

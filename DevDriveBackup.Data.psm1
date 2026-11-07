@@ -156,21 +156,36 @@ function Add-CenterSource {
  # Names that are not Latin letters all become "Source"; keep them apart.
  if($safe -eq 'Source'){$safe='Source-'+(New-ShortId).Substring(0,4)}
  $drive=Get-CenterDrive $profile.DestinationVolumeId
- # A name is taken when another source of this drive has it, or its plain copy or versions folder
- # is already on the drive (an earlier source's copy is never shared). The label is compared by its
- # safe name, so a second folder with the same label gets a new name instead of looping forever.
- $taken={param($n)@($profile.Sources|Where-Object {$_.MirrorFolder -ieq $n+'-Mirror' -or (Get-SafeName $_.Label) -ieq $n}).Count -or ($drive.Connected -and ((Test-Path -LiteralPath ($drive.Letter+':\'+$n+'-Versions')) -or (Test-Path -LiteralPath ($drive.Letter+':\'+$n+'-Mirror'))))}
+ # The folder names this drive's job files record, also those of sources removed earlier: their plain
+ # copy and versions stay on the drive, so a new source must never get one, even while it is unplugged.
+ $jobFiles=@(Get-ChildItem -LiteralPath (Get-CenterPaths).Jobs -Filter '*.local.json' -File -ErrorAction SilentlyContinue|ForEach-Object {
+  try{$j=Get-Content -LiteralPath $_.FullName -Raw|ConvertFrom-Json}catch{return}
+  if($j.PSObject.Properties['DestinationVolumeId'] -and $j.DestinationVolumeId -eq $profile.DestinationVolumeId){[pscustomobject]@{Path=$_.FullName;Job=$j}}
+ })
+ $jobNames=@($jobFiles|ForEach-Object {
+  if($_.Job.PSObject.Properties['MirrorFolder'] -and $_.Job.MirrorFolder){[string]$_.Job.MirrorFolder}
+  if($_.Job.PSObject.Properties['RepositoryFolder'] -and $_.Job.RepositoryFolder){[string]$_.Job.RepositoryFolder;if([string]$_.Job.RepositoryFolder -match '^(.+)-Versions$'){$Matches[1]+'-Mirror'}}
+ })
+ # A name is taken when another source of this drive has it, a job file of this drive records it, or
+ # its plain copy or versions folder is already on the drive (an earlier source's copy is never shared).
+ # The label is compared by its safe name, so a second folder with the same label gets a new name
+ # instead of looping forever.
+ $taken={param($n)@($profile.Sources|Where-Object {$_.MirrorFolder -ieq $n+'-Mirror' -or (Get-SafeName $_.Label) -ieq $n}).Count -or ($jobNames -icontains ($n+'-Mirror')) -or ($jobNames -icontains ($n+'-Versions')) -or ($drive.Connected -and ((Test-Path -LiteralPath ($drive.Letter+':\'+$n+'-Versions')) -or (Test-Path -LiteralPath ($drive.Letter+':\'+$n+'-Mirror'))))}
  $used={param($m)@($profile.Sources|Where-Object {$_.MirrorFolder -ieq $m}).Count -gt 0}
  if($MirrorFolder -and (& $used $MirrorFolder)){throw "The plain copy folder $MirrorFolder is already used by another source of this drive"}
  $id=New-ShortId
  if(-not $ExistingConfigPath){
   # A source removed earlier keeps its job file (with its keys); adding the same folder again to
-  # the same drive picks it up instead of creating a second repository next to the first.
-  $jobs=(Get-CenterPaths).Jobs
-  $old=@(Get-ChildItem -LiteralPath $jobs -Filter '*.local.json' -File -ErrorAction SilentlyContinue|Where-Object {
-   try{$j=Get-Content -LiteralPath $_.FullName -Raw|ConvertFrom-Json;(([IO.Path]::GetFullPath([string]$j.Source).TrimEnd('\')+'\') -ieq $root) -and $j.DestinationVolumeId -eq $profile.DestinationVolumeId}catch{$false}
-  }|Where-Object {$f=$_.FullName;-not @($profile.Sources|Where-Object {$_.ConfigPath -ieq $f}).Count}|Sort-Object LastWriteTime -Descending)
-  if($old.Count){$ExistingConfigPath=$old[0].FullName}
+  # the same drive picks it up instead of creating a second repository next to the first. A job whose
+  # versions folder a current source of this drive uses now is not picked up: two sources never share
+  # one repository, so the folder then starts with names of its own.
+  $current=@($profile.Sources|Where-Object {$_.PSObject.Properties['ConfigPath'] -and $_.ConfigPath}|ForEach-Object {[IO.Path]::GetFullPath([string]$_.ConfigPath)})
+  # Read from each current source's own job file, wherever it is kept, not only those in the jobs folder.
+  $inUse=@($current|ForEach-Object {try{$j=Get-Content -LiteralPath $_ -Raw|ConvertFrom-Json;if($j.PSObject.Properties['RepositoryFolder'] -and $j.RepositoryFolder){[string]$j.RepositoryFolder}}catch{}})
+  $old=@($jobFiles|Where-Object {
+   try{(([IO.Path]::GetFullPath([string]$_.Job.Source).TrimEnd('\')+'\') -ieq $root)}catch{$false}
+  }|Where-Object {$current -inotcontains $_.Path -and -not ($_.Job.PSObject.Properties['RepositoryFolder'] -and $inUse -icontains [string]$_.Job.RepositoryFolder)}|Sort-Object {(Get-Item -LiteralPath $_.Path).LastWriteTime} -Descending)
+  if($old.Count){$ExistingConfigPath=$old[0].Path}
  }
  if(-not $ExistingConfigPath){while(& $taken $safe){$safe=(Get-SafeName $Label)+'-'+(New-ShortId).Substring(0,4)}}
  if($ExistingConfigPath){
@@ -435,6 +450,11 @@ function Complete-CenterStep($Running,[string]$ProfileId) {
    if($r.PSObject.Properties['Verify'] -and $r.Verify){$e.CheckedFiles=$r.Verify.FilesMatched;$verifyOk=$r.Verify.Differences -eq 0;if(-not $verifyOk){$e.Error="$($r.Verify.Differences) files differ from the source; see verify-differences.txt in $($r.RunFolder)"}}
    if($r.CopyErrors -gt 0){$e.Error="$($r.CopyErrors) files could not be copied; see copy-errors.txt in $($r.RunFolder)"}
    $e.Success=($p.ExitCode -eq 0 -and $r.CopyErrors -eq 0 -and $verifyOk)
+   # DevDriveBackup's own password and recovery key folders are never copied, even when selected.
+   $notes=@()
+   if($r.PSObject.Properties['SelectionsSkippedAsPrivate'] -and @($r.SelectionsSkippedAsPrivate).Count){$notes+="Not copied, because DevDriveBackup never copies its own password and recovery key folders: $(@($r.SelectionsSkippedAsPrivate) -join ', ')."}
+   if($r.PSObject.Properties['PrivateCopiesOnDrive'] -and @($r.PrivateCopiesOnDrive).Count){$notes+="An older copy of DevDriveBackup's private folders is still in the plain copy and holds readable recovery keys: $(@($r.PrivateCopiesOnDrive) -join ', '). Delete it from the backup drive."}
+   if($notes.Count){$e.Note=$notes -join ' '}
   }else{
    $resultPath=Join-Path $s.RunDirectory 'result.json'
    if(-not(Test-Path -LiteralPath $resultPath)){throw ($stderr.Trim() -replace '\s+',' ')}
@@ -442,10 +462,14 @@ function Complete-CenterStep($Running,[string]$ProfileId) {
    $e.Details=$s.RunDirectory
    if($r.State -eq 'Completed'){$e.Success=$true;if($r.Progress -and $r.Progress.PSObject.Properties['files_new']){$e.CopiedFiles=[long]$r.Progress.files_new+[long]$r.Progress.files_changed;$e.CopiedBytes=[long]$r.Progress.data_added}}
    else{$e.Error=[string]$r.Error}
-   # The automatic clean-up of old versions: a note, never a failed backup.
+   # The automatic clean-up of old versions: a note. Only a failed check of the repository after it
+   # fails the backup, and the worker reports that as the run's error.
    if($r.PSObject.Properties['Retention'] -and $r.Retention){
-    $e.Note=if($r.Retention.PSObject.Properties['Error'] -and $r.Retention.Error){'Backed up, but old versions were not cleaned up: '+$r.Retention.Error}
-     elseif($r.Retention.Removed -gt 0){"Deleted $($r.Retention.Removed) old versions; $($r.Retention.Kept) kept."}else{"No old versions to delete; $($r.Retention.Kept) kept."}
+    $ret=$r.Retention
+    $err=if($ret.PSObject.Properties['Error'] -and $ret.Error){[string]$ret.Error}else{''}
+    $removed=if($ret.PSObject.Properties['Removed'] -and $ret.Removed){[int]$ret.Removed}else{0}
+    $kept=if($ret.PSObject.Properties['Kept'] -and $null -ne $ret.Kept){"; $($ret.Kept) kept"}else{''}
+    $e.Note=if($err -and $removed){"Deleted $removed old versions$kept, but the clean-up did not finish: $err"}elseif($err){"Backed up, but old versions were not cleaned up: $err"}elseif($removed){"Deleted $removed old versions$kept."}else{"No old versions to delete$kept."}
    }
   }
  }catch{$e.Error=$_.Exception.Message}
