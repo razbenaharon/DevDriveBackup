@@ -78,6 +78,22 @@ function Read-CenterProfiles {
  if(-not(Test-Path -LiteralPath $p)){return [pscustomobject]@{Version=1;Profiles=@()}}
  $data=Get-Content -LiteralPath $p -Raw|ConvertFrom-Json
  $data.Profiles=@($data.Profiles|ForEach-Object {$_.Sources=@($_.Sources);$_})
+ # A source's settings file is stored by full path. When the tool folder is moved or renamed, that path
+ # goes stale; a file of the same name in the jobs folder or beside the profiles file is the same file, moved.
+ $moved=$false
+ foreach($s in @($data.Profiles|ForEach-Object {$_.Sources})){
+  $old=[string]$s.ConfigPath
+  if(-not $old -or (Test-Path -LiteralPath $old)){continue}
+  $leaf=Split-Path $old -Leaf
+  foreach($dir in @((Get-CenterPaths).Jobs,[IO.Path]::GetDirectoryName($p))){
+   $candidate=Join-Path $dir $leaf
+   if(-not(Test-Path -LiteralPath $candidate -PathType Leaf)){continue}
+   # Same name is not proof: the file must describe this very source (its folder and its plain copy folder).
+   $same=try{$job=Get-Content -LiteralPath $candidate -Raw|ConvertFrom-Json;[string]$job.Source -ieq [string]$s.Path -and [string]$job.MirrorFolder -ieq [string]$s.MirrorFolder}catch{$false}
+   if($same){$s.ConfigPath=$candidate;$moved=$true;break}
+  }
+ }
+ if($moved){Save-CenterProfiles $data}
  $data
 }
 function Save-CenterProfiles($Data) {
