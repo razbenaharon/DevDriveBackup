@@ -43,6 +43,14 @@ try{
  $s=Add-CenterSource -Data $data -ProfileId $p.Id -Path $source -Label $label -DefaultMode Both
  Save-CenterProfiles $data
  $created+=Join-Path ($DestinationDrive+':\') $s.MirrorFolder
+ $real=$s.ConfigPath;$s.ConfigPath=Join-Path (Join-Path $dataRoot 'OldToolName') (Split-Path $real -Leaf);Save-CenterProfiles $data
+ Assert ((Get-Content -LiteralPath (Get-CenterPaths).Profiles -Raw) -match 'OldToolName') 'a stale settings path is on disk before the repair'
+ $data=Read-CenterProfiles;$p=Get-CenterProfile $data $p.Id;$s=@($p.Sources)[0]
+ Assert ($s.ConfigPath -eq $real -and (Get-Content -LiteralPath (Get-CenterPaths).Profiles -Raw) -notmatch 'OldToolName') 'a settings path left behind by a moved or renamed tool folder is repaired and saved'
+ $s.MirrorFolder='Other-Mirror';$s.ConfigPath=Join-Path (Join-Path $dataRoot 'OldToolName') (Split-Path $real -Leaf);Save-CenterProfiles $data
+ $data=Read-CenterProfiles;$p=Get-CenterProfile $data $p.Id;$s=@($p.Sources)[0]
+ Assert ($s.ConfigPath -ne $real) 'a file of the same name that describes another source is not taken'
+ $s.MirrorFolder=Split-Path $created[-1] -Leaf;$s.ConfigPath=$real;Save-CenterProfiles $data
  $job=Read-CenterJob $s.ConfigPath
  $created+=Join-Path ($DestinationDrive+':\') $job.RepositoryFolder
  Assert (@($job.Choices).Count -eq 2 -and @($job.Choices|Where-Object {$_.Mode -ne 'Both'}).Count -eq 0) 'new source lists its top-level folders with the chosen mode'
