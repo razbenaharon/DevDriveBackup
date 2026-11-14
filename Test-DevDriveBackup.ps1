@@ -31,7 +31,7 @@ try{
  Assert ((Get-CenterFreshness ([pscustomobject]@{ReminderDays=7;Sources=@()}) $empty).State -eq 'Nothing selected') 'an empty history does not break freshness'
  Set-StrictMode -Off
  $hw=Get-CenterHardware;$levels=Get-CenterLoadPresets $hw
- Assert ($levels.Light.CpuThreads -le $levels.Balanced.CpuThreads -and $levels.Balanced.CpuThreads -le $levels.Maximum.CpuThreads -and $levels.Maximum.CpuThreads -le $hw.Threads) 'load levels grow and never use more threads than this computer has'
+ Assert ($levels.Light.CpuThreads -le $levels.Balanced.CpuThreads -and $levels.Balanced.CpuThreads -le $levels.Strong.CpuThreads -and $levels.Strong.CpuThreads -le $levels.Maximum.CpuThreads -and $levels.Maximum.CpuThreads -le $hw.Threads) 'load levels grow and never use more threads than this computer has'
  $custom=Get-CenterLoad ([pscustomobject]@{Load='Custom';CustomLoad=[pscustomobject]@{CpuThreads=999;MemoryMiB=1;CopyThreads=0;Priority='Normal'}}) $hw
  Assert ($custom.CpuThreads -eq $hw.Threads -and $custom.MemoryMiB -eq 512 -and $custom.CopyThreads -eq 1) 'custom load values are kept within safe limits'
  $p=New-CenterProfile $data 'Test drive' $dest.UniqueId 'Test model' 100
