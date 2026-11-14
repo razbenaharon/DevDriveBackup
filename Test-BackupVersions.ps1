@@ -2,8 +2,9 @@
 # The versioned worker against a disposable repository, with real restic and no second drive: everything
 # (source, repository, password files, run folders, engine cache) lives in one new folder under the
 # temporary directory, which Backup-Worker.ps1 -TestRoot uses in place of the backup drive.
-# Covers: a partial version (a file that cannot be read), the clean-up of old versions beside partial
-# versions and another computer's versions, deleting versions, a restore below protected folders, saving
+# Covers: a partial version (a file that cannot be read), the clean-up of old versions (Keep versions:
+# the last N and one a month) beside partial versions and another computer's versions, a preview of
+# that clean-up, deleting versions, a restore below protected folders, saving
 # the recovery key, a pending password change after the repository moved, a lock left in the repository
 # (by a run that was killed: removed; by a backup that is still running: left alone), and plaintext
 # passwords in files.
@@ -71,22 +72,27 @@ try{
   if($Unreadable){$m=Restic (@('--json')+(Get-PartialMarkArguments $id));if($m.Code -ne 0){throw "Marking '$name' failed: $($m.Err)"};$id=@($m.Out -split "`r?`n"|ForEach-Object {try{$_|ConvertFrom-Json}catch{}}|Where-Object {$_ -and $_.message_type -eq 'changed'})[0].new_snapshot_id}
   $ids[$name]=$id
  }
- Seed 'old-400' $today.AddDays(-400).AddHours(10) $computer 'important, 400 days ago'
- Seed 'old-300' $today.AddDays(-300).AddHours(10) $computer 'important, 300 days ago'
+ # Keep versions here: the last 3 and one a month for 12 months. The old versions are dated from the
+ # first of this month, so what the rule keeps is the same on every date.
+ $month=[datetime]::new($today.Year,$today.Month,1)
+ Seed 'old-13-months' $month.AddMonths(-13).AddDays(9).AddHours(10) $computer 'important, 13 months ago'
+ Seed 'old-partial' $month.AddMonths(-12).AddDays(14).AddHours(10) $computer 'important, 12 months ago, being edited' -Unreadable
+ Seed 'old-10-months' $month.AddMonths(-10).AddDays(9).AddHours(10) $computer 'important, 10 months ago'
  Seed 'other-200' $today.AddDays(-200).AddHours(10) 'other-computer' 'another computer, 200 days ago'
  Seed 'other-50' $today.AddDays(-50).AddHours(10) 'other-computer' 'another computer, 50 days ago'
- Seed 'day-2' $today.AddDays(-2).AddHours(10) $computer 'important, two days ago'
+ Seed 'day-1-early' $today.AddDays(-1).AddHours(8) $computer 'important, early yesterday'
  Seed 'day-1-complete' $today.AddDays(-1).AddHours(10) $computer 'important, yesterday morning: the only copy of this text'
  Seed 'day-1-partial' $today.AddDays(-1).AddHours(18) $computer 'important, being edited' -Unreadable
  [IO.File]::WriteAllText($important,'important, today')
- $kept=Run 'Backup' @{KeepDays=7;KeepWeeks=4;KeepMonths=3}
+ $kept=Run 'Backup' @{KeepLast=3;KeepMonths=12}
  $left=@(Snapshots|ForEach-Object {$_.id})
- Assert ($kept.State -eq 'Completed' -and -not $kept.Retention.PSObject.Properties['Error']) 'a backup with Keep versions completes and cleans up without an error'
- Assert ($ids['day-1-complete'] -in $left -and (Restic @('dump',$ids['day-1-complete'],($inside+'/important.txt'))).Out -eq 'important, yesterday morning: the only copy of this text') 'the complete version of a day survives a later partial version of that day'
- Assert ($ids['day-1-partial'] -in $left -and $partialRun.Snapshot -in $left) 'partial versions are left alone by the clean-up'
+ Assert ($kept.State -eq 'Completed' -and $kept.Retention.Preview -eq $false -and $kept.Retention.Last -eq 3 -and $kept.Retention.Months -eq 12 -and $null -eq $kept.Retention.Error) 'a backup with Keep versions completes and cleans up without an error'
+ Assert ($ids['day-1-complete'] -in $left -and (Restic @('dump',$ids['day-1-complete'],($inside+'/important.txt'))).Out -eq 'important, yesterday morning: the only copy of this text') 'the complete version of a day survives a later partial version of that day: it is one of the last 3 complete versions'
+ Assert ($ids['day-1-partial'] -in $left -and $partialRun.Snapshot -in $left) 'partial versions that fewer than 3 complete versions follow are left alone, and do not count among the last 3'
+ Assert ($ids['old-partial'] -notin $left) 'a partial version that 3 or more complete versions follow is deleted'
  Assert ($ids['other-200'] -in $left -and $ids['other-50'] -in $left) 'another computer''s versions are left alone, also those outside this computer''s rule'
- Assert ($ids['old-400'] -notin $left -and $ids['old-300'] -notin $left -and $completeRun.Snapshot -notin $left -and $ids['day-2'] -in $left -and $kept.Snapshot -in $left) 'this computer''s versions outside the rule are deleted: the two old ones and today''s earlier one'
- Assert ($kept.Retention.Removed -eq 3 -and $kept.Retention.Kept -eq 3 -and $kept.Retention.SpaceFreed -eq $true) 'the result counts this computer''s complete versions only: 3 deleted, 3 kept'
+ Assert ($ids['old-13-months'] -notin $left -and $ids['day-1-early'] -notin $left -and $ids['old-10-months'] -in $left -and $completeRun.Snapshot -in $left -and $kept.Snapshot -in $left) 'this computer''s versions outside the rule are deleted (13 months old; an earlier one of yesterday); the one of 10 months ago stays as its month''s version'
+ Assert ($kept.Retention.Removed -eq 3 -and $kept.Retention.PartialRemoved -eq 1 -and $kept.Retention.Kept -eq 4 -and (@($kept.Retention.Candidates|ForEach-Object {$_.Id}|Sort-Object) -join ',') -ceq (@($ids['old-13-months'],$ids['old-partial'],$ids['day-1-early']|Sort-Object) -join ',')) 'the result names the 3 deleted versions (1 partial) and counts the 4 complete versions kept'
  Assert ($kept.BackupSummary.snapshot_id -eq $kept.Snapshot) 'the backup''s summary is kept through the clean-up'
 
  # --- Deleting versions by hand ----------------------------------------------------------------------
@@ -94,7 +100,7 @@ try{
  Assert ($refused.State -eq 'Failed' -and $refused.Error -like '*protected*') 'the newest version cannot be deleted'
  $deleted=Run 'Forget' @{} @{SnapshotIds=@($ids['other-200'],$partialRun.Snapshot);Confirmation='DELETE SELECTED HISTORY';ReclaimSpace=$true}
  $left=@(Snapshots|ForEach-Object {$_.id})
- Assert ($deleted.State -eq 'Completed' -and $ids['other-200'] -notin $left -and $partialRun.Snapshot -notin $left -and $left.Count -eq 5) 'chosen older versions, a partial one among them, are deleted and their space freed'
+ Assert ($deleted.State -eq 'Completed' -and $ids['other-200'] -notin $left -and $partialRun.Snapshot -notin $left -and $left.Count -eq 6) 'chosen older versions, a partial one among them, are deleted and their space freed'
 
  # --- Restore: verified, or honestly reported as not verified ----------------------------------------
  $target=Join-Path $base 'restored'
@@ -188,8 +194,8 @@ try{
   $unmarked=Lock-File $important {Run 'Backup' @{} $null $moved}
   $pendingPath=$config.PasswordDpapiPath+'.partial-pending.local.json'
   Assert ($unmarked.State -eq 'Failed' -and $unmarked.Partial -eq $true -and $unmarked.Error -like '*could not be marked as partial yet*' -and (Test-Path -LiteralPath $pendingPath)) 'a partial version that cannot be marked on a locked repository is noted for later'
-  $refused=Run 'Forget' @{} @{SnapshotIds=@($ids['day-2']);Confirmation='DELETE SELECTED HISTORY';ReclaimSpace=$false} $moved
-  Assert ($refused.State -eq 'Failed' -and $refused.Error -like '*not marked yet*' -and $ids['day-2'] -in @(Snapshots|ForEach-Object {$_.id})) 'until it is marked, nothing is deleted'
+  $refused=Run 'Forget' @{} @{SnapshotIds=@($ids['old-10-months']);Confirmation='DELETE SELECTED HISTORY';ReclaimSpace=$false} $moved
+  Assert ($refused.State -eq 'Failed' -and $refused.Error -like '*not marked yet*' -and $ids['old-10-months'] -in @(Snapshots|ForEach-Object {$_.id})) 'until it is marked, nothing is deleted'
   Assert (-not $running.HasExited -and ((Lock-Names) -join ',') -ceq ($held -join ',')) 'the other backup was running, with its lock, all the while'
   # The backup has ended, but restic itself still sees its process (here because this test keeps it
   # open; a program that took over its process number has the same effect). restic then keeps the lock
@@ -199,10 +205,20 @@ try{
   Assert ($keptLock.State -eq 'Failed' -and $keptLock.Error -like '*locked: the run that made the lock has ended*30 minutes*Nothing is damaged*' -and $null -eq $keptLock.LockReleased -and ((Lock-Names) -join ',') -ceq ($held -join ',')) 'a lock that restic itself still keeps is not removed behind its back, and the run says when to try again'
  }finally{if(-not $running.HasExited){$running.Kill($true);$running.WaitForExit()};$ended=$running.Id;$running.Dispose()}
  [IO.File]::WriteAllText($important,'important, after the lock')
- $final=Run 'Backup' @{KeepDays=7;KeepWeeks=4;KeepMonths=3} $null $moved
- $now=@(Snapshots)
+ $final=Run 'Backup' @{KeepLast=3;KeepMonths=12} $null $moved
+ $now=@(Snapshots);$partialNow=@($now|Where-Object {Test-PartialSnapshot $_})
  Assert ($final.State -eq 'Completed' -and @($final.LockReleased.Locks).Count -eq 1 -and $final.LockReleased.Locks[0].Id -ceq $held[0] -and $final.LockReleased.Locks[0].Pid -eq $ended -and @(Lock-Names).Count -eq 0) 'once that backup has really ended, the next run removes its lock and completes'
- Assert (-not $final.Retention.PSObject.Properties['Error'] -and -not(Test-Path -LiteralPath $pendingPath) -and $unmarked.Snapshot -notin @($now|ForEach-Object {$_.id}) -and @($now|Where-Object {Test-PartialSnapshot $_}).Count -eq $partialsBefore+1) 'the noted partial version is marked before the next clean-up, which then leaves it alone'
+ # The noted version is marked (its ID changes) and, with one newer complete version, stays. Yesterday's
+ # partial version has by now more than 3 newer complete versions and goes.
+ Assert ($null -eq $final.Retention.Error -and -not(Test-Path -LiteralPath $pendingPath) -and $unmarked.Snapshot -notin @($now|ForEach-Object {$_.id}) -and $partialsBefore -eq 1 -and $partialNow.Count -eq 1 -and $partialNow[0].id -cne $ids['day-1-partial'] -and $partialNow[0].id -cnotin @($final.Retention.Candidates|ForEach-Object {$_.Id})) 'the noted partial version is marked before the next clean-up and, with fewer than 3 newer complete versions, stays'
+ Assert ($final.Retention.PartialRemoved -eq 1 -and $ids['day-1-partial'] -in @($final.Retention.Candidates|Where-Object {$_.Partial}|ForEach-Object {$_.Id}) -and $final.Snapshot -in @($now|ForEach-Object {$_.id}) -and $ids['old-10-months'] -in @($now|ForEach-Object {$_.id})) 'the older partial version, which 3 complete versions now follow, is deleted; the month''s version of 10 months ago stays'
+
+ # --- A preview of the clean-up deletes nothing ----------------------------------------------------------
+ $before=@($now|ForEach-Object {$_.id})
+ $previewed=Run 'Backup' @{KeepLast=1;KeepMonths=0;RetentionPreview=$true} $null $moved
+ $after=@(Snapshots|ForEach-Object {$_.id});$listed=@($previewed.Retention.Candidates|ForEach-Object {$_.Id})
+ Assert ($previewed.State -eq 'Completed' -and $previewed.Retention.Preview -eq $true -and $previewed.Retention.Removed -eq 0 -and $null -eq $previewed.Retention.Error -and ((@($after|Sort-Object) -join ',') -ceq (@($before+$previewed.Snapshot|Sort-Object) -join ','))) 'a backup with a preview of the clean-up deletes nothing: every version is still there, and the new one'
+ Assert ($listed.Count -ge 4 -and $final.Snapshot -in $listed -and $ids['old-10-months'] -in $listed -and $previewed.Snapshot -notin $listed -and $partialNow[0].id -notin $listed -and @($listed|Where-Object {$_ -notin $after}).Count -eq 0 -and -not(Test-Path -LiteralPath (Join-Path $previewed.RunDirectory 'DeletingOldVersions.jsonl')) -and -not(Test-Path -LiteralPath (Join-Path $previewed.RunDirectory 'FreeingSpace.jsonl'))) 'it lists what last 1 and months 0 would delete: every complete version but the newest, and not the partial version that 2 complete versions follow'
 
  # --- No plaintext password in anything written -------------------------------------------------------
  $leaks=@()

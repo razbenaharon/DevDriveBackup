@@ -12,39 +12,204 @@ function Assert-Throws([scriptblock]$Block,[string]$Like,[string]$message){
  try{& $Block;throw "FAIL $message (no error)"}catch{if($_.Exception.Message -like 'FAIL*'){throw};if($_.Exception.Message -notlike $Like){throw "FAIL $message (got: $($_.Exception.Message))"}}
  Write-Output "PASS $message"
 }
-function Id([int]$n){('{0:x2}' -f $n)*32}
+function Id([int]$n){('{0:x4}' -f $n)*16}
 function Snap([int]$n,[string]$time,[string]$computer='pc',[string[]]$tags=@('devdrive')){[pscustomobject]@{id=(Id $n);time=$time;hostname=$computer;paths=@('E:\');tags=$tags}}
+# A version for the clean-up rule: complete unless -Partial; -Foreign is another program's version (no tag).
+function Ver([int]$n,[string]$time,[switch]$Partial,[switch]$Foreign,[string]$Computer='pc',[string[]]$Paths=@('E:\')){
+ $v=[pscustomobject]@{id=(Id $n);time=$time;hostname=$Computer;paths=$Paths}
+ if(-not $Foreign){$v|Add-Member -NotePropertyName tags -NotePropertyValue @($(if($Partial){'devdrive-partial'}else{'devdrive'}))}
+ $v
+}
+function Ids([int[]]$n){@($n|ForEach-Object {Id $_})}
+function Same($a,$b){(@($a|Sort-Object) -join ',') -ceq (@($b|Sort-Object) -join ',')}
+# The rule reads months on this computer's clock; the tests fix the clock (UTC unless said otherwise) so
+# that they give the same answer on every computer.
+function Plan($versions,[int]$last,[int]$months,[int]$new,[string]$computer='pc',[TimeZoneInfo]$zone=[TimeZoneInfo]::Utc){@(Get-VersionRetentionPlan $versions $last $months $computer (Id $new) $zone)}
+function Kept($plan){@($plan|Where-Object {$_.Keep}|ForEach-Object {$_.Id})}
+function Gone($plan){@($plan|Where-Object {-not $_.Keep}|ForEach-Object {$_.Id})}
+function Why($plan,[int]$n){@(@($plan|Where-Object {$_.Id -ceq (Id $n)})[0].Reasons)}
+function Decision([int]$n,[bool]$keep){[pscustomobject]@{Id=(Id $n);Keep=$keep}}
 
 # --- Partial versions (a backup that could not read every file) ----------------------------------
 $complete=Snap 1 '2026-06-29T10:00:00Z';$partial=Snap 2 '2026-06-29T18:00:00Z' 'pc' @('devdrive-partial');$older=Snap 3 '2026-06-28T10:00:00Z'
 Assert ((Test-PartialSnapshot $partial) -and -not (Test-PartialSnapshot $complete) -and -not (Test-PartialSnapshot ([pscustomobject]@{id=(Id 9);time='2026-01-01T00:00:00Z';hostname='pc';paths=@('E:\')}))) 'a partial version is recognised by its mark; unmarked and untagged versions are not partial'
 $mark=Get-PartialMarkArguments (Id 2)
-Assert ($mark[0] -eq 'tag' -and ($mark -join ' ') -like '*--remove devdrive*' -and ($mark -join ' ') -like '*--add devdrive-partial*' -and $mark[-1] -eq (Id 2)) 'marking a version partial takes it out of the versions the clean-up rule sees'
+Assert ($mark[0] -eq 'tag' -and ($mark -join ' ') -like '*--remove devdrive*' -and ($mark -join ' ') -like '*--add devdrive-partial*' -and $mark[-1] -eq (Id 2)) 'marking a version partial replaces its tag, so it never passes for a complete version'
 Assert-Throws {Get-PartialMarkArguments 'latest'} '*exact snapshot ID*' 'only an exact version can be marked partial'
+Assert (((Get-PartialTags @('devdrive','mine')) -join ',') -ceq 'mine,devdrive-partial' -and ((Get-PartialTags @('devdrive')) -join ',') -ceq 'devdrive-partial' -and (Test-PartialSnapshot ([pscustomobject]@{tags=@(Get-PartialTags $complete.tags)}))) 'the tags of a version once it is marked: the same change the mark makes, for a preview that plans a version still waiting for its mark'
 $set=@($complete,$partial,$older)
 Assert-Throws {Get-HistoryDeletionPlan $set @($complete.id)} '*protected*' 'the newest complete version is protected even when a newer partial version exists'
 Assert-Throws {Get-HistoryDeletionPlan $set @($partial.id)} '*protected*' 'the newest version stays protected as before, also when it is partial'
 Assert (@(Get-HistoryDeletionPlan $set @($older.id)).Count -eq 1) 'an older version can still be deleted'
 $onlyPartial=@((Snap 4 '2026-06-29T18:00:00Z' 'pc' @('devdrive-partial')),(Snap 5 '2026-06-28T18:00:00Z' 'pc' @('devdrive-partial')))
 Assert (@(Get-HistoryDeletionPlan $onlyPartial @((Id 5))).Count -eq 1) 'a set with only partial versions still lets an older one go'
-# A plan that would delete a partial version (restic never plans one, because the mark replaces the tag).
-Assert-Throws {Get-RetentionRemovals @([pscustomobject]@{keep=@($complete);remove=@($partial,$older)}) $complete.id @($complete,$partial,$older) 'pc'} '*partial*' 'the clean-up never deletes a partial version'
-Assert-Throws {Get-RetentionRemovals @([pscustomobject]@{keep=@($partial,$complete);remove=@($older)}) $partial.id @($complete,$partial,$older) 'pc'} '*partial*' 'the clean-up never runs on behalf of a partial version'
 
-# --- The version just made --------------------------------------------------------------------------
-$future=Snap 6 '2027-01-01T00:00:00Z';$new=Snap 7 '2026-11-12T10:00:00Z'
-$wrongClock=@([pscustomobject]@{keep=@($future);remove=@($new)})
-Assert-Throws {Get-RetentionRemovals $wrongClock '' @($future,$new) 'pc'} '*not known*' 'without the ID of the version just made nothing is deleted'
-Assert-Throws {Get-RetentionRemovals $wrongClock $null @($future,$new) 'pc'} '*not known*' 'a missing ID of the version just made is refused too'
+# === Keep versions: the last N complete versions and the newest complete version of each month ========
+# (Get-VersionRetentionPlan works the plan out from the list of versions; restic only lists and deletes.)
 
-# --- A repository shared by two computers -------------------------------------------------------------
-$a=Get-RetentionArguments 7 4 3 'pc'
-Assert (($a -join ' ') -like '*--host pc*' -and '--dry-run' -in $a) 'the clean-up rule is limited to this computer''s versions'
-Assert (-not ((Get-RetentionArguments 7 4 3) -contains '--host')) 'without a computer name the rule is unchanged (older callers)'
-$mine=@((Snap 10 '2026-06-30T12:00:00Z'),(Snap 11 '2026-01-01T12:00:00Z'));$theirs=@((Snap 12 '2026-06-01T12:00:00Z' 'laptop'),(Snap 13 '2025-06-01T12:00:00Z' 'laptop'))
-Assert-Throws {Get-RetentionRemovals @([pscustomobject]@{keep=@($mine[0]);remove=@($mine[1])},[pscustomobject]@{keep=@($theirs[0]);remove=@($theirs[1])}) $mine[0].id @($mine+$theirs) 'pc'} '*another computer*' 'a plan that would delete another computer''s version is refused'
-$r=@(Get-RetentionRemovals @([pscustomobject]@{keep=@($mine[0]);remove=@($mine[1])}) $mine[0].id @($mine+$theirs) 'pc')
-Assert ($r.Count -eq 1 -and $r[0].id -eq $mine[1].id) 'this computer''s old version is still returned for deletion'
+# --- Irregular backups: gaps of 17, 2 and 3 days, then three a day, then a pause of four months -------
+$stamps=@('2026-01-05T12:00:00Z','2026-01-22T12:00:00Z','2026-01-24T12:00:00Z','2026-01-27T12:00:00Z')
+foreach($day in '2026-01-28','2026-01-29','2026-01-30','2026-02-02'){foreach($hour in '08','12','18'){$stamps+="$($day)T$($hour):00:00Z"}}
+$stamps+='2026-06-10T12:00:00Z'
+$irregular=@(for($i=0;$i -lt $stamps.Count;$i++){Ver ($i+1) $stamps[$i]})   # 1..17, oldest first; 13 = 30 January 18:00, 16 = 2 February 18:00
+$p=Plan $irregular 10 6 17
+Assert ($p.Count -eq 17 -and (Same (Kept $p) (Ids @(8..17))) -and (Same (Gone $p) (Ids @(1..7)))) 'irregular backups, last 10 and 6 months: the 10 newest stay whatever their dates, the 7 older ones go'
+Assert ((Same (Why $p 17) @('JustMade','NewestComplete','LastN','Monthly')) -and (Same (Why $p 16) @('LastN','Monthly')) -and (Same (Why $p 9) @('LastN')) -and (Same (Why $p 7) @('OutsideRules'))) 'every version carries the reasons it is kept, or that no rule keeps it'
+$p=Plan $irregular 3 6 17
+Assert (Same (Kept $p) (Ids 17,16,15,13)) 'last 3 and 6 months: the 3 newest, and the newest version of January (30 January 18:00) as that month''s version'
+Assert ((Same (Why $p 13) @('Monthly')) -and (Same (Why $p 12) @('OutsideRules')) -and (Same (Why $p 4) @('OutsideRules'))) 'earlier versions of the same day and month go'
+Assert (Same (Kept (Plan $irregular 0 6 17)) (Ids 17,16,13)) 'months only: one version for each of June, February and January'
+Assert (Same (Kept (Plan $irregular 10 0 17)) (Ids @(8..17))) 'last 10 only: the 10 newest'
+Assert (Same (Kept (Plan $irregular 0 2 17)) (Ids 17)) 'after a pause longer than the months kept, the newest version is still there: months count back from it, not from today'
+# The months count back from the newest complete version: before the pause ended, January was inside 2 months.
+Assert (Same (Kept (Plan @($irregular[0..15]) 0 2 16)) (Ids 16,13)) 'before the pause the same rule kept February and January'
+
+# --- The two rules together ---------------------------------------------------------------------------
+$newest=[DateTimeOffset]::Parse('2026-11-14T12:00:00Z',[Globalization.CultureInfo]::InvariantCulture)
+$daily=@(1..300|ForEach-Object {Ver $_ $newest.AddDays($_-300).UtcDateTime.ToString('o')})   # one a day, 300 = 14 November
+$p=Plan $daily 10 6 300
+$stay=@(Kept $p)
+Assert ($p.Count -eq 300 -and @($p|ForEach-Object {$_.Id}|Sort-Object -Unique).Count -eq 300) 'every version is in the plan exactly once'
+Assert ((Same (Why $p 300) @('JustMade','NewestComplete','LastN','Monthly')) -and @($stay|Where-Object {$_ -ceq (Id 300)}).Count -eq 1) 'a version that is among the last 10 and also its month''s newest is kept once'
+# 14 Nov is both; the months before it end on 31 Oct (286), 30 Sep (255), 31 Aug (225), 31 Jul (194), 30 Jun (163).
+Assert (Same $stay (Ids (@(291..300)+@(286,255,225,194,163)))) 'a year of daily backups, last 10 and 6 months: the last 10 days and the last day of each of the 5 months before'
+Assert ($stay.Count -eq 15) 'with 10 and 6 a group keeps at most 15 complete versions while the clock is right: the newest one is always both among the last 10 and its month''s version'
+# The 16th: only when versions dated later than the one just made exist (a clock that was wrong). The
+# version just made (1 November, 06:00) is then neither among the last 10 nor its month's newest, and stays anyway.
+$late=$daily+@(Ver 301 '2026-11-01T06:00:00Z')
+$p=Plan $late 10 6 301
+Assert (@(Kept $p).Count -eq 16 -and (Same (Why $p 301) @('JustMade')) -and (Same (Kept $p) (@($stay)+(Id 301)))) 'with 10 and 6 a group never keeps more than 16 complete versions: 15 by the two rules and the version just made'
+$random=[Random]::new(20261114);$most=0
+foreach($round in 1..25){
+ $at=$newest;$history=@(1..80|ForEach-Object {$v=Ver $_ $at.UtcDateTime.ToString('o');$at=$at.AddHours(-$random.Next(1,24*45));$v})   # 1 is the newest
+ $last=$random.Next(0,13);$months=$random.Next(0,9);if($last+$months -eq 0){$last=1}
+ $p=Plan $history $last $months 1;$stay=@(Kept $p)
+ # The newest version is always both among the last N and its month's version, so the two rules overlap by at least one.
+ $limit=$last+$months-$(if($last -and $months){1}else{0})
+ if($stay.Count -gt $limit -or (Id 1) -cnotin $stay -or @(1..80|Where-Object {$_ -le $last -and (Id $_) -cnotin $stay}).Count){throw "FAIL random history $round (last $last, months $months) kept $($stay.Count)"}
+ $most=[math]::Max($most,$stay.Count)
+}
+Assert ($most -gt 10) '25 random histories: never more than last + months complete versions, always the newest and the last N'
+$few=@(Ver 1 '2024-12-03T12:00:00Z'),(Ver 2 '2025-03-09T12:00:00Z'),(Ver 3 '2025-03-10T12:00:00Z'),(Ver 4 '2025-08-20T12:00:00Z'),(Ver 5 '2026-01-15T12:00:00Z'),(Ver 6 '2026-01-16T12:00:00Z'),(Ver 7 '2026-11-14T12:00:00Z')
+Assert (@(Gone (Plan $few 10 6 7)).Count -eq 0) 'with fewer than 10 versions nothing complete is deleted, however old'
+
+# --- One version a month ------------------------------------------------------------------------------
+$monthly=@(
+ (Ver 1 '2026-02-14T12:00:00Z'),
+ (Ver 2 '2026-03-10T12:00:00Z'),(Ver 3 '2026-03-20T12:00:00Z'),(Ver 4 '2026-03-25T12:00:00Z' -Partial),
+ (Ver 5 '2026-04-05T12:00:00Z'),(Ver 6 '2026-04-28T12:00:00Z'),
+ (Ver 7 '2026-08-03T12:00:00Z'),(Ver 8 '2026-08-12T12:00:00Z'))
+$p=Plan $monthly 2 6 8
+Assert (Same (Kept $p) (Ids 3,6,7,8)) 'months: the newest complete version of March and of April stays beside the last 2'
+Assert ((Same (Why $p 3) @('Monthly')) -and (Same (Why $p 2) @('OutsideRules')) -and -not @($p|Where-Object {$_.Id -ceq (Id 4)})[0].Keep) 'a partial version that is the newest of its month is not the month''s version: the newest complete one is'
+Assert ((Same (Why $p 1) @('OutsideRules'))) 'a month older than 6 months back from the newest complete version (August: March to August) is dropped'
+Assert (Same (Kept (Plan $monthly 2 5 8)) (Ids 6,7,8)) 'with 5 months, March is dropped too'
+$p=Plan $monthly 6 1 8
+Assert ((Same (Gone $p) (Ids 1,4)) -and (Same (Why $p 2) @('LastN'))) 'a version of an older month stays when it is among the last N'
+
+# --- Midnight at a month''s end: months are read on this computer''s clock, as the history shows them ---
+$plus2=[TimeZoneInfo]::CreateCustomTimeZone('test +2',[TimeSpan]::FromHours(2),'test +2','test +2')
+$plus3=[TimeZoneInfo]::CreateCustomTimeZone('test +3',[TimeSpan]::FromHours(3),'test +3','test +3')
+# 2 was made at 21:30 UTC on 30 June: 23:30 on 30 June where the clock is 2 hours ahead, 00:30 on 1 July where it is 3.
+$edge=@((Ver 1 '2026-06-30T12:00:00Z'),(Ver 2 '2026-06-30T21:30:00Z'),(Ver 3 '2026-07-20T12:00:00Z'),(Ver 4 '2026-08-10T12:00:00Z'))
+Assert (Same (Kept (Plan $edge 1 3 4 'pc' $plus2)) (Ids 2,3,4)) 'a version made at 23:30 on 30 June belongs to June and is June''s version'
+Assert (Same (Kept (Plan $edge 1 3 4 'pc' $plus3)) (Ids 1,3,4)) 'the same moment read as 00:30 on 1 July belongs to July, where a newer version exists'
+$recorded=@($edge[0],(Ver 2 '2026-07-01T00:30:00+03:00'),$edge[2],$edge[3])
+Assert (Same (Kept (Plan $recorded 1 3 4 'pc' $plus2)) (Ids 2,3,4)) 'the clock of the computer that reads the history decides, not the offset written in the version'
+$typed=@($recorded|ConvertTo-Json -Depth 5|ConvertFrom-Json)
+Assert (Same (Kept (Plan $typed 1 3 4 'pc' $plus2)) (Ids 2,3,4)) 'the same after the dates went through JSON'
+Assert (Same (Kept @(Get-VersionRetentionPlan $edge 1 3 'pc' (Id 4))) (Kept (Plan $edge 1 3 4 'pc' ([TimeZoneInfo]::Local)))) 'without a clock given, this computer''s own time zone is used'
+
+# --- Partial versions -----------------------------------------------------------------------------------
+$mixed=@((Ver 1 '2026-06-01T12:00:00Z'),(Ver 2 '2026-06-02T12:00:00Z'),(Ver 3 '2026-06-03T12:00:00Z'),(Ver 5 '2026-06-03T18:00:00Z' -Partial),(Ver 4 '2026-06-04T12:00:00Z'))
+$p=Plan $mixed 2 0 4
+Assert ((Same (Kept $p) (Ids 3,4,5)) -and (Same (Why $p 5) @('PartialKept')) -and (Same (Why $p 3) @('LastN'))) 'a partial version does not count among the last N: the 2 newest complete versions stay'
+foreach($newer in 0..4){
+ $set=@((Ver 1 '2026-06-01T12:00:00Z'),(Ver 50 '2026-06-05T12:00:00Z' -Partial))+@(1..4|Where-Object {$_ -le $newer}|ForEach-Object {Ver (1+$_) "2026-06-1$($_)T12:00:00Z"})
+ $p=Plan $set 10 6 (1+$newer)
+ $stays=@($p|Where-Object {$_.Id -ceq (Id 50)})[0].Keep
+ if($stays -ne ($newer -lt 3)){throw "FAIL a partial version with $newer newer complete versions: kept=$stays"}
+ if($newer -ge 3 -and -not (Same (Why $p 50) @('PartialAfter3Complete'))){throw 'FAIL the reason for deleting a partial version'}
+}
+Assert $true 'a partial version stays with 0, 1 or 2 newer complete versions and goes with 3 or more'
+$sameTime=@((Ver 1 '2026-06-05T12:00:00Z'),(Ver 50 '2026-06-05T12:00:00Z' -Partial),(Ver 2 '2026-06-06T12:00:00Z'),(Ver 3 '2026-06-07T12:00:00Z'))
+Assert ((Kept (Plan $sameTime 10 0 3)) -ccontains (Id 50)) 'a complete version made at the same moment is not newer'
+$old=@((Ver 50 '2020-01-01T12:00:00Z' -Partial),(Ver 1 '2026-06-01T12:00:00Z'),(Ver 2 '2026-06-02T12:00:00Z'))
+Assert ((Kept (Plan $old 1 1 2)) -ccontains (Id 50)) 'age alone never deletes a partial version: six years old with 2 newer complete versions, it stays'
+$off=@((Ver 50 '2026-01-01T12:00:00Z' -Partial))+@(1..12|ForEach-Object {Ver $_ ('2026-{0:d2}-10T12:00:00Z' -f $_)})
+$p=Plan $off 0 0 12
+Assert (@(Gone $p).Count -eq 0 -and $p.Count -eq 13 -and @($p|Where-Object {-not (Same $_.Reasons @('CleanUpOff'))}).Count -eq 0) 'with last 0 and months 0 nothing is planned: every version stays, a partial one with 12 newer complete versions too'
+Assert (@(Get-RetentionRemovals $p (Id 12) $off 'pc').Count -eq 0) 'and nothing is handed over for deletion'
+Assert ((Gone (Plan $off 1 0 12)) -ccontains (Id 50)) 'the same partial version goes as soon as the clean-up is on'
+
+# --- Each computer and set of folders on its own ------------------------------------------------------
+$both=@('E:\','D:\data');$swapped=@('D:\data','E:\')
+$shared=@(
+ (Ver 1 '2026-06-01T12:00:00Z'),(Ver 2 '2026-06-02T12:00:00Z'),(Ver 3 '2026-06-03T12:00:00Z'),(Ver 4 '2026-06-04T12:00:00Z'),(Ver 5 '2026-06-05T12:00:00Z'),
+ (Ver 11 '2026-05-01T12:00:00Z' -Paths $both),(Ver 12 '2026-05-02T12:00:00Z' -Paths $swapped),(Ver 13 '2026-05-03T12:00:00Z' -Paths $both),
+ (Ver 14 '2026-05-02T18:00:00Z' -Partial -Paths $both),
+ (Ver 21 '2025-01-01T12:00:00Z' -Computer 'laptop'),(Ver 22 '2025-01-02T12:00:00Z' -Computer 'laptop'),(Ver 23 '2025-01-03T12:00:00Z' -Computer 'laptop'),(Ver 24 '2025-01-04T12:00:00Z' -Computer 'laptop'),(Ver 25 '2025-01-05T12:00:00Z' -Computer 'laptop'),
+ (Ver 26 '2024-12-31T12:00:00Z' -Partial -Computer 'laptop'),
+ (Ver 31 '2020-01-01T12:00:00Z' -Foreign),
+ (Ver 41 '2026-06-01T12:00:00Z' -Computer 'PC'))
+$p=Plan $shared 2 0 5
+Assert (Same (Gone $p) (Ids 1,2,3,11)) 'two sets of folders on one computer: each keeps its own last 2 (the order of the folders does not matter)'
+Assert ((Same (Why $p 14) @('PartialKept'))) 'a partial version is judged by its own set of folders: one newer complete version there, however many the other set has'
+Assert (@($p|Where-Object {$_.Host -cne 'pc'}).Count -eq 0 -and $p.Count -eq 9) 'another computer''s versions (also one whose name differs only in capitals) and another program''s are not in the plan at all'
+$r=@(Get-RetentionRemovals $p (Id 5) $shared 'pc')
+Assert ((Same @($r|ForEach-Object {$_.id}) (Ids 1,2,3,11)) -and @($r|Where-Object {$_.hostname -cne 'pc'}).Count -eq 0) 'what is handed over for deletion is this computer''s only'
+$capitals=@((Ver 1 '2026-06-01T12:00:00Z' -Paths 'E:\a','e:\A'),(Ver 2 '2026-06-02T12:00:00Z' -Paths 'e:\A','E:\a'),(Ver 3 '2026-06-03T12:00:00Z' -Paths 'E:\a','e:\A'),(Ver 4 '2026-06-04T12:00:00Z' -Paths 'e:\A','E:\a'))
+$q=Plan $capitals 1 0 4
+Assert ((Same (Gone $q) (Ids 1,2,3)) -and @(Get-RetentionRemovals $q (Id 4) $capitals 'pc').Count -eq 3) 'two folders that differ only in capitals, listed in either order, are one set, and the last check agrees'
+$joined=@((Ver 1 '2026-06-01T12:00:00Z' -Paths "E:\a`nE:\b"),(Ver 2 '2026-06-02T12:00:00Z' -Paths 'E:\a','E:\b'),(Ver 3 '2026-06-03T12:00:00Z' -Paths 'E:\a','E:\b'))
+Assert (@(Gone (Plan $joined 1 0 3)).Count -eq 1) 'one odd folder name is never taken for two folders: it stays a set of its own'
+$p=Plan $shared 2 0 25 'laptop'
+Assert ((Same (Gone $p) (Ids 21,22,23,26)) -and $p.Count -eq 6) 'the other computer cleans its own versions with its own rule, and only those'
+
+# --- What always stays --------------------------------------------------------------------------------
+$tail=@((Ver 1 '2026-06-01T12:00:00Z'),(Ver 2 '2026-06-02T12:00:00Z'),
+ (Ver 11 '2026-03-01T12:00:00Z' -Paths $both),(Ver 12 '2026-03-02T12:00:00Z' -Paths $both),(Ver 13 '2026-03-03T12:00:00Z' -Partial -Paths $both),(Ver 14 '2026-03-04T12:00:00Z' -Partial -Paths $both),(Ver 15 '2026-06-03T12:00:00Z' -Partial -Paths $both))
+$p=Plan $tail 1 0 2
+Assert ((Same (Gone $p) (Ids 1,11)) -and (Same (Why $p 12) @('NewestComplete','LastN'))) 'last 1, months 0: a set of folders whose newest complete version is followed only by partial versions keeps it, and them'
+foreach($rule in @(@(1,0),@(0,1),@(1,1),@(3,0),@(0,6),@(10,6))){
+ $stay=@(Kept (Plan $tail $rule[0] $rule[1] 2))
+ if((Id 2) -cnotin $stay -or (Id 12) -cnotin $stay){throw "FAIL the newest complete version was not kept with last $($rule[0]), months $($rule[1])"}
+}
+Assert $true 'the newest complete version of every set of folders survives every setting'
+$wrongClock=@((Ver 1 '2027-01-01T12:00:00Z'),(Ver 2 '2027-01-02T12:00:00Z'),(Ver 3 '2026-11-12T10:00:00Z'))
+$p=Plan $wrongClock 1 0 3
+Assert ((Same (Gone $p) (Ids 1)) -and (Same (Why $p 3) @('JustMade')) -and (Same (Why $p 2) @('NewestComplete','LastN'))) 'the version just made stays even when versions dated later exist (a clock that was wrong)'
+
+# --- What the plan refuses ----------------------------------------------------------------------------
+Assert-Throws {Get-VersionRetentionPlan $mixed 2 0 'pc' ''} '*not known*' 'without the ID of the version just made nothing is planned'
+Assert-Throws {Get-VersionRetentionPlan $mixed 2 0 'pc' (Id 99)} '*not found*' 'a version just made that is not among the saved versions is refused'
+Assert-Throws {Get-VersionRetentionPlan $shared 2 0 'pc' (Id 21)} '*not found*' 'so is one that belongs to another computer'
+Assert-Throws {Get-VersionRetentionPlan $mixed 2 0 'pc' (Id 5)} '*partial*' 'the clean-up never runs on behalf of a partial version'
+Assert-Throws {Get-VersionRetentionPlan $mixed 2 0 '' (Id 4)} '*computer*' 'without this computer''s name nothing is planned'
+Assert-Throws {Get-VersionRetentionPlan $mixed -1 0 'pc' (Id 4)} '*out of range*' 'negative numbers are refused'
+
+# --- The checks before anything is deleted (independent of how the plan was worked out) -----------------
+$c=@((Ver 1 '2026-06-01T12:00:00Z'),(Ver 2 '2026-06-02T12:00:00Z'),(Ver 3 '2026-06-03T12:00:00Z'),(Ver 4 '2026-06-04T12:00:00Z'),(Ver 5 '2026-06-02T18:00:00Z' -Partial),
+ (Ver 11 '2026-05-01T12:00:00Z' -Partial -Paths $both),(Ver 12 '2026-05-02T12:00:00Z' -Partial -Paths $both),
+ (Ver 21 '2025-01-01T12:00:00Z' -Computer 'laptop'),(Ver 22 '2025-01-02T12:00:00Z' -Computer 'laptop'),(Ver 31 '2020-01-01T12:00:00Z' -Foreign))
+$r=@(Get-RetentionRemovals @((Decision 1 $false),(Decision 2 $true),(Decision 3 $true),(Decision 4 $true),(Decision 5 $true)) (Id 4) $c 'pc')
+Assert ($r.Count -eq 1 -and $r[0].id -ceq (Id 1) -and $r[0].hostname -eq 'pc') 'an old version in the plan is returned for deletion, as the saved version itself'
+Assert (@(Get-RetentionRemovals @((Decision 1 $true),(Decision 4 $true)) (Id 4) $c 'pc').Count -eq 0) 'a plan that deletes nothing returns nothing'
+Assert-Throws {Get-RetentionRemovals @((Decision 1 $false),(Decision 4 $true)) '' $c 'pc'} '*not known*' 'without the ID of the version just made nothing is deleted'
+Assert-Throws {Get-RetentionRemovals @((Decision 1 $false),(Decision 4 $true)) $null $c 'pc'} '*not known*' 'a missing ID of the version just made is refused too'
+Assert-Throws {Get-RetentionRemovals @((Decision 3 $false),(Decision 4 $true)) (Id 3) $c 'pc'} '*just made*' 'a plan that would delete the version just made is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 1 $false),(Decision 5 $true)) (Id 5) $c 'pc'} '*partial*' 'a partial version just made is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 4 $false),(Decision 3 $true)) (Id 3) $c 'pc'} '*newest complete*' 'a plan that would delete the newest complete version of a set of folders is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 11 $false),(Decision 12 $false),(Decision 4 $true)) (Id 4) $c 'pc'} '*every version*' 'a plan that would empty a set of folders is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 5 $false),(Decision 4 $true)) (Id 4) $c 'pc'} '*partial*fewer than three*' 'a plan that would delete a partial version with only 2 newer complete versions is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 21 $false),(Decision 4 $true)) (Id 4) $c 'pc'} '*another computer*' 'a plan that would delete another computer''s version is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 31 $false),(Decision 4 $true)) (Id 4) $c 'pc'} '*did not make*' 'a plan that would delete another program''s version is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 99 $false),(Decision 4 $true)) (Id 4) $c 'pc'} '*not among*' 'a plan that names a version that is not saved is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 1 $false),(Decision 1 $true),(Decision 4 $true)) (Id 4) $c 'pc'} '*both keeps and deletes*' 'a plan that keeps and deletes one version is refused'
+Assert-Throws {Get-RetentionRemovals @((Decision 1 $false),(Decision 4 $true)) (Id 4) $c ''} '*computer*' 'without this computer''s name nothing is deleted'
+$more=$c+@((Ver 6 '2026-06-05T12:00:00Z'))
+$r=@(Get-RetentionRemovals @((Decision 5 $false),(Decision 6 $true)) (Id 6) $more 'pc')
+Assert ($r.Count -eq 1 -and (Test-PartialSnapshot $r[0])) 'a partial version with 3 newer complete versions may be deleted'
 
 # --- Deleting many versions at once -----------------------------------------------------------------
 $ids=@(1..520|ForEach-Object {[guid]::NewGuid().ToString('N')*2})

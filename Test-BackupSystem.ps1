@@ -90,8 +90,8 @@ Assert ($remaining.Count -eq 1 -and $remaining[0].id -eq $forced.Snapshot) 'expl
 [void](Run 'Restore' @{Snapshot=$forced.Snapshot;RestoreTarget=(Join-Path $private 'after-prune')})
 Assert ([IO.File]::ReadAllText($changed) -eq 'forced version') 'retained snapshot restores after history pruning without source changes'
 [IO.File]::WriteAllText($changed,'version with clean-up')
-$kept=Run 'Backup' @{KeepDays=7;KeepWeeks=4;KeepMonths=3}
-Assert ($kept.Retention -and -not $kept.Retention.PSObject.Properties['Error'] -and $kept.Retention.Removed -eq 0 -and $kept.Retention.Kept -eq 2) 'a backup with Keep versions plans the clean-up; with only two versions nothing is deleted (the oldest one inside the period is kept)'
+$kept=Run 'Backup' @{KeepLast=10;KeepMonths=6}
+Assert ($kept.Retention -and $null -eq $kept.Retention.Error -and $kept.Retention.Removed -eq 0 -and $kept.Retention.Kept -eq 2) 'a backup with Keep versions plans the clean-up; with only two versions nothing is deleted (both are among the newest ten)'
 Assert (Test-Path -LiteralPath (Join-Path $kept.RunDirectory 'clean-up-plan.json')) 'the clean-up plan is saved with the run'
 Write-Output ('Artifacts: '+$private)
 Write-Output ('Disposable source: '+$root)

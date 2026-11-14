@@ -77,10 +77,10 @@ function Confirm-Deletion($plan) {
  $list=[Windows.Forms.TextBox]::new();$list.SetBounds(20,80,700,180);$list.Multiline=$true;$list.ReadOnly=$true;$list.ScrollBars='Both';$list.WordWrap=$false;$list.Text=(@($plan|ForEach-Object {(ConvertTo-HistoryDate $_.time).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss')+'  '+$_.id+$(if(Test-PartialSnapshot $_){'  (partial)'}else{''})})-join [Environment]::NewLine);$dialog.Controls.Add($list)
  $reclaim=[Windows.Forms.CheckBox]::new();$reclaim.SetBounds(20,274,700,28);$reclaim.Text='Also reclaim unused storage (prune; may take time and temporarily need free space)';$dialog.Controls.Add($reclaim)
  $hint=[Windows.Forms.Label]::new();$hint.SetBounds(20,311,700,25);$hint.Text='Type DELETE to confirm deletion of '+$plan.Count+' selected version(s):';$dialog.Controls.Add($hint)
- $input=[Windows.Forms.TextBox]::new();$input.SetBounds(20,341,700,28);$dialog.Controls.Add($input)
+ $typed=[Windows.Forms.TextBox]::new();$typed.SetBounds(20,341,700,28);$dialog.Controls.Add($typed)
  $ok=[Windows.Forms.Button]::new();$ok.SetBounds(470,402,120,35);$ok.Text='Delete history';$ok.Enabled=$false;$ok.DialogResult='OK';$dialog.Controls.Add($ok)
  $cancel=[Windows.Forms.Button]::new();$cancel.SetBounds(600,402,120,35);$cancel.Text='Cancel';$cancel.DialogResult='Cancel';$dialog.Controls.Add($cancel);$dialog.CancelButton=$cancel
- $input.Add_TextChanged({$ok.Enabled=$input.Text -ceq 'DELETE'})
+ $typed.Add_TextChanged({$ok.Enabled=$typed.Text -ceq 'DELETE'})
  try{if($dialog.ShowDialog($form) -eq 'OK'){return @{SnapshotIds=@($plan.id);Confirmation='DELETE SELECTED HISTORY';ReclaimSpace=$reclaim.Checked}};return $null}finally{$dialog.Dispose()}
 }
 $refresh.Add_Click({try{Start-HistoryAction 'Snapshots'}catch{Error-Message $_.Exception.Message}})

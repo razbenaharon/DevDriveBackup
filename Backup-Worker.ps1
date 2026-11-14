@@ -9,11 +9,17 @@ param(
  [switch]$ReadAllData,
  [switch]$ForceRead,
  [string]$RequestPath,
- # Backup only: afterwards keep one version per day / week / month for this long and delete the rest
- # (all 0: keep every version).
- [ValidateRange(0,3650)][int]$KeepDays=0,
- [ValidateRange(0,520)][int]$KeepWeeks=0,
+ # Backup only, Keep versions: afterwards keep the KeepLast newest complete versions and the newest
+ # complete version of each month for KeepMonths months, and delete the rest (both 0: keep every
+ # version). The rule is Get-VersionRetentionPlan in Backup.History.psm1.
+ [ValidateRange(0,10000)][int]$KeepLast=0,
  [ValidateRange(0,240)][int]$KeepMonths=0,
+ # Backup only: work the clean-up out as usual and report it, but delete nothing and free no space.
+ [switch]$RetentionPreview,
+ # The earlier rule (one version a day / a week). Still accepted only so that a run started by an older
+ # window fails with a plain message instead of applying another rule than the one that was chosen.
+ [int]$KeepDays=0,
+ [int]$KeepWeeks=0,
  # Test suite only: an existing folder under the temporary directory that stands in for the backup
  # drive (repository, engine cache, run folders), so the tests need no second drive and never touch
  # the real state. A real run never passes it and keeps every volume check.
@@ -162,6 +168,11 @@ function Save-PendingPartialMark([string]$Id) {
  $ids=@(if(Test-Path -LiteralPath $path){Get-Content -LiteralPath $path -Raw|ConvertFrom-Json})+$Id
  [void](Write-BackupStatus @($ids|Select-Object -Unique) $path)
 }
+function Get-PendingPartialMarks {
+ # The IDs of the partial versions that are still waiting for their mark.
+ $path=$keyPath+'.partial-pending.local.json'
+ if(Test-Path -LiteralPath $path){@(Get-Content -LiteralPath $path -Raw|ConvertFrom-Json|ForEach-Object {[string]$_})}
+}
 function Complete-PendingPartialMarks {
  $path=$keyPath+'.partial-pending.local.json'
  if(-not(Test-Path -LiteralPath $path)){return}
@@ -245,6 +256,7 @@ function Invoke-KeyManagement {
 }
 try {
  Save-Status
+ if($PSBoundParameters.ContainsKey('KeepDays') -or $PSBoundParameters.ContainsKey('KeepWeeks')){throw 'This run was started with the earlier Keep versions settings (days and weeks), which no longer exist: the rule is now the last N versions and one version a month. Nothing was backed up and nothing was deleted. Update every file of DevDriveBackup, set Keep versions again and run the backup again.'}
  $script:config=Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json
  # The test folder never goes together with real settings or key files.
  if($TestRoot){$temporary=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\';foreach($testPath in @($ConfigPath,$script:config.PasswordDpapiPath,$script:config.RecoveryKeyPath)){if(-not [IO.Path]::GetFullPath([string]$testPath).StartsWith($temporary,[StringComparison]::OrdinalIgnoreCase)){throw 'TestRoot is for the test suite only: the settings and key files must be under the temporary directory too'}}}
@@ -358,50 +370,72 @@ try {
     }catch{$markError=$_.Exception.Message;try{Save-PendingPartialMark $script:status.Snapshot}catch{$markError+=' It could not be noted for later either: '+$_.Exception.Message}}
     $partialText='Some files could not be read, so this version is incomplete (restic exit code 3). '
     if($markError){throw ($partialText+"It was saved, but could not be marked as partial yet, so for now the history shows it like a complete version; it is marked on a later run, before any version is deleted. See BackingUp.errors.log for the files that were skipped, then back up again. ($markError)")}
-    throw ($partialText+'It was saved and marked as partial: the history shows it as partial and the automatic clean-up of old versions leaves it alone. See BackingUp.errors.log for the files that were skipped (for example files another program keeps open), then back up again.')
+    throw ($partialText+'It was saved and marked as partial: the history shows it as partial, it never counts as one of the versions to keep, and the automatic clean-up of old versions deletes it only after three complete versions were made after it. See BackingUp.errors.log for the files that were skipped (for example files another program keeps open), then back up again.')
    }
    try{Run-Engine @('check') 'CheckingStructure'}
    catch{if($_.Exception.Data['ExitCode'] -eq 11){throw ('The new version was saved, but it could not be checked. '+$_.Exception.Message)};throw}
-   if($KeepDays+$KeepWeeks+$KeepMonths -gt 0){
-    # The backup itself has succeeded and been checked. A clean-up that fails is reported, not a failed
-    # backup. Old versions are deleted first and their space freed in a second step, so the result says
-    # how far it got. Once versions were deleted the repository is checked again, outside that report:
-    # a repository that fails this check fails the run, since it may be damaged.
+   if($KeepLast -gt 0 -or $KeepMonths -gt 0 -or $RetentionPreview){
+    # Keep versions. The backup itself has succeeded and been checked: a clean-up that fails is reported
+    # (Retention.Error), not a failed backup. The plan is worked out from the list of versions
+    # (Get-VersionRetentionPlan), checked (Get-RetentionRemovals) and saved with the run before anything
+    # is deleted. A preview stops there. Otherwise the versions are deleted by exact ID and their space
+    # is freed in a second step, so the result says how far it got. Once versions were deleted the
+    # repository is checked again, outside that report: a repository that fails this check fails the
+    # run, since it may be damaged.
+    # Retention in the result: Kept = complete versions of this computer that stay; Candidates = the
+    # versions a preview would delete now, or the ones this run really deleted (Removed of them,
+    # PartialRemoved of those partial). No size is given: deleting a version frees only the data that no
+    # remaining version needs, and restic 0.19 does not report that amount in a form that can be read.
     $new=$script:status.Snapshot
-    $retention=[ordered]@{Days=$KeepDays;Weeks=$KeepWeeks;Months=$KeepMonths;Removed=0;Kept=$null;SpaceFreed=$false}
-    $remove=@();$deleting=$false;$computer=''
+    $retention=[ordered]@{Preview=[bool]$RetentionPreview;Last=$KeepLast;Months=$KeepMonths;Kept=$null;Removed=0;PartialRemoved=0;Candidates=@();Error=$null}
+    $remove=@();$gone=@();$deleting=$false
     try{
-     # The rule covers this computer's complete versions only (tag devdrive: a partial version carries
-     # another tag). The computer name is read from the version just made, as restic recorded it.
-     try{Complete-PendingPartialMarks}catch{throw "An earlier partial version is not marked yet, so nothing was cleaned up. $($_.Exception.Message)"}
-     Run-Engine @('snapshots','--tag','devdrive') 'ReadingHistory'
+     # A partial version that is still waiting for its mark would pass for a complete one. It is marked
+     # first (the mark changes its ID). A preview changes no version: it only plans such a version as
+     # the partial one it is, under the ID it still has.
+     $waiting=@()
+     if($RetentionPreview){try{$waiting=@(Get-PendingPartialMarks)}catch{throw "The note of an earlier partial version that is not marked yet could not be read, so nothing was planned. $($_.Exception.Message)"}}
+     else{try{Complete-PendingPartialMarks}catch{throw "An earlier partial version is not marked yet, so nothing was cleaned up. $($_.Exception.Message)"}}
+     # Every version in the repository: the rule needs the partial ones too, and the checks need to see
+     # what belongs to another computer or another program. The computer name is read from the version
+     # just made, as restic recorded it.
+     Run-Engine @('snapshots') 'ReadingHistory'
      $available=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistory.jsonl') -Raw|ConvertFrom-Json)
+     if($waiting.Count){$available=@($available|ForEach-Object {
+      if($_.id -cin $waiting -and $_.PSObject.Properties['tags'] -and -not (Test-PartialSnapshot $_)){$as=$_.PSObject.Copy();$as.tags=@(Get-PartialTags $_.tags);$as}else{$_}
+     })}
      $made=@($available|Where-Object {$new -and $_.id -ceq $new})
      if($made.Count -ne 1 -or -not $made[0].hostname){throw 'The version this backup just made was not found among the saved versions, so the clean-up cannot protect it. Nothing was deleted.'}
      $computer=[string]$made[0].hostname
-     Run-Engine (Get-RetentionArguments $KeepDays $KeepWeeks $KeepMonths $computer) 'PlanningCleanUp'
-     $plan=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'PlanningCleanUp.jsonl') -Raw|ConvertFrom-Json)
+     $plan=@(Get-VersionRetentionPlan $available $KeepLast $KeepMonths $computer $new)
      $remove=@(Get-RetentionRemovals $plan $new $available $computer)
-     [IO.File]::WriteAllText((Join-Path $RunDirectory 'clean-up-plan.json'),(ConvertTo-Json @($remove) -Depth 8))
-     $retention.Kept=@($available|Where-Object {$_.hostname -ceq $computer}).Count-$remove.Count
-     if($remove.Count){
+     [IO.File]::WriteAllText((Join-Path $RunDirectory 'clean-up-plan.json'),(ConvertTo-Json @($plan|ForEach-Object {[ordered]@{Id=$_.Id;Time=$_.Time.UtcDateTime.ToString('o');Month=$_.Month;Host=$_.Host;Paths=$_.Paths;Partial=$_.Partial;Keep=$_.Keep;Reasons=$_.Reasons}}) -Depth 6))
+     $retention.Kept=@($plan|Where-Object {$_.Keep -and -not $_.Partial}).Count
+     if($RetentionPreview){$gone=$remove}
+     elseif($remove.Count){
       $deleting=$true
       # In batches: one command line cannot hold more than about 500 IDs.
-      foreach($batch in @(Split-SnapshotIdBatches @($remove|ForEach-Object {$_.id}))){Run-Engine (@('forget')+@($batch)) 'DeletingOldVersions';$retention.Removed+=@($batch).Count}
+      foreach($batch in @(Split-SnapshotIdBatches @($remove|ForEach-Object {$_.id}))){Run-Engine (@('forget')+@($batch)) 'DeletingOldVersions';$gone+=@($remove|Where-Object {$_.id -cin @($batch)})}
       Run-Engine @('prune') 'FreeingSpace'
-      $retention.SpaceFreed=$true
      }
     }catch{
      $retention.Error=$_.Exception.Message
-     # Deleting may have stopped part way: count the versions that are really gone.
-     if($remove.Count -and $retention.Removed -lt $remove.Count){
+     # Deleting may have stopped part way through a batch: see which versions are really gone.
+     if($deleting -and $gone.Count -lt $remove.Count){
       try{
-       Run-Engine @('snapshots','--tag','devdrive') 'ReadingHistoryAgain'
-       $still=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistoryAgain.jsonl') -Raw|ConvertFrom-Json|Where-Object {$_.hostname -ceq $computer}|ForEach-Object {$_.id})
-       $retention.Removed=@($remove|Where-Object {$_.id -notin $still}).Count
-       $retention.Kept=@($still).Count
-      }catch{}
+       Run-Engine @('snapshots') 'ReadingHistoryAgain'
+       $still=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistoryAgain.jsonl') -Raw|ConvertFrom-Json|ForEach-Object {$_.id})
+       # A list without the version just made is not the list of this repository.
+       if($new -cnotin $still){throw 'The saved versions could not be listed.'}
+       $gone=@($remove|Where-Object {$_.id -cnotin $still})
+      }catch{$retention.Error+=' How many versions were deleted could not be confirmed: the count given is the least, and more may be gone. Refresh the history to see what is left.'}
      }
+    }
+    $retention.Candidates=@($gone|ForEach-Object {[ordered]@{Id=[string]$_.id;Time=(ConvertTo-HistoryDate $_.time).UtcDateTime.ToString('o');Partial=(Test-PartialSnapshot $_);Host=[string]$_.hostname;Paths=[string[]]@($_.paths)}})
+    if(-not $RetentionPreview){
+     $retention.Removed=$gone.Count;$retention.PartialRemoved=@($gone|Where-Object {Test-PartialSnapshot $_}).Count
+     # A complete version that was to go and is still there is still kept.
+     if($null -ne $retention.Kept){$retention.Kept+=@($remove|Where-Object {$_.id -cnotin @($gone|ForEach-Object {$_.id}) -and -not (Test-PartialSnapshot $_)}).Count}
     }
     $script:status.Retention=$retention
     # Checked whenever deleting started, also when how far it got is unknown.
@@ -412,7 +446,7 @@ try {
    }
   }
   'Preview' {Run-Engine ($base+@('--dry-run','--')+$sources) 'Previewing'}
-  'Check' {$args=@('check');if($ReadAllData){$args+='--read-data'};Run-Engine $args 'Verifying'}
+  'Check' {$checkArgs=@('check');if($ReadAllData){$checkArgs+='--read-data'};Run-Engine $checkArgs 'Verifying'}
   'Snapshots' {Run-Engine @('snapshots') 'ListingSnapshots'}
   'Files' {
    if(-not $RequestPath){throw 'A history request is required'}
