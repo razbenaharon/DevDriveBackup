@@ -273,6 +273,23 @@ try{
   Assert ((@($r.RecoveryRemoved|Sort-Object) -join '|') -eq (@('20200101-000000',$h1,$h2|Sort-Object) -join '|')) 'and folders made by earlier healing are cleaned up like any other recovery folder'
  }
 
+ Section 'showing first what the clean-up of recovery folders would delete' {
+  $c=New-Case 'prune-preview' @{'a\one.txt'='1';'a\two.txt'='2'} @{DefaultMode='Mirror';Choices=@()}
+  [void](Mirror $c @{SkipVerify=$true})
+  foreach($old in '20200101-000000','20200202-000000','20200303-000000'){Put (Join-Path $c.Recovery "$old\old.txt") 'old'}
+  $dated={@(Get-ChildItem -LiteralPath $c.Recovery -Directory|ForEach-Object {$_.Name}|Sort-Object)}
+  [IO.File]::Delete((Join-Path $c.Source 'a\one.txt'))
+  $r=Mirror $c @{MoveExtras=$true;KeepRecovery=2;PreviewRecovery=$true};$mine=[IO.Path]::GetFileName($r.RecoveryFolder)
+  Assert (@($r.RecoveryRemoved).Count -eq 0 -and @(& $dated).Count -eq 4) 'with the preview, no recovery folder is deleted'
+  Assert ((@($r.RecoveryWouldRemove|Sort-Object) -join '|') -eq '20200101-000000|20200202-000000') 'and the run names the folders the rule would delete: all but the newest two'
+  Assert ((Test-Path -LiteralPath (Join-Path $c.Recovery "$mine\a\one.txt")) -and -not (InCopy $c 'a\one.txt')) 'the file gone from the source is still moved aside as usual'
+  [IO.File]::Delete((Join-Path $c.Source 'a\two.txt'))
+  $r=Mirror $c @{MoveExtras=$true;KeepRecovery=2}
+  Assert (@($r.RecoveryRemoved).Count -eq 3 -and @($r.RecoveryWouldRemove).Count -eq 0 -and @(& $dated).Count -eq 2) 'without the preview the same rule deletes them'
+  $r=Mirror $c @{PreviewRecovery=$true;SkipVerify=$true}
+  Assert (@($r.RecoveryWouldRemove).Count -eq 0 -and @(& $dated).Count -eq 2) 'a preview without a keep rule names nothing: nothing would be deleted'
+ }
+
  Section 'repair from the last content check' {
   $c=New-Case 'repair' ([ordered]@{'d\good.txt'='good';'d\damaged.txt'='the right content';'d\resized.txt'='the right size';'d\missing.txt'='was lost from the copy';'d\fixed.txt'='put right by hand';'d\gone.txt'='deleted from the source later';'later\skipped.txt'='its folder is set to skip later'}) @{DefaultMode='Mirror';Choices=@()}
   Assert (Throws {Mirror $c @{Repair=$true}} 'no plain copy') 'a repair without a copy says so'
@@ -435,6 +452,13 @@ try{
   Assert ($r.ExtrasMoved -eq 0 -and @(Get-ChildItem -LiteralPath $c.Recovery -Directory).Count -eq 1) 'and leaves no empty recovery folder behind'
  }
 }finally{
- if([IO.Directory]::Exists($root)){[IO.Directory]::Delete('\\?\'+$root,$true)}
+ # Tidying up must not turn a passed run into a failed one. The junctions the tests made go first,
+ # each by itself (never through them), since deleting a whole tree that holds one fails on some systems.
+ try{
+  if([IO.Directory]::Exists($root)){
+   foreach($link in @(Get-ChildItem -LiteralPath $root -Recurse -Force -Directory -Attributes ReparsePoint -ErrorAction SilentlyContinue|Sort-Object {$_.FullName.Length} -Descending)){try{[IO.Directory]::Delete($link.FullName)}catch{}}
+   [IO.Directory]::Delete('\\?\'+$root,$true)
+  }
+ }catch{Write-Warning "The test folder $root could not be removed: $($_.Exception.Message)"}
 }
 if($script:failed){Write-Output "$($script:failed) check(s) failed";exit 1}

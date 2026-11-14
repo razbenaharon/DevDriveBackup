@@ -36,6 +36,9 @@ param(
  # With -MoveExtras: keep only this many dated recovery folders (the newest) and delete older
  # ones from the backup drive. 0 keeps every recovery folder.
  [ValidateRange(0,100)][int]$KeepRecovery=0,
+ # With -KeepRecovery: delete no recovery folder, only name the ones the rule would delete
+ # (RecoveryWouldRemove). The window uses it until the first clean-up has been approved.
+ [switch]$PreviewRecovery,
  [switch]$Verify,
  [switch]$SkipVerify,
  # Compare the mirror with the source without copying anything.
@@ -393,10 +396,13 @@ if($Repair){$summary.Repair.MovedTo=$script:recovery}
 # names (yyyyMMdd-HHmmss) directly inside the recovery root are touched, and never the one this run
 # made, whether it holds files gone from the source or an item moved aside by healing. Only a backup
 # with -MoveExtras and a number to keep deletes anything; healing alone and a repair never do.
-$summary.RecoveryRemoved=@()
+# RecoveryRemoved lists only folders that were really deleted; with -PreviewRecovery the same choice
+# is listed in RecoveryWouldRemove and nothing is deleted.
+$summary.RecoveryRemoved=@();$summary.RecoveryWouldRemove=@()
 if($MoveExtras -and $KeepRecovery -gt 0 -and -not $noCopy -and (Test-Path -LiteralPath $recoveryRoot -PathType Container)){
  $dated=@(Get-ChildItem -LiteralPath $recoveryRoot -Directory -Force|Where-Object {$_.Name -match '^\d{8}-\d{6}$' -and -not($_.Attributes -band [IO.FileAttributes]::ReparsePoint)}|ForEach-Object {$_.Name})
  foreach($old in @(Get-RecoveryFoldersToRemove $dated $KeepRecovery $(if($script:recovery){[IO.Path]::GetFileName($script:recovery)}else{''}))){
+  if($PreviewRecovery){$summary.RecoveryWouldRemove+=$old;continue}
   Remove-Item -LiteralPath (Join-Path $recoveryRoot $old) -Recurse -Force
   $summary.RecoveryRemoved+=$old
  }
