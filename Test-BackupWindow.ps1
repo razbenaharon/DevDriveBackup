@@ -146,6 +146,38 @@ try{
  Check 'the damaged file is kept beside the settings, unchanged' {$kept=@(Get-ChildItem -LiteralPath $fix -Filter 'profiles.damaged-*.local.json');$kept.Count -eq 1 -and [IO.File]::ReadAllText($kept[0].FullName) -ceq $cut}
  [void](Set-CenterPaths $data)
 
+ # --- Keep versions: earlier settings, the box, and the question before the first clean-up ---
+ $keep=Join-Path $root 'keep';New-Item -ItemType Directory -Path $keep -Force|Out-Null
+ $keepFile=Join-Path $keep 'profiles.local.json'
+ $earlier='{"Version":1,"Profiles":[{"Id":"k1","Name":"Earlier","DestinationVolumeId":"NO-SUCH-VOLUME-5","DriveModel":"Test model","DriveSizeGB":100,"ReminderDays":7,"Load":"Balanced","CustomLoad":null,"KeepDeleted":4,"VersionRetention":{"Days":7,"Weeks":4,"Months":3},"Created":"2026-01-01T10:00:00.0000000+02:00","Sources":[]}]}'
+ [IO.File]::WriteAllText($keepFile,$earlier)
+ $read={([IO.File]::ReadAllText($keepFile)|ConvertFrom-Json).Profiles[0]}
+ $st=Join-Path $root 'state-keep.json'
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-TestState',$st);$s=Read-State $st
+ Check 'settings with the earlier days, weeks and months open as 10 newest and 6 months, shown on the overview' {$q=& $read;$r.Code -eq 0 -and $s.KeepVersions -eq '10 newest + 6 months' -and $q.VersionRetention.Last -eq 10 -and $q.VersionRetention.Months -eq 6 -and $q.RetentionConfirmed -eq $false -and $q.KeepDeleted -eq 4}
+ Check 'the settings as they were are kept beside them, once' {$k=@(Get-ChildItem -LiteralPath $keep -Filter 'profiles.before-retention-*.local.json');$k.Count -eq 1 -and [IO.File]::ReadAllText($k[0].FullName) -ceq $earlier}
+ $r=Open-Window $data @('-AutoCloseSeconds','2','-TestState',$st);$s=Read-State $st
+ Check 'a drive that keeps every version says so on the overview' {$r.Code -eq 0 -and $s.KeepVersions -eq 'every version'}
+ $before=[IO.File]::ReadAllText($keepFile)
+ foreach($q in 'KeepVersions','RetentionPreview'){
+  $png=Join-Path $root "question-$q.png"
+  $r=Open-Window $keep @('-RenderPreview',$png,'-PreviewDialog',$q)
+  Check "the box of '$q' is drawn, and drawing it changes nothing" {$r.Code -eq 0 -and (Test-Path -LiteralPath $png) -and (Get-Item -LiteralPath $png).Length -gt 5000 -and [IO.File]::ReadAllText($keepFile) -ceq $before}
+ }
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-TestState',$st);$s=Read-State $st
+ Check 'the question before the first clean-up, unanswered: nothing is approved' {$r.Code -eq 0 -and $s.Log.Retention.Count -eq 4 -and -not $s.Log.Retention.Approved -and (& $read).RetentionConfirmed -eq $false}
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Not now','-TestState',$st);$s=Read-State $st
+ Check 'answered with Not now: the settings stay exactly as they were' {$r.Code -eq 0 -and -not $s.Log.Retention.Approved -and [IO.File]::ReadAllText($keepFile) -ceq $before}
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Approve','-TestState',$st);$s=Read-State $st
+ Check 'answered with Approve clean-up: the approval is saved, and the window says the clean-up runs with the next backup' {$r.Code -eq 0 -and $s.Log.Retention.Approved -and (& $read).RetentionConfirmed -eq $true -and $s.Status -like '*Nothing was deleted now*next backup*' -and (& $read).VersionRetention.Last -eq 10}
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','KeepVersions','-Answer','Save','-TestState',$st);$s=Read-State $st
+ Check 'saving the Keep versions box with the same numbers keeps the approval' {$r.Code -eq 0 -and (& $read).RetentionConfirmed -eq $true -and $s.Status -like '*10 newest + 6 months*Clean-up runs automatically*'}
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','KeepVersions','-Answer','Save 5 3','-TestState',$st);$s=Read-State $st
+ Check 'other numbers are saved, shown on the overview, and their first clean-up is shown for approval again' {$q=& $read;$r.Code -eq 0 -and $q.VersionRetention.Last -eq 5 -and $q.VersionRetention.Months -eq 3 -and $q.RetentionConfirmed -eq $false -and $s.KeepVersions -eq '5 newest + 3 months' -and $s.Status -like '*5 newest + 3 months*first clean-up will be shown to you for approval*'}
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','KeepVersions','-Answer','Save 0 0','-TestState',$st);$s=Read-State $st
+ Check 'both numbers 0 keeps every version' {$q=& $read;$r.Code -eq 0 -and $q.VersionRetention.Last -eq 0 -and $q.VersionRetention.Months -eq 0 -and $s.KeepVersions -eq 'every version' -and $s.Status -like '*every version is kept*'}
+ Check 'none of it made a second copy of the earlier settings or logged an error' {@(Get-ChildItem -LiteralPath $keep -Filter 'profiles.before-retention-*').Count -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $keep 'logs\ui-errors.log'))}
+
  # --- One window only ---
  function Start-Window([string]$DataRoot,[string[]]$More){
   # Started without waiting; .Text is read after it has ended.

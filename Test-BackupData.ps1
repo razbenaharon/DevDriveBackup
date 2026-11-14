@@ -110,6 +110,44 @@ try{
  Check 'a folder name or a reason with braces in it does not break the offer to restore' {$r=Get-CenterSettingsRecovery;$r.CanRestore -and $r.Message -like '*odd {0} {name}*What you can do: restore*'}
  [void](Set-CenterPaths $data)
 
+ # --- Keep versions: the two numbers, and settings saved with the earlier three (days, weeks, months) ---
+ $ret={param($v,$confirmed)$o=[ordered]@{Id='x';Name='n'};if($null -ne $v){$o.VersionRetention=$v};if($null -ne $confirmed){$o.RetentionConfirmed=$confirmed};[pscustomobject]$o}
+ Check 'keep versions: the newest N and one a month for M months; both 0, or nothing set, keeps every version' {$r=Get-CenterVersionRetention (& $ret ([pscustomobject]@{Last=10;Months=6}));$r.Enabled -and $r.Last -eq 10 -and $r.Months -eq 6 -and -not (Get-CenterVersionRetention (& $ret ([pscustomobject]@{Last=0;Months=0}))).Enabled -and -not (Get-CenterVersionRetention (& $ret $null)).Enabled}
+ Check 'numbers out of range are brought into it, and a value that is no setting at all keeps every version' {$r=Get-CenterVersionRetention (& $ret ([pscustomobject]@{Last=-4;Months=9999}));$r.Last -eq 0 -and $r.Months -eq 240 -and -not (Get-CenterVersionRetention (& $ret 'soon')).Enabled -and -not (Get-CenterVersionRetention (& $ret ([pscustomobject]@{Last='x';Months=$null}))).Enabled}
+ Check 'a setting still in the earlier shape reads as 10 and 6 when it was on, and as off when it was off' {$r=Get-CenterVersionRetention (& $ret ([pscustomobject]@{Days=7;Weeks=0;Months=0}));$r.Last -eq 10 -and $r.Months -eq 6 -and -not (Get-CenterVersionRetention (& $ret ([pscustomobject]@{Days=0;Weeks=0;Months=0}))).Enabled}
+ Check 'the overview names the rule briefly' {$f={param($l,$m)Format-CenterVersionRetention (Get-CenterVersionRetention (& $ret ([pscustomobject]@{Last=$l;Months=$m})))};(& $f 10 6) -eq '10 newest + 6 months' -and (& $f 0 0) -eq 'every version' -and (& $f 3 0) -eq '3 newest' -and (& $f 0 1) -eq '1 month' -and (& $f 1 1) -eq '1 newest + 1 month'}
+ Check 'the three things the Keep versions box says, with the numbers chosen' {$t=@(Get-CenterRetentionPoints 10 6);$t.Count -eq 3 -and $t[0] -eq 'Up to 16 complete versions for each computer and set of folders (10 newest + 6 monthly). This is not a limit for the whole backup; partial versions can add to it.' -and $t[1] -eq 'A partial version is deleted once 3 complete versions are newer. That can remove content that exists only in it.' -and $t[2] -eq 'Deleting a version frees only the data no remaining version needs, after the clean-up; not the size the version had.' -and (Get-CenterRetentionPoints 4 0)[0] -like 'Up to 4 complete versions*(4 newest)*'}
+ Check 'a clean-up is approved only when the profile says so: a new profile and one without the mark are not' {-not (Test-CenterRetentionConfirmed (& $ret $null $null)) -and -not (Test-CenterRetentionConfirmed (& $ret $null $false)) -and -not (Test-CenterRetentionConfirmed (& $ret $null 'yes')) -and (Test-CenterRetentionConfirmed (& $ret $null $true)) -and (Get-CenterRetentionState (& $ret $null $false)) -eq 'The first clean-up will be shown to you for approval.' -and (Get-CenterRetentionState (& $ret $null $true)) -eq 'Clean-up runs automatically.'}
+ $q=& $ret ([pscustomobject]@{Last=10;Months=6}) $true
+ Check 'saving the same numbers in the box keeps the approval; other numbers need a new one' {Set-CenterVersionRetention $q 10 6;$same=Test-CenterRetentionConfirmed $q;Set-CenterVersionRetention $q 5 6;$same -and -not (Test-CenterRetentionConfirmed $q) -and $q.VersionRetention.Last -eq 5 -and $q.VersionRetention.Months -eq 6 -and @($q.VersionRetention.PSObject.Properties).Count -eq 2}
+ $conv=Join-Path $root 'conv';New-Item -ItemType Directory -Path $conv|Out-Null;[void](Set-CenterPaths $conv);$cp=(Get-CenterPaths).Profiles
+ $mk={param($ret,$more='')'{"Version":1,"Profiles":[{"Id":"a","Name":"n","DestinationVolumeId":"v","ReminderDays":7,"KeepDeleted":3'+$(if($ret){',"VersionRetention":'+$ret})+$more+',"Sources":[]}]}'}
+ $copies={@(Get-ChildItem -LiteralPath $conv -Filter 'profiles.before-retention-*.local.json'|Sort-Object Name)}
+ $oldOn=& $mk '{"Days":7,"Weeks":4,"Months":3}';[IO.File]::WriteAllText($cp,$oldOn)
+ $c=Read-CenterProfiles;$onDisk=[IO.File]::ReadAllText($cp)|ConvertFrom-Json
+ Check 'earlier settings that deleted old versions become 10 newest and 6 months, in the window and in the file' {$v=$c.Profiles[0].VersionRetention;$w=$onDisk.Profiles[0].VersionRetention;$v.Last -eq 10 -and $v.Months -eq 6 -and $w.Last -eq 10 -and $w.Months -eq 6 -and -not $w.PSObject.Properties['Days'] -and -not $w.PSObject.Properties['Weeks'] -and $onDisk.Profiles[0].KeepDeleted -eq 3}
+ Check 'the settings as they were are kept beside them under a dated name' {$k=& $copies;$k.Count -eq 1 -and $k[0].Name -match '^profiles\.before-retention-\d{8}-\d{6}\.local\.json$' -and [IO.File]::ReadAllText($k[0].FullName) -ceq $oldOn}
+ Check 'a converted profile waits for its first clean-up to be approved' {$onDisk.Profiles[0].PSObject.Properties['RetentionConfirmed'] -and $onDisk.Profiles[0].RetentionConfirmed -eq $false -and -not (Test-CenterRetentionConfirmed $c.Profiles[0])}
+ $after=[IO.File]::ReadAllText($cp);$stamp=[IO.File]::GetLastWriteTimeUtc($cp)
+ Check 'the conversion happens once: reading again writes nothing' {$again=Read-CenterProfiles;$again.Profiles[0].VersionRetention.Last -eq 10 -and [IO.File]::ReadAllText($cp) -ceq $after -and [IO.File]::GetLastWriteTimeUtc($cp) -eq $stamp -and (& $copies).Count -eq 1}
+ $oldOn2=& $mk '{"Days":0,"Weeks":2,"Months":0}';[IO.File]::WriteAllText($cp,$oldOn2);[void](Read-CenterProfiles)
+ Check 'a copy made in the same second never takes the place of an earlier one' {$k=& $copies;$k.Count -eq 2 -and @($k|Where-Object {[IO.File]::ReadAllText($_.FullName) -ceq $oldOn}).Count -eq 1 -and @($k|Where-Object {[IO.File]::ReadAllText($_.FullName) -ceq $oldOn2}).Count -eq 1}
+ & $copies|Remove-Item
+ foreach($case in ([ordered]@{'earlier settings that kept every version (three zeros)'=(& $mk '{"Days":0,"Weeks":0,"Months":0}');'settings without Keep versions'=(& $mk '');'settings already in the new shape'=(& $mk '{"Last":4,"Months":2}' ',"RetentionConfirmed":true')}).GetEnumerator()){
+  [IO.File]::WriteAllText($cp,$case.Value);$stamp=[IO.File]::GetLastWriteTimeUtc($cp);$c=Read-CenterProfiles
+  Check "$($case.Key): the file is not written and no copy is made" {[IO.File]::ReadAllText($cp) -ceq $case.Value -and [IO.File]::GetLastWriteTimeUtc($cp) -eq $stamp -and (& $copies).Count -eq 0}
+ }
+ Check 'the new shape is read as it is, with its approval' {$r=Get-CenterVersionRetention $c.Profiles[0];$r.Last -eq 4 -and $r.Months -eq 2 -and (Test-CenterRetentionConfirmed $c.Profiles[0])}
+ [IO.File]::WriteAllText($cp,(& $mk '{"Days":0,"Weeks":0,"Months":0}'));$c=Read-CenterProfiles
+ Check 'earlier settings that kept every version still keep every version, and are saved in the new shape with the next change' {$on=(Get-CenterVersionRetention $c.Profiles[0]).Enabled;Save-CenterProfiles $c;$w=([IO.File]::ReadAllText($cp)|ConvertFrom-Json).Profiles[0].VersionRetention;-not $on -and $w.Last -eq 0 -and $w.Months -eq 0 -and -not $w.PSObject.Properties['Days'] -and (& $copies).Count -eq 0}
+ $cut2=$oldOn.Substring(0,$oldOn.Length-9);[IO.File]::WriteAllText($cp,$cut2)
+ Check 'damaged settings in the earlier shape are reported as damaged, left as they are, and no copy is made' {(Throws {Read-CenterProfiles} '*profiles.local.json*damaged*') -and [IO.File]::ReadAllText($cp) -ceq $cut2 -and (& $copies).Count -eq 0}
+ [IO.File]::WriteAllText($cp,(& $mk '{"Last":10,"Months":6}'));$c=Read-CenterProfiles
+ Check 'approving the clean-up is saved with the profile' {$before=Test-CenterRetentionConfirmed $c.Profiles[0];Confirm-CenterRetention $c 'a';-not $before -and (Test-CenterRetentionConfirmed (Read-CenterProfiles).Profiles[0]) -and (Throws {Confirm-CenterRetention $c 'gone'} '*')}
+ $np=New-CenterProfile $c 'Fresh' 'VOL-FRESH' 'Model' 10
+ Check 'a new profile keeps every version and has no approved clean-up' {-not (Get-CenterVersionRetention $np).Enabled -and $np.PSObject.Properties['RetentionConfirmed'] -and -not (Test-CenterRetentionConfirmed $np)}
+ [void](Set-CenterPaths $data)
+
  # --- Detailed step logs are deleted after 30 days; nothing else is ---
  $logs=(Get-CenterPaths).Logs;New-Item -ItemType Directory -Path $logs,(Join-Path $logs 'sub') -Force|Out-Null
  $age={param($path,$days)[IO.File]::WriteAllText($path,'x');[IO.File]::SetLastWriteTime($path,(Get-Date).AddDays(-$days));$path}
@@ -225,6 +263,22 @@ try{
   Check 'a repair runs the plain copy tool with -Repair for every source that has a plain copy, and nothing for versions' {$steps.Count -eq 2 -and -not @($steps|Where-Object {$_.Kind -ne 'Mirror' -or $_.Purpose -ne 'Repair' -or '-Repair' -notin $_.Arguments -or '-VerifyOnly' -in $_.Arguments -or '-MoveExtras' -in $_.Arguments -or ($_.Arguments -join ' ') -notlike '*Invoke-FastMirror.ps1*'}).Count}
   Check 'a repair of one source has one step, with its copy folder' {$one=@(Get-CenterSteps $p2 @($f2.Id) 'Repair');$one.Count -eq 1 -and $one[0].SourceId -eq $f2.Id -and $one[0].Arguments[[array]::IndexOf($one[0].Arguments,'-Folder')+1] -eq $f2.MirrorFolder}
   Check 'a backup and a content check are built as before' {$b=@(Get-CenterSteps $p2 @() 'Backup');$v=@(Get-CenterSteps $p2 @() 'Verify');$b.Count -eq 3 -and $v.Count -eq 3 -and -not @($b+$v|Where-Object {'-Repair' -in $_.Arguments}).Count -and @($v|Where-Object {'-VerifyOnly' -in $_.Arguments}).Count -eq 2}
+  # Keep versions and Keep deleted: what the tools are told, and that nothing is deleted before the first approval.
+  $arg={param($st,$kind)@(@($st|Where-Object {$_.Kind -eq $kind})[0].Arguments)};$val={param($a,$n)$a[[array]::IndexOf($a,$n)+1]}
+  $b=@(Get-CenterSteps $p2 @() 'Backup')
+  Check 'by default every version is kept and deleted files stay in the plain copy' {-not @($b|Where-Object {@($_.Arguments|Where-Object {$_ -in '-KeepLast','-KeepMonths','-RetentionPreview','-MoveExtras','-PreviewRecovery'}).Count}).Count}
+  $p2|Add-Member -NotePropertyName VersionRetention -NotePropertyValue ([pscustomobject]@{Last=10;Months=6}) -Force;$p2|Add-Member -NotePropertyName KeepDeleted -NotePropertyValue 5 -Force
+  $b=@(Get-CenterSteps $p2 @() 'Backup');$va=& $arg $b 'Versioned';$ma=& $arg $b 'Mirror'
+  Check 'Keep versions hands the two numbers to a versioned backup, never days or weeks' {(& $val $va '-KeepLast') -eq '10' -and (& $val $va '-KeepMonths') -eq '6' -and '-KeepDays' -notin $va -and '-KeepWeeks' -notin $va}
+  Check 'before the first clean-up is approved, versions are only planned and old recovery folders are not deleted' {'-RetentionPreview' -in $va -and '-PreviewRecovery' -in $ma -and '-MoveExtras' -in $ma -and (& $val $ma '-KeepRecovery') -eq '5' -and @($b|Where-Object {$_.Kind -eq 'Mirror' -and '-PreviewRecovery' -in $_.Arguments}).Count -eq 2}
+  Check 'a content check and a repair are never told to keep, delete or preview anything' {-not @(@(Get-CenterSteps $p2 @() 'Verify')+@(Get-CenterSteps $p2 @() 'Repair')|Where-Object {@($_.Arguments|Where-Object {$_ -in '-KeepLast','-KeepMonths','-RetentionPreview','-MoveExtras','-KeepRecovery','-PreviewRecovery'}).Count}).Count}
+  $p2|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $true -Force
+  $b=@(Get-CenterSteps $p2 @() 'Backup');$va=& $arg $b 'Versioned';$ma=& $arg $b 'Mirror'
+  Check 'once approved, the same rule runs without the preview' {'-RetentionPreview' -notin $va -and '-PreviewRecovery' -notin $ma -and (& $val $va '-KeepLast') -eq '10' -and (& $val $ma '-KeepRecovery') -eq '5'}
+  $p2.VersionRetention=[pscustomobject]@{Last=3;Months=0};$p2.KeepDeleted=0;$p2.RetentionConfirmed=$false
+  $b=@(Get-CenterSteps $p2 @() 'Backup');$va=& $arg $b 'Versioned'
+  Check 'one of the two numbers alone is a rule too; with Keep deleted off the plain copy previews nothing' {(& $val $va '-KeepLast') -eq '3' -and (& $val $va '-KeepMonths') -eq '0' -and '-RetentionPreview' -in $va -and '-PreviewRecovery' -notin (& $arg $b 'Mirror')}
+  $p2.VersionRetention=[pscustomobject]@{Last=0;Months=0}
  }finally{$p2.DestinationVolumeId=$realId}
 
  # --- A source that is in use ---
@@ -336,8 +390,60 @@ try{
  [IO.File]::WriteAllText((Join-Path $rd 'result.json'),'{"State":"Completed","LockReleased":true,"Retention":{"Removed":2,"Kept":9}}')
  $e=Invoke-Fake 'exit 0' -Kind Versioned -RunDirectory $rd
  Check 'versions: a lock left by an earlier run that was removed is noted, beside the clean-up note' {$e.Success -and $e.Note -like '*A lock left by an earlier run that had ended was removed and the run was tried again.*' -and $e.Note -like '*Deleted 2 old versions; 9 kept.*'}
+ # The clean-up of old versions: what was deleted, and the preview before the first approval.
+ $retJson={param($r)[IO.File]::WriteAllText((Join-Path $rd 'result.json'),'{"State":"Completed","Retention":'+$r+'}');Invoke-Fake 'exit 0' -Kind Versioned -RunDirectory $rd}
+ $e=& $retJson '{"Preview":false,"Last":10,"Months":6,"Removed":3,"PartialRemoved":1,"Kept":12,"Candidates":[],"Error":null}'
+ Check 'a clean-up says how many versions it deleted, how many of them were partial, and how many stay' {$e.Success -and $e.Note -eq 'Deleted 3 old versions (1 partial); 12 kept.' -and $null -eq $e.RetentionPreview}
+ $e=& $retJson '{"Removed":1,"PartialRemoved":0,"Kept":16,"SpaceFreed":true}'
+ Check 'one version is one version, and no freed size is claimed without a number for it' {$e.Note -eq 'Deleted 1 old version; 16 kept.' -and $e.Note -notlike '*freed*'}
+ $e=& $retJson '{"Removed":2,"PartialRemoved":2,"Kept":16,"PrunedBytes":1610612736}'
+ Check 'a freed size is said only from the number the clean-up reports' {$e.Note -eq 'Deleted 2 old versions (2 partial); 16 kept. The clean-up freed 1.5 GB.'}
+ $e=& $retJson '{"Removed":0,"PartialRemoved":0,"Kept":7,"PrunedBytes":0}'
+ Check 'nothing to delete is said as that' {$e.Note -eq 'No old versions to delete; 7 kept.'}
+ $e=& $retJson '{"Removed":1,"Kept":9,"Error":"The drive was disconnected"}'
+ Check 'a clean-up that did not finish says what it did delete' {$e.Success -and $e.Note -like 'Deleted 1 old version; 9 kept, but the clean-up did not finish: The drive was disconnected'}
+ $cand='[{"Id":"abc12345","Time":"2026-03-01T10:15:00","Partial":false,"Host":"PC","Paths":["E:\\Projects"]},{"Id":"def67890","Time":"2026-02-01T09:30:00","Partial":true,"Host":"PC","Paths":["E:\\Projects","E:\\Docs"]}]'
+ $ev=& $retJson ('{"Preview":true,"Last":10,"Months":6,"Kept":12,"Removed":0,"PartialRemoved":0,"Candidates":'+$cand+',"Error":null}')
+ Check 'a preview puts the versions that would be deleted on the history entry and says that nothing was deleted' {$ev.Success -and @($ev.RetentionPreview.Versions).Count -eq 2 -and $ev.RetentionPreview.Versions[1].Partial -and $ev.RetentionPreview.Versions[0].Id -eq 'abc12345' -and @($ev.RetentionPreview.RecoveryFolders).Count -eq 0 -and $ev.Note -eq 'The clean-up would delete 2 old versions (1 partial); 12 would be kept. Nothing was deleted.' -and $ev.Note -notlike 'Deleted*'}
+ $e=& $retJson '{"Preview":true,"Last":10,"Months":6,"Kept":4,"Removed":0,"PartialRemoved":0,"Candidates":[],"Error":null}'
+ Check 'a preview with nothing to delete adds nothing to the entry and no note' {$e.Success -and $null -eq $e.RetentionPreview -and -not $e.Note}
+ $e=& $retJson '{"Preview":true,"Kept":null,"Removed":0,"Candidates":[],"Error":"The list of versions could not be read"}'
+ Check 'a preview that could not be made says so and lists nothing' {$e.Success -and $null -eq $e.RetentionPreview -and $e.Note -eq 'Backed up, but the clean-up of old versions could not be planned: The list of versions could not be read'}
+ $e=& $retJson ('{"Preview":false,"Removed":0,"Kept":3,"Candidates":'+$cand+'}')
+ Check 'candidates of a run that was no preview are not offered for approval' {$null -eq $e.RetentionPreview}
+ $em=Invoke-Fake ("Write-Output '"+$json.Replace('"Verify":{','"RecoveryWouldRemove":["2026-01-02_101500","2026-01-09_101500"],"Verify":{')+"'")
+ Check 'a plain copy lists the recovery folders it would have deleted, and says that it deleted none' {$em.Success -and @($em.RetentionPreview.RecoveryFolders).Count -eq 2 -and $em.RetentionPreview.RecoveryFolders[0] -eq '2026-01-02_101500' -and @($em.RetentionPreview.Versions).Count -eq 0 -and $em.Note -like '*2 older recovery folders would be deleted (2026-01-02_101500, 2026-01-09_101500). Nothing was deleted.*'}
+ $e=Invoke-Fake ("Write-Output '"+$json.Replace('"Verify":{','"RecoveryWouldRemove":[],"Verify":{')+"'")
+ Check 'a plain copy with no recovery folder to delete lists none' {$e.Success -and $null -eq $e.RetentionPreview -and -not $e.Note}
+ # The list may be approved only when it is the whole list: every part of every source was backed up
+ # in this run and each plan was made. Approval counts for the whole drive, so a list that leaves a
+ # source out, or one whose plan failed, must not be offered.
+ $two=@([pscustomobject]@{SourceId='s1';Kind='Mirror'},[pscustomobject]@{SourceId='s1';Kind='Versioned'},[pscustomobject]@{SourceId='s2';Kind='Versioned'})
+ $part={param($sid,$kind,$more=@{})$h=@{SourceId=$sid;Kind=$kind;Success=$true;Stopped=$false;RetentionPlanFailed=$false};foreach($k in $more.Keys){$h[$k]=$more[$k]};[pscustomobject]$h}
+ Check 'a list from a run of every source, all planned, is the whole list' {Test-CenterRetentionPreviewWhole $two @((& $part 's1' 'Mirror'),(& $part 's1' 'Versioned'),(& $part 's2' 'Versioned'))}
+ Check 'a list from a run of one source only is not offered for approval' {-not (Test-CenterRetentionPreviewWhole $two @((& $part 's1' 'Mirror'),(& $part 's1' 'Versioned')))}
+ Check 'nor when a step failed or was stopped' {-not (Test-CenterRetentionPreviewWhole $two @((& $part 's1' 'Mirror'),(& $part 's1' 'Versioned' @{Success=$false}),(& $part 's2' 'Versioned'))) -and -not (Test-CenterRetentionPreviewWhole $two @((& $part 's1' 'Mirror' @{Stopped=$true}),(& $part 's1' 'Versioned'),(& $part 's2' 'Versioned')))}
+ Check 'nor when the clean-up of one source could not be planned' {-not (Test-CenterRetentionPreviewWhole $two @((& $part 's1' 'Mirror'),(& $part 's1' 'Versioned'),(& $part 's2' 'Versioned' @{RetentionPlanFailed=$true})))}
+ Check 'entries without the newer fields, or nothing to compare with, are never the whole list' {-not (Test-CenterRetentionPreviewWhole $two @([pscustomobject]@{SourceId='s1';Kind='Mirror';Success=$true},[pscustomobject]@{SourceId='s1';Kind='Versioned';Success=$true},[pscustomobject]@{SourceId='s2';Kind='Versioned';Success=$true})) -and -not (Test-CenterRetentionPreviewWhole @() @()) -and -not (Test-CenterRetentionPreviewWhole $two $null)}
+ $ef=& $retJson '{"Preview":true,"Kept":null,"Removed":0,"Candidates":[],"Error":"The list of versions could not be read"}'
+ Check 'a preview that could not be made is marked on the entry, and one that was made is not' {$ef.RetentionPlanFailed -eq $true -and $ev.RetentionPlanFailed -eq $false -and $em.RetentionPlanFailed -eq $false}
+ $none=Get-CenterRetentionPreview @($e,[pscustomobject]@{Label='x';Success=$false},$null)
+ Check 'a run without candidates has nothing to approve' {$none.Count -eq 0 -and @($none.Versions).Count -eq 0 -and @($none.RecoveryFolders).Count -eq 0 -and -not (Format-CenterRetentionPreview $none 10 6)}
+ $pv=Get-CenterRetentionPreview @($ev,$em,$e)
+ Check 'the candidates of every step of a run are collected, each with the name of its source' {$pv.Count -eq 4 -and @($pv.Versions).Count -eq 2 -and @($pv.RecoveryFolders).Count -eq 2 -and $pv.Versions[0].Label -eq 'L' -and $pv.RecoveryFolders[1].Name -eq '2026-01-09_101500' -and $pv.Versions[0].Time -is [datetime]}
+ $text=Format-CenterRetentionPreview $pv 10 6
+ Check 'the preview lists each version with its date and time, marks partial ones and names the folders' {$text -like '*1 Feb 2026, 09:30, partial*E:\Projects, E:\Docs*' -and $text -like '*1 Mar 2026, 10:15*E:\Projects*' -and $text -notlike '*1 Mar 2026, 10:15, partial*'}
+ Check 'it lists the recovery folders, says that nothing was deleted yet and what approving does' {$text -like '*2026-01-02_101500*2026-01-09_101500*' -and $text -like '*Nothing has been deleted yet.*' -and $text -like '*next backup*'}
+ Check 'a recovery folder named by the tool is shown with its date and time' {(Format-CenterRetentionPreview (Get-CenterRetentionPreview @([pscustomobject]@{Label='L';SourceId='s';RetentionPreview=[pscustomobject]@{Versions=@();RecoveryFolders=@('20260314-093000')}})) 10 6) -like '*- L: 14 Mar 2026, 09:30 (20260314-093000)*'}
+ Check 'it carries the three explanations, with the numbers of this profile' {$t=@(Get-CenterRetentionPoints 10 6);$text.Contains($t[0]) -and $text.Contains($t[1]) -and $text.Contains($t[2])}
+ $text=Format-CenterRetentionPreview (Get-CenterRetentionPreview @($em)) 10 6
+ Check 'with recovery folders only, the explanations about versions are left out' {$text -like '*2026-01-02_101500*' -and $text -like '*Nothing has been deleted yet.*' -and $text -notlike '*partial*' -and $text -notlike '*complete versions*'}
+ $one=$ev.RetentionPreview.Versions[0];$text=Format-CenterRetentionPreview (Get-CenterRetentionPreview @([pscustomobject]@{Label='L';SourceId='s';RetentionPreview=[pscustomobject]@{Versions=@($one);RecoveryFolders=@()}})) 10 6
+ Check 'without a partial version in the list, the sentence about partial versions is left out' {$text -notlike '*A partial version is deleted*' -and $text -like '*Deleting a version frees only*'}
+ $many=Get-CenterRetentionPreview @([pscustomobject]@{Label='L';SourceId='s';RetentionPreview=[pscustomobject]@{Versions=@(1..30|ForEach-Object {[pscustomobject]@{Id="v$_";Time=([datetime]'2026-01-01').AddDays($_).ToString('o');Partial=$false;Host='PC';Paths=@('E:\P')}});RecoveryFolders=@(1..30|ForEach-Object {"2025-01-{0:d2}" -f $_})}})
+ Check 'a long list is shortened and says how many more there are' {$t=Format-CenterRetentionPreview $many 10 6;$many.Count -eq 60 -and $t -like '*and 20 more versions*' -and $t -like '*and 24 more*' -and @($t -split "`n").Count -lt 45}
  $h=@(Get-CenterHistory)
- Check 'every run above is in the history, readable, stopped ones marked' {$h.Count -eq 31 -and @($h|Where-Object {$_.PSObject.Properties['Stopped'] -and $_.Stopped}).Count -eq 3 -and @($h|Where-Object {$_.Finished -isnot [datetime]}).Count -eq 0}
+ Check 'every run above is in the history, readable, stopped ones marked' {$h.Count -eq 43 -and @($h|Where-Object {$_.PSObject.Properties['Stopped'] -and $_.Stopped}).Count -eq 3 -and @($h|Where-Object {$_.Finished -isnot [datetime]}).Count -eq 0}
 }finally{if(Test-Path -LiteralPath $root){[IO.Directory]::Delete($root,$true)}}
 if($script:failed){Write-Output "$($script:failed) data tests FAILED.";exit 1}
 Write-Output 'All data tests passed.'

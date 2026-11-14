@@ -84,9 +84,9 @@ function Get-CenterProfilesProblem([string]$Text,[ref]$Data) {
  if(@($d.Profiles|Where-Object {$q=$_;$q -isnot [pscustomobject] -or @('Id','Name','DestinationVolumeId','Sources'|Where-Object {-not $q.PSObject.Properties[$_]}).Count}).Count){return 'a profile in it is incomplete'}
  # Checked profile by profile and without a pipeline: a profile with no sources (nothing, or an empty
  # list) is fine, but an empty place inside the list is damage, and a pipeline would not tell the two apart.
- foreach($profile in @($d.Profiles)){
-  if($null -eq $profile.Sources){continue}
-  foreach($q in $profile.Sources){if($null -eq $q -or $q -isnot [pscustomobject] -or @('Id','Path','ConfigPath'|Where-Object {-not $q.PSObject.Properties[$_]}).Count){return 'a folder listed in it is incomplete'}}
+ foreach($entry in @($d.Profiles)){
+  if($null -eq $entry.Sources){continue}
+  foreach($q in $entry.Sources){if($null -eq $q -or $q -isnot [pscustomobject] -or @('Id','Path','ConfigPath'|Where-Object {-not $q.PSObject.Properties[$_]}).Count){return 'a folder listed in it is incomplete'}}
  }
  if($Data){$Data.Value=$d}
  ''
@@ -188,8 +188,38 @@ function Read-CenterProfiles {
    if($same){$s.ConfigPath=$candidate;$moved=$true;break}
   }
  }
- if($moved){Save-CenterProfiles $data}
+ # "Keep versions" was three numbers (days, weeks, months) and is two now (see ConvertTo-CenterRetention).
+ # A profile whose earlier rule deleted versions gets the present default and waits for its first
+ # clean-up to be approved; that changes what a backup deletes, so the file as it was is copied aside
+ # before the converted settings are saved. A profile that kept every version still does: it only
+ # changes shape in memory and is written that way with the next save, without a copy.
+ $converted=$false
+ foreach($q in @($data.Profiles)){
+  if(-not $q.PSObject.Properties['VersionRetention']){continue}
+  $c=ConvertTo-CenterRetention $q.VersionRetention
+  if(-not $c.Earlier){continue}
+  $q.VersionRetention=[pscustomobject]@{Last=$c.Last;Months=$c.Months}
+  if($c.Last+$c.Months -gt 0){$q|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $false -Force;$converted=$true}
+ }
+ if($converted){
+  try{[void](Save-CenterRetentionCopy)}
+  catch{throw "The settings file $p was not changed. Its Keep versions setting has to be converted, and a copy of the file as it is could not be written beside it first ($($_.Exception.Message))."}
+ }
+ if($moved -or $converted){Save-CenterProfiles $data}
  $data
+}
+function Save-CenterRetentionCopy {
+ # The settings file exactly as it is, copied beside it as profiles.before-retention-<time>.local.json
+ # (the *.local.json ignore rule covers it). A name that is taken is never written over.
+ $p=(Get-CenterPaths).Profiles;$dir=[IO.Path]::GetDirectoryName($p)
+ $base=[IO.Path]::GetFileName($p) -replace '\.local\.json$','';$tail=if($p -match '\.local\.json$'){'.local.json'}else{''};$stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
+ for($i=1;$i -le 200;$i++){
+  $copy=Join-Path $dir ($base+'.before-retention-'+$stamp+$(if($i -gt 1){"-$i"})+$tail)
+  if(Test-Path -LiteralPath $copy){continue}
+  [IO.File]::Copy($p,$copy,$false)   # fails rather than overwrites when the name is taken after all
+  return $copy
+ }
+ throw 'no free name for the copy'
 }
 function Save-CenterProfiles($Data) {
  $p=(Get-CenterPaths).Profiles
@@ -270,7 +300,7 @@ function Get-CenterCandidateDrives {
 function New-CenterProfile($Data,[string]$Name,[string]$VolumeId,[string]$Model='',[double]$SizeGB=0) {
  if(-not $Name.Trim()){throw 'Give the profile a name'}
  if(@($Data.Profiles|Where-Object {$_.DestinationVolumeId -eq $VolumeId}).Count){throw 'This drive already has a profile'}
- $p=[pscustomobject]@{Id=(New-ShortId);Name=$Name.Trim();DestinationVolumeId=$VolumeId;DriveModel=$Model;DriveSizeGB=$SizeGB;ReminderDays=7;Load='Balanced';CustomLoad=$null;Created=(Get-Date).ToString('o');Sources=@()}
+ $p=[pscustomobject]@{Id=(New-ShortId);Name=$Name.Trim();DestinationVolumeId=$VolumeId;DriveModel=$Model;DriveSizeGB=$SizeGB;ReminderDays=7;Load='Balanced';CustomLoad=$null;RetentionConfirmed=$false;Created=(Get-Date).ToString('o');Sources=@()}
  $Data.Profiles=@($Data.Profiles)+$p
  $p
 }
@@ -771,18 +801,129 @@ function Get-CenterKeepDeleted($Profile) {
  if(-not $Profile.PSObject.Properties['KeepDeleted'] -or $null -eq $Profile.KeepDeleted){return 0}
  [math]::Max(0,[math]::Min(100,[int]$Profile.KeepDeleted))
 }
+function ConvertTo-CenterRetention($Value) {
+ # A "Keep versions" setting as its two numbers. Earlier = it was saved in the earlier shape
+ # {Days, Weeks, Months}: one that deleted versions (any number above 0) becomes the present default,
+ # 10 newest and 6 months; one that kept every version keeps every version. Anything that is no
+ # setting at all, or a number that cannot be read, keeps every version: the careful reading.
+ $num={param($n,$max)if($Value.PSObject.Properties[$n] -and $null -ne $Value.$n){try{[math]::Max(0,[math]::Min($max,[int]$Value.$n))}catch{0}}else{0}}
+ if($Value -isnot [pscustomobject]){return [pscustomobject]@{Last=0;Months=0;Earlier=$false}}
+ if($Value.PSObject.Properties['Last']){return [pscustomobject]@{Last=(& $num 'Last' 1000);Months=(& $num 'Months' 240);Earlier=$false}}
+ if(-not @('Days','Weeks','Months'|Where-Object {$Value.PSObject.Properties[$_]}).Count){return [pscustomobject]@{Last=0;Months=0;Earlier=$false}}
+ $on=(& $num 'Days' 3650)+(& $num 'Weeks' 520)+(& $num 'Months' 240) -gt 0
+ [pscustomobject]@{Last=$(if($on){10}else{0});Months=$(if($on){6}else{0});Earlier=$true}
+}
 function Get-CenterVersionRetention($Profile) {
- # VersionRetention {Days,Weeks,Months}: after each versioned backup keep one version per day for Days
- # days, per week for Weeks weeks and per month for Months months; older ones are deleted. Missing or
- # all zero: every version is kept until deleted by hand.
- $r=if($Profile.PSObject.Properties['VersionRetention']){$Profile.VersionRetention}else{$null}
- $get={param($n,$max)if($r -and $r.PSObject.Properties[$n] -and $null -ne $r.$n){[math]::Max(0,[math]::Min($max,[int]$r.$n))}else{0}}
- $d=& $get 'Days' 3650;$w=& $get 'Weeks' 520;$m=& $get 'Months' 240
- [pscustomobject]@{Enabled=($d+$w+$m -gt 0);Days=$d;Weeks=$w;Months=$m}
+ # VersionRetention {Last, Months}: after each versioned backup keep the Last newest complete versions,
+ # whatever their dates, and the newest complete version of each month for Months months; a version that
+ # meets either rule stays, and older ones are deleted. The rules count separately for each computer and
+ # set of folders. Missing or both zero: every version is kept until deleted by hand.
+ $c=ConvertTo-CenterRetention $(if($Profile.PSObject.Properties['VersionRetention']){$Profile.VersionRetention}else{$null})
+ [pscustomobject]@{Enabled=($c.Last+$c.Months -gt 0);Last=$c.Last;Months=$c.Months}
 }
 function Format-CenterVersionRetention($Retention) {
  if(-not $Retention.Enabled){return 'every version'}
- @(if($Retention.Days){"$($Retention.Days) d"};if($Retention.Weeks){"$($Retention.Weeks) w"};if($Retention.Months){"$($Retention.Months) m"}) -join ' / '
+ @(if($Retention.Last){"$($Retention.Last) newest"};if($Retention.Months){"$($Retention.Months) $(if($Retention.Months -eq 1){'month'}else{'months'})"}) -join ' + '
+}
+function Get-CenterRetentionPoints([int]$Last,[int]$Months) {
+ # The three things said wherever the rule is set or about to delete for the first time: how many
+ # versions it leaves, what happens to partial ones, and that the space freed is not a version's size.
+ $rule=@(if($Last){"$Last newest"};if($Months){"$Months monthly"}) -join ' + '
+ "Up to $($Last+$Months) complete versions for each computer and set of folders ($rule). This is not a limit for the whole backup; partial versions can add to it."
+ 'A partial version is deleted once 3 complete versions are newer. That can remove content that exists only in it.'
+ 'Deleting a version frees only the data no remaining version needs, after the clean-up; not the size the version had.'
+}
+# --- The first clean-up is shown before anything is deleted ------------------------------------
+# RetentionConfirmed on a profile is true only after the user approved a list of what the rules
+# would delete. Until then backups plan the clean-up and delete nothing: versions get -RetentionPreview
+# and plain copies -PreviewRecovery (see Get-CenterSteps). A new profile, a converted one, and one
+# whose Keep versions numbers were changed start without it.
+function Test-CenterRetentionConfirmed($Profile) {[bool]($Profile.PSObject.Properties['RetentionConfirmed'] -and $Profile.RetentionConfirmed -is [bool] -and $Profile.RetentionConfirmed)}
+function Get-CenterRetentionState($Profile) {if(Test-CenterRetentionConfirmed $Profile){'Clean-up runs automatically.'}else{'The first clean-up will be shown to you for approval.'}}
+function Set-CenterVersionRetention($Profile,[int]$Last,[int]$Months) {
+ # What the Keep versions box saves. Other numbers than before are another rule, so its first clean-up
+ # is shown again; the same numbers keep an approval that was given.
+ $old=Get-CenterVersionRetention $Profile
+ $new=ConvertTo-CenterRetention ([pscustomobject]@{Last=$Last;Months=$Months})
+ $Profile|Add-Member -NotePropertyName VersionRetention -NotePropertyValue ([pscustomobject]@{Last=$new.Last;Months=$new.Months}) -Force
+ if($old.Last -ne $new.Last -or $old.Months -ne $new.Months -or -not (Test-CenterRetentionConfirmed $Profile)){$Profile|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $false -Force}
+}
+function Confirm-CenterRetention($Data,[string]$ProfileId) {
+ # The user approved the list: from the next backup on, the clean-up really deletes.
+ (Get-CenterProfile $Data $ProfileId)|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $true -Force
+ Save-CenterProfiles $Data
+}
+function Get-CenterRetentionExpected($Profile) {
+ # Every part a full backup of this profile runs: one entry per source and kind in use.
+ foreach($s in @($Profile.Sources)){
+  $kinds=Get-CenterSourceKinds $s
+  if($kinds.Mirror){[pscustomobject]@{SourceId=[string]$s.Id;Kind='Mirror'}}
+  if($kinds.Versioned){[pscustomobject]@{SourceId=[string]$s.Id;Kind='Versioned'}}
+ }
+}
+function Test-CenterRetentionPreviewWhole($Expected,$Results) {
+ # Approval counts for the whole profile, so the list may be offered only when it is the whole list:
+ # this run backed up every part (not one source only), every part succeeded, and no clean-up plan
+ # failed. Anything unknown (an entry without these fields, nothing to compare with) counts as not whole.
+ $expected=@($Expected|Where-Object {$_});if(-not $expected.Count){return $false}
+ foreach($x in $expected){
+  $hit=@(@($Results)|Where-Object {$_ -is [pscustomobject] -and $_.PSObject.Properties['SourceId'] -and $_.PSObject.Properties['Kind'] -and [string]$_.SourceId -eq [string]$x.SourceId -and [string]$_.Kind -eq [string]$x.Kind})
+  if($hit.Count -ne 1){return $false}
+  $r=$hit[0]
+  foreach($n in 'Success','Stopped','RetentionPlanFailed'){if(-not $r.PSObject.Properties[$n] -or $r.$n -isnot [bool]){return $false}}
+  if(-not $r.Success -or $r.Stopped -or $r.RetentionPlanFailed){return $false}
+ }
+ $true
+}
+function Get-CenterRetentionPreview($Results) {
+ # What the steps of one run would have deleted, from their history entries (RetentionPreview, written by
+ # Complete-CenterStep): versions, oldest first, and recovery folders of plain copies, each with the name
+ # of its source. Count 0 = nothing to ask about.
+ $versions=@();$folders=@()
+ foreach($r in @($Results)){
+  if($r -isnot [pscustomobject] -or -not $r.PSObject.Properties['RetentionPreview'] -or $r.RetentionPreview -isnot [pscustomobject]){continue}
+  $rp=$r.RetentionPreview;$label=if($r.PSObject.Properties['Label']){[string]$r.Label}else{''};$sid=if($r.PSObject.Properties['SourceId']){[string]$r.SourceId}else{''}
+  foreach($c in @($(if($rp.PSObject.Properties['Versions']){$rp.Versions}))){
+   if($c -isnot [pscustomobject]){continue}
+   $get={param($n)if($c.PSObject.Properties[$n]){$c.$n}else{$null}}
+   $versions+=[pscustomobject]@{Label=$label;SourceId=$sid;Id=[string](& $get 'Id');Time=(ConvertTo-CenterTime (& $get 'Time'));Partial=((& $get 'Partial') -eq $true);Host=[string](& $get 'Host');Paths=@(@(& $get 'Paths')|Where-Object {$_}|ForEach-Object {[string]$_})}
+  }
+  foreach($n in @($(if($rp.PSObject.Properties['RecoveryFolders']){$rp.RecoveryFolders}))){if($n){$folders+=[pscustomobject]@{Label=$label;SourceId=$sid;Name=[string]$n}}}
+ }
+ $versions=@($versions|Sort-Object @{Expression={if($_.Time){$_.Time}else{[datetime]::MinValue}}})
+ [pscustomobject]@{Versions=$versions;RecoveryFolders=$folders;Count=$versions.Count+$folders.Count}
+}
+function Format-CenterRetentionPreview($Preview,[int]$Last,[int]$Months) {
+ # The text of the one question asked before the first clean-up ('' = nothing to ask). Long lists are
+ # shortened so the box stays on the screen; the full list is in the run's details.
+ if(-not $Preview -or -not $Preview.Count){return ''}
+ $lines=@('This is what the clean-up would delete on the backup drive. Nothing has been deleted yet.')
+ $v=@($Preview.Versions);$f=@($Preview.RecoveryFolders)
+ if($v.Count){
+  # The computer is named only when the list holds versions of more than one.
+  $hosts=@($v|ForEach-Object {$_.Host}|Where-Object {$_}|Sort-Object -Unique).Count -gt 1
+  $lines+=@('',"Old versions ($($v.Count)):")
+  foreach($c in @($v|Select-Object -First 10)){
+   $when=if($c.Time){$c.Time.ToString('d MMM yyyy, HH:mm',[cultureinfo]::InvariantCulture)}else{'unknown date'}
+   $lines+="  - $($c.Label): $when$(if($c.Partial){', partial'})$(if($hosts -and $c.Host){", computer $($c.Host)"})$(if($c.Paths.Count){' - '+($c.Paths -join ', ')})"
+  }
+  if($v.Count -gt 10){$lines+="  - and $($v.Count-10) more versions"}
+ }
+ if($f.Count){
+  # A recovery folder is named by the time of the backup that made it (yyyyMMdd-HHmmss); shown as a date.
+  $lines+=@('',"Recovery folders with files deleted from the plain copy ($($f.Count)):")
+  foreach($c in @($f|Select-Object -First 6)){
+   $t=[datetime]::MinValue;$dated=[datetime]::TryParseExact($c.Name,'yyyyMMdd-HHmmss',[cultureinfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$t)
+   $lines+="  - $($c.Label): $(if($dated){$t.ToString('d MMM yyyy, HH:mm',[cultureinfo]::InvariantCulture)+" ($($c.Name))"}else{$c.Name})"
+  }
+  if($f.Count -gt 6){$lines+="  - and $($f.Count-6) more"}
+ }
+ if($v.Count){
+  $points=@(Get-CenterRetentionPoints $Last $Months)
+  $lines+=@('',$points[0]);if(@($v|Where-Object {$_.Partial}).Count){$lines+=$points[1]};$lines+=$points[2]
+ }
+ $lines+=@('','Approve clean-up: it runs by this rule with the next backup, and by itself after every backup from then on.','Not now: nothing changes, and you are asked again after the next backup that has something to delete.')
+ $lines -join "`n"
 }
 function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup','Verify','Repair')][string]$Purpose='Backup') {
  # The ordered list of tool runs for one press of Back up / Verify / Repair. A repair is for plain
@@ -797,7 +938,9 @@ function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup'
    $a=@('-NoProfile','-File',(Join-Path $script:ToolRoot 'Invoke-FastMirror.ps1'),'-ConfigPath',$s.ConfigPath,'-DestinationDrive',$drive.Letter,'-Folder',$s.MirrorFolder,'-Threads',[string]$load.CopyThreads)
    if($Purpose -eq 'Verify'){$a+='-VerifyOnly'}
    elseif($Purpose -eq 'Repair'){$a+='-Repair'}
-   else{$keep=Get-CenterKeepDeleted $Profile;if($keep -gt 0){$a+=@('-MoveExtras','-KeepRecovery',[string]$keep)}}
+   # Until the first clean-up is approved, deleted files are still moved aside, but no old recovery
+   # folder is deleted: the tool lists the ones it would delete.
+   else{$keep=Get-CenterKeepDeleted $Profile;if($keep -gt 0){$a+=@('-MoveExtras','-KeepRecovery',[string]$keep);if(-not (Test-CenterRetentionConfirmed $Profile)){$a+='-PreviewRecovery'}}}
    [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Mirror';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$null;Priority=$load.Priority}
   }
   if($kinds.Versioned -and $Purpose -ne 'Repair'){
@@ -805,7 +948,8 @@ function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup'
    $a=@('-NoProfile','-File',(Join-Path $script:ToolRoot 'Backup-Worker.ps1'),'-ConfigPath',$s.ConfigPath,'-RunDirectory',$run)
    $a+=if($Purpose -eq 'Verify'){@('-Action','Check','-ReadAllData')}else{@('-Action','Backup')}
    $keep=Get-CenterVersionRetention $Profile
-   if($Purpose -eq 'Backup' -and $keep.Enabled){$a+=@('-KeepDays',[string]$keep.Days,'-KeepWeeks',[string]$keep.Weeks,'-KeepMonths',[string]$keep.Months)}
+   # -RetentionPreview: the worker plans the clean-up and deletes nothing (see Test-CenterRetentionConfirmed).
+   if($Purpose -eq 'Backup' -and $keep.Enabled){$a+=@('-KeepLast',[string]$keep.Last,'-KeepMonths',[string]$keep.Months);if(-not (Test-CenterRetentionConfirmed $Profile)){$a+='-RetentionPreview'}}
    [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Versioned';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$run;Priority=$load.Priority}
   }
  }
@@ -836,7 +980,7 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
  # Seconds is exact; Minutes (a tenth of a minute) stays for older readers. ProcessedBytes: what a
  # versioned backup read, where CopiedBytes is only what it had to store.
  $e=[ordered]@{ProfileId=$ProfileId;SourceId=$s.SourceId;Label=$s.Label;Kind=$s.Kind;Purpose=$s.Purpose;Started=$Running.Started.ToString('o');Finished=(Get-Date).ToString('o')
-  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Seconds=[math]::Round(((Get-Date)-$Running.Started).TotalSeconds,1);Success=$false;Stopped=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;ProcessedBytes=$null;CheckedFiles=$null;Differences=$null;Details=$null;Note=$null}
+  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Seconds=[math]::Round(((Get-Date)-$Running.Started).TotalSeconds,1);Success=$false;Stopped=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;ProcessedBytes=$null;CheckedFiles=$null;Differences=$null;Details=$null;Note=$null;RetentionPreview=$null;RetentionPlanFailed=$false}
  $notes=@()
  try{
   if($s.Kind -eq 'Mirror'){
@@ -881,6 +1025,15 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
    # DevDriveBackup's own password and recovery key folders are never copied, even when selected.
    if($r.PSObject.Properties['SelectionsSkippedAsPrivate'] -and @($r.SelectionsSkippedAsPrivate).Count){$notes+="Not copied, because DevDriveBackup never copies its own password and recovery key folders: $(@($r.SelectionsSkippedAsPrivate) -join ', ')."}
    if($r.PSObject.Properties['PrivateCopiesOnDrive'] -and @($r.PrivateCopiesOnDrive).Count){$notes+="An older copy of DevDriveBackup's private folders is still in the plain copy and holds readable recovery keys: $(@($r.PrivateCopiesOnDrive) -join ', '). Delete it from the backup drive."}
+   # A backup before the first approved clean-up (-PreviewRecovery): the old recovery folders it left
+   # in place are kept on the entry, for the one question after the run.
+   if($s.Purpose -eq 'Backup' -and $r.PSObject.Properties['RecoveryWouldRemove']){
+    $old=@(@($r.RecoveryWouldRemove)|Where-Object {$_}|ForEach-Object {[string]$_})
+    if($old.Count){
+     $e.RetentionPreview=[pscustomobject]@{Versions=@();RecoveryFolders=$old}
+     $notes+="$($old.Count) older recovery $(if($old.Count -eq 1){'folder'}else{'folders'}) would be deleted ($((@($old|Select-Object -First 5) -join ', ')+$(if($old.Count -gt 5){" and $($old.Count-5) more"}))). Nothing was deleted."
+    }
+   }
    $notes+=@(Get-CenterResultNotes $r 'Mirror')
   }else{
    $resultPath=Join-Path $s.RunDirectory 'result.json'
@@ -907,9 +1060,27 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
    if($r.PSObject.Properties['Retention'] -and $r.Retention){
     $ret=$r.Retention
     $err=if($ret.PSObject.Properties['Error'] -and $ret.Error){[string]$ret.Error}else{''}
-    $removed=if($ret.PSObject.Properties['Removed'] -and $ret.Removed){try{[int]$ret.Removed}catch{0}}else{0}
-    $kept=if($ret.PSObject.Properties['Kept'] -and $null -ne $ret.Kept){"; $($ret.Kept) kept"}else{''}
-    $notes+=if($err -and $removed){"Deleted $removed old versions$kept, but the clean-up did not finish: $err"}elseif($err){"Backed up, but old versions were not cleaned up: $err"}elseif($removed){"Deleted $removed old versions$kept."}else{"No old versions to delete$kept."}
+    $count={param($n)if($ret.PSObject.Properties[$n] -and $ret.$n){try{[long]$ret.$n}catch{[long]0}}else{[long]0}}   # an unreadable number is not an error
+    $words={param([long]$n,[long]$partial)"$n old $(if($n -eq 1){'version'}else{'versions'})$(if($partial){" ($partial partial)"})"}
+    $hasKept=$ret.PSObject.Properties['Kept'] -and $null -ne $ret.Kept
+    if($ret.PSObject.Properties['Preview'] -and $ret.Preview -eq $true){
+     # Planned only (the first clean-up is not approved yet): the versions it would delete are kept on
+     # the entry for the one question after the run. A plan that failed lists nothing.
+     $cands=@(@($(if($ret.PSObject.Properties['Candidates']){$ret.Candidates}))|Where-Object {$_ -is [pscustomobject]})
+     if($err){$e.RetentionPlanFailed=$true;$notes+="Backed up, but the clean-up of old versions could not be planned: $err"}
+     elseif($cands.Count){
+      $e.RetentionPreview=[pscustomobject]@{Versions=$cands;RecoveryFolders=@()}
+      $partial=@($cands|Where-Object {$_.PSObject.Properties['Partial'] -and $_.Partial -eq $true}).Count
+      $notes+="The clean-up would delete $(& $words $cands.Count $partial)$(if($hasKept){"; $($ret.Kept) would be kept"}). Nothing was deleted."
+     }
+    }else{
+     $removed=& $count 'Removed';$what=& $words $removed (& $count 'PartialRemoved');$kept=if($hasKept){"; $($ret.Kept) kept"}else{''}
+     # A size is said only from the number the clean-up itself reports as freed (PrunedBytes), never
+     # from the sizes of the versions: deleting one frees only what no other version needs.
+     $bytes=[long]0;foreach($o in $ret,$r){if(-not $bytes -and $o.PSObject.Properties['PrunedBytes'] -and $o.PrunedBytes){try{$bytes=[long]$o.PrunedBytes}catch{}}}
+     $freed=if($bytes -gt 0){' The clean-up freed '+$(if($bytes -ge 1GB){($bytes/1GB).ToString('N1',[cultureinfo]::InvariantCulture)+' GB'}elseif($bytes -ge 1MB){($bytes/1MB).ToString('N0',[cultureinfo]::InvariantCulture)+' MB'}else{($bytes/1KB).ToString('N0',[cultureinfo]::InvariantCulture)+' KB'})+'.'}else{''}
+     $notes+=if($err -and $removed){"Deleted $what$kept, but the clean-up did not finish: $err"}elseif($err){"Backed up, but old versions were not cleaned up: $err"}elseif($removed){"Deleted $what$kept.$freed"}else{"No old versions to delete$kept."}
+    }
    }
    $notes+=@(Get-CenterResultNotes $r 'Versioned')
   }
@@ -934,7 +1105,7 @@ function Get-CenterStaleProfiles([datetime]$Now=(Get-Date)) {
   if($f.State -in @('Stale','Never')){[pscustomobject]@{Profile=$p;Freshness=$f}}
  }
 }
-Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterVersionRetention,Format-CenterVersionRetention,Get-CenterDrive,Get-CenterCandidateDrives,
+Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterVersionRetention,Format-CenterVersionRetention,Set-CenterVersionRetention,Get-CenterRetentionPoints,Test-CenterRetentionConfirmed,Get-CenterRetentionState,Confirm-CenterRetention,Get-CenterRetentionPreview,Get-CenterRetentionExpected,Test-CenterRetentionPreviewWhole,Format-CenterRetentionPreview,Get-CenterDrive,Get-CenterCandidateDrives,
  New-CenterProfile,Remove-CenterProfile,Add-CenterSource,Remove-CenterSource,Read-CenterJob,Save-CenterJob,Get-CenterSourceKinds,Sync-CenterJob,
  Add-CenterHistory,Get-CenterHistory,Get-LastSuccess,Get-FreshnessState,Format-CenterAge,Get-CenterFreshness,ConvertTo-CenterTime,Format-CenterElapsed,Format-CenterRunDuration,Get-CenterRunSpeed,ConvertFrom-CenterToolJson,
  Get-CenterBusyReason,Get-CenterFreeBytes,Get-CenterVolumeQueryCount,

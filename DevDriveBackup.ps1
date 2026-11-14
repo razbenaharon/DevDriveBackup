@@ -9,10 +9,10 @@ param(
  [string]$PreviewTheme,      # tests: show this theme without saving it
  [int]$PreviewWidth=0,       # tests: open the window at this inner size (zoomed)
  [int]$PreviewHeight=0,
- [ValidateSet('','KeepVersions','Verify','Repair','Settings')][string]$PreviewDialog='',  # tests: open this dialog at start; nothing is saved. With -RenderPreview the picture is of the question (Verify, Repair, Settings)
+ [ValidateSet('','KeepVersions','RetentionPreview','Verify','Repair','Settings')][string]$PreviewDialog='',  # tests: open this dialog at start. With -RenderPreview the picture is of the box itself and nothing is saved; with -Answer it is answered without being shown
  [int]$AutoCloseSeconds=0,   # tests: run normally, then close after this many seconds
  [switch]$Quiet,             # tests: open off the screen, without taking the keyboard or a taskbar button
- [string]$Answer,            # tests: the answer given to a question (the start of its button text) instead of showing it
+ [string]$Answer,            # tests: the answer given to a question (the start of its button text) instead of showing it; for Keep versions 'Save' or 'Save <newest> <months>'
  [ValidateSet('','Refresh','Links')][string]$TestAction='',  # tests: once the window is shown, do what a user would (see "Test hooks")
  [string]$TestState          # tests: write what the window shows to this file (JSON) when it closes
 )
@@ -73,9 +73,9 @@ function Stop-Startup([string]$Message){
 # --- Texts ---------------------------------------------------------------------------------
 $Help=[ordered]@{
  Modes=@'
-Plain copy (mirror): an ordinary, uncompressed copy of the files on the backup drive. You can open and use the files directly from the drive, on any computer. Each run copies only files that are new or changed (compared by size and time). Files you delete here stay in the copy, unless "Keep deleted for" on the overview is above 0: then each backup moves them into a dated recovery folder beside the copy and keeps only that many of these folders.
+Plain copy (mirror): an ordinary, uncompressed copy of the files on the backup drive. You can open and use the files directly from the drive, on any computer. Each run copies only files that are new or changed (compared by size and time). Files you delete here stay in the copy, unless "Keep deleted in" on the overview is above 0: then each backup moves them into a dated recovery folder beside the copy and keeps only that many of these folders.
 
-Versions (history): encrypted, compressed snapshots. Every run keeps a new version, so you can go back to how a file looked on an earlier date. Opening files needs this window (Versions and restore) or the restic program with the recovery key. Identical data is stored once, so many versions take little extra space. Every version is kept, unless "Keep versions" on the overview is set: then each backup keeps one version a day, a week and a month for as long as you choose, counted back from the newest version, and deletes older ones.
+Versions (history): encrypted, compressed snapshots. Every run keeps a new version, so you can go back to how a file looked on an earlier date. Opening files needs this window (Versions and restore) or the restic program with the recovery key. Identical data is stored once, so many versions take little extra space. Every version is kept, unless "Keep versions" on the overview is set: then each backup keeps the newest versions (10) and one version a month (for 6 months) and deletes older ones. The first clean-up is shown to you for approval before anything is deleted.
 
 Both: a plain copy and versions. The safest choice for important work.
 
@@ -146,7 +146,7 @@ Skip: not backed up.
 
 'Folders not listed' applies to everything in the source without a row of its own. Rebuildable folders (node_modules, virtual environments, caches) are always skipped.
 
-Deleted files and old versions are kept, unless 'Keep deleted for' or 'Keep versions' on the overview say otherwise. The Help page explains each of these.
+Deleted files and old versions are kept, unless 'Keep deleted in' or 'Keep versions' on the overview say otherwise. The Help page explains each of these.
 '@
  SpeedShort=@'
 Light and Balanced leave the computer to you; Strong and Maximum finish sooner and are meant for when you are away. You can change the load while a backup runs: the priority changes at once, the rest from the next step.
@@ -263,11 +263,12 @@ function Set-Grid($g){
  $g.RowTemplate.Height=32;$g.AutoSizeColumnsMode='Fill';$g.SelectionMode='FullRowSelect';$g.MultiSelect=$false
 }
 function New-Surface($Parent,[int]$X,[int]$Y,[int]$W,[int]$H){$p=New-Control Panel $Parent $X $Y $W $H;$p.BackColor=$ui.Surface;$p}
-$script:dialogShot=if($RenderPreview -and $PreviewDialog -in 'Verify','Repair','Settings'){$RenderPreview}else{$null}
-function Show-Choice([string]$Title,[string]$Text,[string[]]$Choices,[switch]$Careful) {
+$script:dialogShot=if($RenderPreview -and $PreviewDialog){$RenderPreview}else{$null}
+function Show-Choice([string]$Title,[string]$Text,[string[]]$Choices,[switch]$Careful,[string]$CancelText='Cancel') {
  # One question with every answer named on its own button, instead of Yes / No / Cancel whose meaning
  # has to be worked out from the text. Returns the number of the chosen answer (0 = the first), or -1
  # for Cancel and for closing the box. -Careful: Enter means Cancel, for answers that change something.
+ # -CancelText: another name for Cancel where "do nothing" has a plainer one ("Not now").
  # Tests never get a box to click: -Answer chooses by the start of a button's text, a preview of the
  # question is drawn into the picture, and any other test run gets Cancel.
  if(-not $script:dialogShot){
@@ -290,7 +291,7 @@ function Show-Choice([string]$Title,[string]$Text,[string[]]$Choices,[switch]$Ca
   for($i=0;$i -lt $Choices.Count;$i++){
    $b=New-Control Button $f 16 $y $inner 38 $Choices[$i];$b.Tag=$i;$b.Add_Click({param($s,$e)$f.Tag=[int]$s.Tag;$f.Close()}.GetNewClosure());$buttons+=$b;$y+=46
   }
-  $cancel=New-Control Button $f ($w-16-110) ($y+4) 110 32 'Cancel';$cancel.DialogResult='Cancel';$f.CancelButton=$cancel
+  $cancel=New-Control Button $f ($w-16-110) ($y+4) 110 32 $CancelText;$cancel.DialogResult='Cancel';$f.CancelButton=$cancel
   $f.AcceptButton=if($Careful -or -not $buttons.Count){$cancel}else{$buttons[0]}
   $f.ClientSize=[Drawing.Size]::new($w,$y+4+32+16)
   if($script:dialogShot){
@@ -372,14 +373,14 @@ $oldDays=New-Control NumericUpDown $tOverview 682 22 52 26;$oldDays.Minimum=1;$o
 $loadPick=New-Control ComboBox $tOverview 682 54 110 26;$loadPick.DropDownStyle='DropDownList';$loadPick.FlatStyle='Flat';[void]$loadPick.Items.AddRange([object[]]@('Light','Balanced','Strong','Maximum','Custom'))
 # 0 = files deleted from the source stay in the plain copy; N = they move to a dated recovery
 # folder beside it, and only the newest N recovery folders are kept.
-(New-Control Label $tOverview 560 94 120 22 'Keep deleted for').ForeColor=$ui.Muted
+(New-Control Label $tOverview 560 94 120 22 'Keep deleted in').ForeColor=$ui.Muted
 $keepDeleted=New-Control NumericUpDown $tOverview 682 90 52 26;$keepDeleted.Minimum=0;$keepDeleted.Maximum=100;$keepDeleted.BorderStyle='FixedSingle'
-(New-Control Label $tOverview 740 94 60 22 'backups').ForeColor=$ui.Muted
-# Versions: keep everything, or clean up after each backup (one per day / week / month for a while).
-(New-Control Label $tOverview 560 130 120 22 'Keep versions').ForeColor=$ui.Muted
-$keepVersions=New-Link $tOverview 682 130 110 'every version'
+(New-Control Label $tOverview 740 94 60 22 'folders').ForeColor=$ui.Muted
+# Versions: keep everything, or clean up after each backup (the newest N, and one a month for M months).
+(New-Control Label $tOverview 560 130 88 22 'Keep versions').ForeColor=$ui.Muted
+$keepVersions=New-Link $tOverview 650 130 142 'every version';$keepVersions.TextAlign='TopRight'   # wide enough for "10 newest + 6 months"; ends at the right edge like the link below
 $keepTip=New-Object Windows.Forms.ToolTip;$keepTip.AutoPopDelay=20000
-$keepTip.SetToolTip($keepVersions,"For folders backed up as Versions or Both.`nEvery version: nothing is deleted; delete old ones by hand in Versions and restore.`nOr: after each backup keep one version per day, week and month for a while and delete the rest.")
+$keepTip.SetToolTip($keepVersions,"For folders backed up as Versions or Both.`nEvery version: nothing is deleted; delete old ones by hand in Versions and restore.`nOr: after each backup keep the newest versions and one version a month for some months, and delete the rest.`nThe first clean-up is shown to you for approval before anything is deleted.")
 $keepTip.SetToolTip($keepDeleted,"0: files you delete stay in the plain copy.`nA number: each backup moves them out of the copy into a dated folder beside it`n(<copy folder>-recovery) and keeps only that many of these folders, the newest.`nOlder ones are deleted from the backup drive.")
 $meter=New-Control Panel $tOverview 24 166 768 6;$meter.BackColor=$ui.Line
 $meterFill=New-Control Panel $meter 0 0 0 6
@@ -968,6 +969,17 @@ function Finish-Run {
  $runStatus.Text=$msg.Split("`n")[0]
  Update-ProfileList $script:runProfile.Id
  [void][Windows.Forms.MessageBox]::Show($msg,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,$(if($bad.Count){[Windows.Forms.MessageBoxIcon]::Warning}else{[Windows.Forms.MessageBoxIcon]::Information}))
+ # Before the first clean-up of this profile the tools only listed what they would delete. With such a
+ # list: one question. Without one nothing is asked, and the next backup lists again.
+ try{
+  $pv=Get-CenterRetentionPreview $script:runResults
+  if($pv.Count){
+   $fresh=@($script:data.Profiles|Where-Object {$_.Id -eq $script:runProfile.Id})[0]
+   # Approval counts for the whole drive: asked only after a backup of every source that went through.
+   if($fresh -and (Test-CenterRetentionPreviewWhole @(Get-CenterRetentionExpected $fresh) $script:runResults)){[void](Request-RetentionApproval $fresh $pv)}
+   elseif($fresh){$runStatus.Text+=' Old versions or recovery folders are waiting for clean-up; the list is shown for approval after a backup of all sources that finishes without errors.'}
+  }
+ }catch{Show-Error $_}
 }
 # --- Waiting for AI sessions -----------------------------------------------------------------
 # A backup taken while Claude Code or Codex sessions edit files catches them half-way. Before a
@@ -1205,39 +1217,81 @@ $form.Add_Resize({if($script:baseLayout){$zoomTimer.Stop();$zoomTimer.Start()}})
 
 # --- Dialogs -------------------------------------------------------------------------------
 function Show-VersionRetentionDialog($Profile) {
- # Returns the new VersionRetention (Days, Weeks, Months; all 0 = keep every version) or $null on Cancel.
+ # Returns the new numbers ({Last, Months}; both 0 = keep every version) or $null on Cancel.
+ # Tests never get a box to click: -Answer 'Save' saves what the box would show and 'Save 5 3' these two
+ # numbers, a preview draws the box into the picture, and any other test run gets Cancel.
  $cur=Get-CenterVersionRetention $Profile
- $f=[Windows.Forms.Form]::new();$f.Text='Keep versions';$f.ClientSize=[Drawing.Size]::new(560,330);$f.Font=$dialogFont;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false
- $all=New-Control RadioButton $f 16 14 528 24 'Keep every version (delete old ones by hand in Versions and restore)'
- $auto=New-Control RadioButton $f 16 44 528 24 'After each backup, keep these and delete older versions:'
- $rows=@()
- foreach($r in @(@('one a day, for the last','days',$cur.Days,7,3650),@('one a week, for the last','weeks',$cur.Weeks,4,520),@('one a month, for the last','months',$cur.Months,3,240))){
-  $y=78+$rows.Count*36
-  [void](New-Control Label $f 40 ($y+4) 170 22 $r[0])
-  $n=New-Control NumericUpDown $f 214 $y 70 26;$n.Minimum=0;$n.Maximum=$r[4];$n.Value=if($cur.Enabled){[decimal]$r[2]}else{[decimal]$r[3]}
-  [void](New-Control Label $f 292 ($y+4) 80 22 $r[1])
-  $rows+=$n
+ if(-not $script:dialogShot){
+  if($Answer -match '^Save(?: (\d+) (\d+))?$'){return [pscustomobject]@{Last=$(if($Matches[1]){[int]$Matches[1]}else{$cur.Last});Months=$(if($Matches[1]){[int]$Matches[2]}else{$cur.Months})}}
+  if($script:testMode){return $null}
  }
- $note=New-Control Label $f 16 190 528 84 'Counted back from the newest version, not from today, so a long pause between backups never empties the history. The newest version is always kept. Deleted versions are removed from the drive to free space. Applies to folders backed up as Versions or Both; 0 turns a line off.'
- $note.ForeColor=[Drawing.SystemColors]::GrayText
- $all.Checked=-not $cur.Enabled;$auto.Checked=$cur.Enabled
- $sync={foreach($n in $rows){$n.Enabled=$auto.Checked}};& $sync;$auto.Add_CheckedChanged($sync)
- $ok=New-Control Button $f 344 284 96 32 'Save';$ok.DialogResult='OK';$cancel=New-Control Button $f 448 284 96 32 'Cancel';$cancel.DialogResult='Cancel';$f.AcceptButton=$ok;$f.CancelButton=$cancel
+ $f=if($Quiet){[DevDriveBackupQuietForm]::new()}else{[Windows.Forms.Form]::new()}
+ $f.Text='Keep versions';$f.Font=$dialogFont;$f.StartPosition='CenterParent';$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false;$f.ShowInTaskbar=$false
  try{
+  $all=New-Control RadioButton $f 16 14 528 24 'Keep every version (delete old ones by hand in Versions and restore)'
+  $auto=New-Control RadioButton $f 16 44 528 24 'After each backup, keep these and delete older versions:'
+  [void](New-Control Label $f 40 82 250 22 'Newest versions to keep')
+  $last=New-Control NumericUpDown $f 300 78 70 26;$last.Minimum=0;$last.Maximum=1000;$last.Value=if($cur.Enabled){[decimal]$cur.Last}else{10}
+  [void](New-Control Label $f 40 118 250 22 'Months to keep one version each')
+  $months=New-Control NumericUpDown $f 300 114 70 26;$months.Minimum=0;$months.Maximum=240;$months.Value=if($cur.Enabled){[decimal]$cur.Months}else{6}
+  $note=New-Control Label $f 16 154 528 20 '';$note.ForeColor=[Drawing.SystemColors]::GrayText
+  $all.Checked=-not $cur.Enabled;$auto.Checked=$cur.Enabled
+  # What the numbers shown now mean, and whether their first clean-up would be shown for approval:
+  # only the numbers that were approved run by themselves.
+  $describe={
+   $l=[int]$last.Value;$m=[int]$months.Value
+   if($all.Checked -or $l+$m -eq 0){return "Every version is kept. Nothing is deleted by itself."}
+   $state=if((Test-CenterRetentionConfirmed $Profile) -and $l -eq $cur.Last -and $m -eq $cur.Months){'Clean-up runs automatically.'}else{'The first clean-up will be shown to you for approval.'}
+   "A version that meets either rule stays, and the newest complete version is never deleted. For folders backed up as Versions or Both.`r`n`r`n"+((@(Get-CenterRetentionPoints $l $m)|ForEach-Object {"- $_"}) -join "`r`n")+"`r`n`r`n$state"
+  }.GetNewClosure()
+  $sync={$last.Enabled=$auto.Checked;$months.Enabled=$auto.Checked;$note.Text=& $describe}.GetNewClosure()
+  # The box is as tall as its longest explanation (the one with numbers), so nothing is cut off.
+  $was=$all.Checked;$auto.Checked=$true;$note.Text=& $describe
+  $h=$note.GetPreferredSize([Drawing.Size]::new(528,0)).Height+8;$note.Height=$h
+  $all.Checked=$was;$auto.Checked=-not $was;& $sync
+  $auto.Add_CheckedChanged($sync);$last.Add_ValueChanged($sync);$months.Add_ValueChanged($sync)
+  $y=154+$h+12
+  $ok=New-Control Button $f 344 $y 96 32 'Save';$ok.DialogResult='OK';$cancel=New-Control Button $f 448 $y 96 32 'Cancel';$cancel.DialogResult='Cancel';$f.AcceptButton=$ok;$f.CancelButton=$cancel
+  $f.ClientSize=[Drawing.Size]::new(560,$y+32+16)
+  if($script:dialogShot){
+   $f.StartPosition='Manual';$f.Location=[Drawing.Point]::new(-30000,-30000);$f.Show();[Windows.Forms.Application]::DoEvents()
+   $bitmap=[Drawing.Bitmap]::new($f.Width,$f.Height);try{$f.DrawToBitmap($bitmap,[Drawing.Rectangle]::new(0,0,$f.Width,$f.Height));$bitmap.Save($script:dialogShot)}finally{$bitmap.Dispose()}
+   $f.Close();return $null
+  }
   if($f.ShowDialog($form) -ne 'OK'){return $null}
-  if($all.Checked){return [pscustomobject]@{Days=0;Weeks=0;Months=0}}
-  $v=[pscustomobject]@{Days=[int]$rows[0].Value;Weeks=[int]$rows[1].Value;Months=[int]$rows[2].Value}
-  if($v.Days+$v.Weeks+$v.Months -eq 0){[void][Windows.Forms.MessageBox]::Show('All three are 0, so nothing would be kept apart from the newest version. Choose at least one, or "Keep every version".','DevDriveBackup');return $null}
-  $v
+  if($all.Checked){return [pscustomobject]@{Last=0;Months=0}}
+  [pscustomobject]@{Last=[int]$last.Value;Months=[int]$months.Value}
  }finally{$f.Dispose()}
 }
-$keepVersions.Add_LinkClicked({try{
+function Edit-VersionRetention {
+ # The "Keep versions" link: ask, save, and say in the status line what applies now.
  $p=Get-SelectedProfile;if(-not $p){return}
  $v=Show-VersionRetentionDialog $p;if(-not $v){return}
- $p|Add-Member -NotePropertyName VersionRetention -NotePropertyValue $v -Force;Save-CenterProfiles $script:data
+ Set-CenterVersionRetention $p $v.Last $v.Months;Save-CenterProfiles $script:data
  $r=Get-CenterVersionRetention $p;$keepVersions.Text=Format-CenterVersionRetention $r
- $runStatus.Text=if($r.Enabled){"Versions: after each backup, keep $(Format-CenterVersionRetention $r) (days / weeks / months) and delete older ones."}else{'Versions: every version is kept.'}
-}catch{Show-Error $_}})
+ $runStatus.Text=if($r.Enabled){"Versions: after each backup, keep $(Format-CenterVersionRetention $r) and delete older ones. $(Get-CenterRetentionState $p)"}else{'Versions: every version is kept.'}
+}
+$keepVersions.Add_LinkClicked({try{Edit-VersionRetention}catch{Show-Error $_}})
+function Request-RetentionApproval($Profile,$Preview){
+ # The one question before the first clean-up of a profile: what the last backup would have deleted
+ # (old versions, old recovery folders of plain copies). True = approved. Approving deletes nothing by
+ # itself: from the next backup on, the tools run without their preview switches.
+ if(-not $Preview -or -not $Preview.Count){return $false}
+ $r=Get-CenterVersionRetention $Profile
+ if((Show-Choice 'Clean-up of old backups' (Format-CenterRetentionPreview $Preview $r.Last $r.Months) @('Approve clean-up') -Careful -CancelText 'Not now') -ne 0){return $false}
+ Confirm-CenterRetention $script:data $Profile.Id
+ $done='Approved. Nothing was deleted now: the clean-up runs by this rule with the next backup, and by itself after every backup from then on.'
+ $runStatus.Text=$done
+ if(-not $script:testMode){[void][Windows.Forms.MessageBox]::Show($done,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)}
+ $true
+}
+function Get-SampleRetentionPreview($Profile){
+ # Tests and previews of the question: what a run with something to delete hands over, without a run.
+ $label=[string](@(@($Profile.Sources|ForEach-Object {$_.Label})+'Projects')[0]);$t=(Get-Date).Date.AddMonths(-8)
+ Get-CenterRetentionPreview @(
+  [pscustomobject]@{Label=$label;SourceId='';RetentionPreview=[pscustomobject]@{Versions=@([pscustomobject]@{Id='1a2b3c4d';Time=$t.AddHours(9.5).ToString('s');Partial=$true;Host='PC';Paths=@('E:\Projects')},[pscustomobject]@{Id='5e6f7a8b';Time=$t.AddDays(20).AddHours(18).ToString('s');Partial=$false;Host='PC';Paths=@('E:\Projects')});RecoveryFolders=@()}}
+  [pscustomobject]@{Label=$label;SourceId='';RetentionPreview=[pscustomobject]@{Versions=@();RecoveryFolders=@($t.AddHours(9.5).ToString('yyyyMMdd-HHmmss'),$t.AddDays(7).AddHours(18).ToString('yyyyMMdd-HHmmss'))}})
+}
 
 function Show-NewProfileDialog {
  $drives=@(Get-CenterCandidateDrives|Where-Object {$v=$_.VolumeId;-not @($script:data.Profiles|Where-Object {$_.DestinationVolumeId -eq $v}).Count})
@@ -1418,9 +1472,9 @@ $ovCheck.Add_Click({Show-Page 3})
 $btnSpeed.Add_Click({try{
  $p=Get-SelectedProfile;$d=Get-CenterDrive $p.DestinationVolumeId -Fresh;if(-not $d.Connected){throw 'Connect the drive first.'}
  $why=Get-BusyReason $p 'Speed';if($why){throw $why}
- $args=@('-NoProfile','-File',(Join-Path $PSScriptRoot 'Set-BackupDestination.ps1'),'-DestinationDrive',$d.Letter,'-BenchmarkMiB','2048')
- if(@($p.Sources).Count){$args+=@('-ConfigPath',@($p.Sources)[0].ConfigPath)}
- $script:speedRun=Start-CenterStep ([pscustomobject]@{FilePath=(Get-Process -Id $PID).Path;Arguments=$args;Priority=$null}) $null
+ $speedArgs=@('-NoProfile','-File',(Join-Path $PSScriptRoot 'Set-BackupDestination.ps1'),'-DestinationDrive',$d.Letter,'-BenchmarkMiB','2048')
+ if(@($p.Sources).Count){$speedArgs+=@('-ConfigPath',@($p.Sources)[0].ConfigPath)}
+ $script:speedRun=Start-CenterStep ([pscustomobject]@{FilePath=(Get-Process -Id $PID).Path;Arguments=$speedArgs;Priority=$null}) $null
  # The buttons that would start a backup or a drive check of this drive go off while it is tested.
  $script:speedProfile=$p;$speedTimer.Start();Update-Details
 }catch{$script:speedRun=$null;Update-Details;$speedResult.Text='Speed test failed: '+$_.Exception.Message}})
@@ -1528,6 +1582,8 @@ $form.Add_Shown({
   $p=Get-SelectedProfile;$s=if($p){@($p.Sources)|Select-Object -First 1}
   if($p -and $s -and $PreviewDialog -eq 'Verify'){$ovGrid.Rows[0].Selected=$true;[void](Request-VerifyScope $p $s)}
   if($s -and $PreviewDialog -eq 'Repair'){$st=Get-CenterRepairState $script:history $s.Id;if(-not $st.Needed){$st=[pscustomobject]@{Needed=$true;Differences=3;When=(Get-Date).AddHours(-2);Details=''}};[void](Request-Repair $s $st)}
+  if($p -and $PreviewDialog -eq 'KeepVersions'){[void](Show-VersionRetentionDialog $p)}
+  if($p -and $PreviewDialog -eq 'RetentionPreview'){[void](Request-RetentionApproval $p (Get-SampleRetentionPreview $p))}
   $form.Close();return
  }
  if($TestAction -eq 'Refresh'){
@@ -1549,7 +1605,9 @@ $form.Add_Shown({
   if($ovGrid.Rows.Count -gt 1){$ovGrid.Rows[1].Selected=$true;$s=Get-OverviewSource;$script:testLog.SecondSelected=[ordered]@{Source=$(if($s){$s.Label});Repair=$btnRepair.Enabled}}
   if($ovGrid.Rows.Count){$ovGrid.ClearSelection();$ovGrid.Rows[0].Selected=$true;$s=Get-OverviewSource;$script:testLog.FirstSelected=[ordered]@{Source=$(if($s){$s.Label});Repair=$btnRepair.Enabled}}
  }
- if($PreviewDialog -eq 'KeepVersions'){[void]$form.BeginInvoke([Action]{$p=Get-SelectedProfile;if($p){[void](Show-VersionRetentionDialog $p)}})}
+ # Answered by -Answer in a test run (see Show-VersionRetentionDialog and Show-Choice); what follows is what the link and the end of a run do.
+ if($PreviewDialog -eq 'KeepVersions'){if($script:testMode){Edit-VersionRetention}else{[void]$form.BeginInvoke([Action]{try{Edit-VersionRetention}catch{Show-Error $_}})}}
+ if($PreviewDialog -eq 'RetentionPreview'){$p=Get-SelectedProfile;if($p){$pv=Get-SampleRetentionPreview $p;$script:testLog.Retention=[ordered]@{Count=$pv.Count;Approved=[bool](Request-RetentionApproval $p $pv)}}}
  if($RenderPreview){
   if($PreviewWidth -gt 0){$form.ClientSize=[Drawing.Size]::new($PreviewWidth,$PreviewHeight);[Windows.Forms.Application]::DoEvents();Set-Zoom}
   Show-Page $PreviewTab;[Windows.Forms.Application]::DoEvents()
@@ -1569,7 +1627,7 @@ $refreshTimer=[Windows.Forms.Timer]::new();$refreshTimer.Interval=60000;$refresh
 $form.Add_FormClosed({foreach($t in $timer,$waitTimer,$speedTimer,$checkTimer,$zoomTimer,$refreshTimer,$showTimer){try{$t.Stop();$t.Dispose()}catch{}}})
 # Tests: what the window shows, written when it closes.
 if($TestState){$form.Add_FormClosed({try{
- $state=[ordered]@{Status=$runStatus.Text;Warning=$ovWarn.Text;WarningLevel=$(if(-not $ovWarn.Text){''}elseif($ovWarn.LinkColor -eq $stateInk.Stale){'Check'}else{'Failed'});GridTop=$ovGrid.Top;Drives=@($script:driveRows|ForEach-Object {[ordered]@{When=$_.When;Alert=$_.Alert}})
+ $state=[ordered]@{Status=$runStatus.Text;KeepVersions=$keepVersions.Text;Warning=$ovWarn.Text;WarningLevel=$(if(-not $ovWarn.Text){''}elseif($ovWarn.LinkColor -eq $stateInk.Stale){'Check'}else{'Failed'});GridTop=$ovGrid.Top;Drives=@($script:driveRows|ForEach-Object {[ordered]@{When=$_.When;Alert=$_.Alert}})
   Backup=$btnBackup.Enabled;BackupOne=$btnBackupOne.Enabled;Verify=$btnVerify.Enabled;Repair=$btnRepair.Enabled;Speed=$btnSpeed.Enabled;CheckStatus=$checkStatus.Text;SpeedResult=$speedResult.Text;LoadAdvice=$loadAdvice.Text
   Runs=@($runsGrid.Rows|ForEach-Object {[string]$_.Cells[2].Value+': '+[string]$_.Cells[6].Value});Log=$script:testLog}
  [IO.File]::WriteAllText($TestState,($state|ConvertTo-Json -Depth 6))
