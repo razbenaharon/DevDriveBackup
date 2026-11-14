@@ -36,7 +36,7 @@ $add=C Button 520 648 230 32 'Add selected files / folders'
 $clear=C Button 765 648 165 32 'Clear selection'
 $restore=C Button 945 648 185 32 'Restore selected...'
 $selectionLabel=C Label 20 691 1110 24 'Restore selection: 0 items. Folders include their contents. Double-click a folder to open it.'
-$status=C Label 20 725 1110 48 'Ready. Refresh history to load saved versions. The newest version of each computer/source set is protected from deletion.'
+$status=C Label 20 725 1110 48 'Ready. Refresh history to load saved versions. The newest version and the newest complete version of each computer/source set are protected from deletion.'
 $logs=C LinkLabel 20 782 1110 25 ''
 $script:history=@();$script:entries=@();$script:page=0;$script:pageSize=500;$script:currentPath='/';$script:snapshot=$null;$script:worker=$null;$script:run=$null;$script:operation=$null;$script:target=$null
 $script:basket=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -49,7 +49,8 @@ function Show-Versions {
  foreach($snapshot in @($script:history|Sort-Object {(ConvertTo-HistoryDate $_.time).UtcTicks} -Descending)){
   $date=(ConvertTo-HistoryDate $snapshot.time).LocalDateTime
   if($from.Checked -and $date.Date -lt $from.Value.Date){continue};if($to.Checked -and $date.Date -gt $to.Value.Date){continue}
-  $i=$versions.Rows.Add($false,$date.ToString('yyyy-MM-dd HH:mm:ss'),$snapshot.hostname,(@($snapshot.paths)-join '; '),$snapshot.id.Substring(0,12));$versions.Rows[$i].Tag=$snapshot
+  # A partial version (a backup that could not read every file) is labelled, so it is not taken for a complete one.
+  $i=$versions.Rows.Add($false,$date.ToString('yyyy-MM-dd HH:mm:ss')+$(if(Test-PartialSnapshot $snapshot){'  (partial)'}else{''}),$snapshot.hostname,(@($snapshot.paths)-join '; '),$snapshot.id.Substring(0,12));$versions.Rows[$i].Tag=$snapshot
  }
 }
 function Show-Files {
@@ -73,7 +74,7 @@ function Open-Folder([string]$path) {if(-not $script:snapshot){throw 'Browse a b
 function Confirm-Deletion($plan) {
  $dialog=[Windows.Forms.Form]::new();$dialog.Text='Delete backup history';$dialog.ClientSize=[Drawing.Size]::new(740,470);$dialog.StartPosition='CenterParent';$dialog.Font=$form.Font;$dialog.RightToLeft='No';$dialog.FormBorderStyle='FixedDialog';$dialog.MaximizeBox=$false
  $label=[Windows.Forms.Label]::new();$label.SetBounds(20,15,700,58);$label.Text='This permanently removes the listed backup versions. Their unique file versions will no longer be recoverable. Your source files are not deleted.';$dialog.Controls.Add($label)
- $list=[Windows.Forms.TextBox]::new();$list.SetBounds(20,80,700,180);$list.Multiline=$true;$list.ReadOnly=$true;$list.ScrollBars='Both';$list.WordWrap=$false;$list.Text=(@($plan|ForEach-Object {(ConvertTo-HistoryDate $_.time).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss')+'  '+$_.id})-join [Environment]::NewLine);$dialog.Controls.Add($list)
+ $list=[Windows.Forms.TextBox]::new();$list.SetBounds(20,80,700,180);$list.Multiline=$true;$list.ReadOnly=$true;$list.ScrollBars='Both';$list.WordWrap=$false;$list.Text=(@($plan|ForEach-Object {(ConvertTo-HistoryDate $_.time).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss')+'  '+$_.id+$(if(Test-PartialSnapshot $_){'  (partial)'}else{''})})-join [Environment]::NewLine);$dialog.Controls.Add($list)
  $reclaim=[Windows.Forms.CheckBox]::new();$reclaim.SetBounds(20,274,700,28);$reclaim.Text='Also reclaim unused storage (prune; may take time and temporarily need free space)';$dialog.Controls.Add($reclaim)
  $hint=[Windows.Forms.Label]::new();$hint.SetBounds(20,311,700,25);$hint.Text='Type DELETE to confirm deletion of '+$plan.Count+' selected version(s):';$dialog.Controls.Add($hint)
  $input=[Windows.Forms.TextBox]::new();$input.SetBounds(20,341,700,28);$dialog.Controls.Add($input)
@@ -108,7 +109,8 @@ $timer.Add_Tick({try{
  switch($script:operation){
   'Snapshots' {$script:history=@(Get-Content -LiteralPath (Join-Path $script:run 'ListingSnapshots.jsonl') -Raw|ConvertFrom-Json);Show-Versions;$status.Text='Loaded '+$script:history.Count+' backup version(s). Select a row and choose Browse selected version.'}
   'Files' {$items=[Collections.Generic.List[object]]::new();foreach($line in [IO.File]::ReadLines((Join-Path $script:run 'ListingFiles.jsonl'))){$item=$line|ConvertFrom-Json;if($item.type -and $item.path -ne $script:currentPath){$items.Add($item)}};$script:entries=@($items|Sort-Object @{Expression={if($_.type -eq 'dir'){0}else{1}}},name);$script:page=0;Show-Files;$status.Text='Browsing snapshot '+$script:snapshot.Substring(0,12)+'. Files are loaded one folder at a time.'}
-  'Restore' {$status.Text='Restore completed and contents verified. Restored to: '+$script:target;[void][Windows.Forms.MessageBox]::Show($form,$status.Text,'Restore completed')}
+  # restic skips its content check when it could not set the date of a protected parent folder: say so.
+  'Restore' {$status.Text=if($s.PSObject.Properties['ContentVerified'] -and $s.ContentVerified -eq $false){'Restore completed, but the content of the restored files was NOT verified: the dates of '+@($s.Warnings).Count+' protected parent folder(s) could not be set, and the check is skipped then. The files are in: '+$script:target}else{'Restore completed and contents verified. Restored to: '+$script:target};[void][Windows.Forms.MessageBox]::Show($form,$status.Text,'Restore completed')}
   'Forget' {$script:entries=@();$script:snapshot=$null;Reset-Selection;Show-Files;Start-HistoryAction 'Snapshots'}
  }
  }catch{$timer.Stop();foreach($control in $busyControls){$control.Enabled=$true};Error-Message $_.Exception.Message}})

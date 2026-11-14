@@ -52,10 +52,13 @@ try{
  }
  # Another program's version (no devdrive tag) must never be touched.
  [void](Invoke-Restic @('backup','--json','--host','pc','--time',$newest.AddDays(-300).ToString('yyyy-MM-dd HH:mm:ss'),$src))
- $planJson=(Invoke-Restic ((Get-RetentionArguments 7 4 3)+'--json'))|Where-Object {"$_".StartsWith('[')}|Select-Object -First 1
+ # Another computer sharing the repository: its versions are its own rule's business, also the one far outside this rule.
+ foreach($d in 400,250){[void](Invoke-Restic @('backup','--json','--host','laptop','--tag','devdrive','--time',$newest.AddDays(-$d).ToString('yyyy-MM-dd HH:mm:ss'),$src))}
+ $planJson=(Invoke-Restic ((Get-RetentionArguments 7 4 3 'pc')+'--json'))|Where-Object {"$_".StartsWith('[')}|Select-Object -First 1
  $plan=@($planJson|ConvertFrom-Json)
  $snapshots=@((Invoke-Restic @('snapshots','--json','--tag','devdrive'))|Where-Object {"$_".StartsWith('[')}|Select-Object -First 1|ConvertFrom-Json)
- $remove=@(Get-RetentionRemovals $plan $ids[0] $snapshots)
+ $remove=@(Get-RetentionRemovals $plan $ids[0] $snapshots 'pc')
+ Assert (@($remove|Where-Object {$_.hostname -ne 'pc'}).Count -eq 0 -and @($snapshots|Where-Object {$_.hostname -eq 'laptop'}).Count -eq 2) 'another computer''s versions are never in this computer''s clean-up'
  $gone=@($remove|ForEach-Object {$_.id})
  $keptAges=@($ages|Where-Object {$ids[$_] -notin $gone})
  Write-Output ("  kept, days before the newest: "+(($keptAges|Sort-Object) -join ', '))
@@ -68,7 +71,7 @@ try{
  [void](Invoke-Restic (@('forget')+$gone+'--prune'))
  [void](Invoke-Restic @('check'))
  $left=@((Invoke-Restic @('snapshots','--json'))|Where-Object {"$_".StartsWith('[')}|Select-Object -First 1|ConvertFrom-Json)
- Assert ($left.Count -eq ($keptAges.Count+1) -and @($left|Where-Object {-not $_.tags}).Count -eq 1) 'after deleting and freeing space the repository checks clean, and the untagged version is untouched'
+ Assert ($left.Count -eq ($keptAges.Count+3) -and @($left|Where-Object {-not $_.tags}).Count -eq 1 -and @($left|Where-Object {$_.hostname -eq 'laptop'}).Count -eq 2) 'after deleting and freeing space the repository checks clean, and the untagged version and the other computer''s versions are untouched'
  # Read the file straight out of the newest version (a restore would recreate the folder permissions too).
  $inside='/'+$src.Replace(':','').Replace('\','/')+'/file.txt'
  Assert ((@(Invoke-Restic @('dump',$ids[0],$inside)) -join '') -eq 'version from 0 days before') 'the newest version still reads back intact'

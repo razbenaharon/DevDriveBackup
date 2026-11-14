@@ -13,7 +13,11 @@ param(
  # (all 0: keep every version).
  [ValidateRange(0,3650)][int]$KeepDays=0,
  [ValidateRange(0,520)][int]$KeepWeeks=0,
- [ValidateRange(0,240)][int]$KeepMonths=0
+ [ValidateRange(0,240)][int]$KeepMonths=0,
+ # Test suite only: an existing folder under the temporary directory that stands in for the backup
+ # drive (repository, engine cache, run folders), so the tests need no second drive and never touch
+ # the real state. A real run never passes it and keeps every volume check.
+ [string]$TestRoot
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -21,9 +25,17 @@ Import-Module (Join-Path $PSScriptRoot 'Backup.Status.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.History.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Security.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Selection.psm1') -Force
-if(-not $RunDirectory){$RunDirectory=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\runs\'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N'))}
+if($TestRoot){
+ $TestRoot=[IO.Path]::GetFullPath($TestRoot).TrimEnd('\')
+ if(-not ($TestRoot+'\').StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $TestRoot -PathType Container)){throw 'TestRoot is for the test suite only: an existing folder under the temporary directory'}
+}
+if(-not $RunDirectory){$RunDirectory=Join-Path $(if($TestRoot){$TestRoot}else{Join-Path $env:LOCALAPPDATA 'DevDriveMirror'}) ('runs\'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N'))}
 New-Item -ItemType Directory -Path $RunDirectory -Force | Out-Null
-$script:status=[ordered]@{State='Starting';Action=$Action;WorkerPid=$PID;StartedUtc=[DateTime]::UtcNow.ToString('o');UpdatedUtc='';Progress=$null;MemoryMiB=0;PeakMemoryMiB=0;CpuPercent=0;Error=$null;Snapshot=$null;RunDirectory=$RunDirectory}
+# BackupSummary: restic's own summary of the backup step (Progress ends up holding the summary of the
+# check that follows). Partial: the backup saved a version but could not read every file. LockReleased:
+# nothing, or the locks of an earlier run that this run removed before trying a step again (Run-Engine).
+$script:lockExamined=$false
+$script:status=[ordered]@{State='Starting';Action=$Action;WorkerPid=$PID;StartedUtc=[DateTime]::UtcNow.ToString('o');UpdatedUtc='';Progress=$null;MemoryMiB=0;PeakMemoryMiB=0;CpuPercent=0;Error=$null;Snapshot=$null;RunDirectory=$RunDirectory;BackupSummary=$null;Partial=$false;LockReleased=$null}
 function Save-Status {
  $script:status.UpdatedUtc=[DateTime]::UtcNow.ToString('o')
  [void](Write-BackupStatus $script:status (Join-Path $RunDirectory 'status.json') -BestEffort)
@@ -32,7 +44,7 @@ function Assert-PlainAncestors([string]$Path) {
  $p=[IO.Path]::GetFullPath($Path)
  while($p){if(Test-Path -LiteralPath $p){if((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw "Linked repository/root/restore path refused: $p"}};$parent=[IO.Directory]::GetParent($p);if(-not $parent){break};$p=$parent.FullName}
 }
-function Run-Engine([string[]]$EngineArguments,[string]$Stage,[string]$InputSecret) {
+function Invoke-EngineStep([string[]]$EngineArguments,[string]$Stage,[string]$InputSecret) {
  $script:status.State=$Stage;Save-Status
  $psi=[Diagnostics.ProcessStartInfo]::new($script:engine);$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
  # Pruning needs at least two connections, whether it runs with forget or on its own.
@@ -60,7 +72,8 @@ function Run-Engine([string[]]$EngineArguments,[string]$Stage,[string]$InputSecr
     $line=$lineTask.Result
     if($null -eq $line){break}
     $output.WriteLine($line);$output.Flush()
-    try{$event=$line|ConvertFrom-Json;if($event.message_type -eq 'status'){$script:status.Progress=$event};if($event.message_type -eq 'summary'){$script:status.Progress=$event;if($event.PSObject.Properties['snapshot_id']){$script:status.Snapshot=$event.snapshot_id}}}catch{}
+    try{$event=$line|ConvertFrom-Json;if($event.message_type -eq 'status'){$script:status.Progress=$event};if($event.message_type -eq 'summary'){$script:status.Progress=$event;if($event.PSObject.Properties['snapshot_id']){$script:status.Snapshot=$event.snapshot_id}
+     if($Stage -eq 'BackingUp'){$own=[ordered]@{};foreach($name in @('files_new','files_changed','data_added','total_files_processed','total_bytes_processed','snapshot_id')){$own[$name]=if($event.PSObject.Properties[$name]){$event.$name}else{$null}};$script:status.BackupSummary=$own}}}catch{}
     $lineTask=$process.StandardOutput.ReadLineAsync()
    }
    if($watch.Elapsed.TotalSeconds-$lastSave -ge 2){
@@ -71,22 +84,95 @@ function Run-Engine([string[]]$EngineArguments,[string]$Stage,[string]$InputSecr
    }
   }
   $process.WaitForExit();$errorText=$errors.GetAwaiter().GetResult();[IO.File]::WriteAllText((Join-Path $RunDirectory ($Stage+'.errors.log')),$errorText)
-  # A restore below a protected folder (for example C:\Users) can restore every file but fail to set
-  # the timestamps of the recreated parent folders. That is a warning, not a failed restore.
-  $ignored=@($errorText -split "`r?`n"|Where-Object {$_ -match '^ignoring error for '})
-  if($Stage -eq 'Restoring' -and $process.ExitCode -eq 1 -and $ignored.Count -and -not @($ignored|Where-Object {$_ -notmatch 'failed to restore (timestamp|attributes|security descriptor)'}).Count){
-   $script:status|Add-Member -NotePropertyName Warnings -NotePropertyValue @($ignored) -Force
-  }elseif($process.ExitCode -ne 0){
-   $hint=if($Stage -eq 'DeletingHistory'){'History deletion may be partial. Refresh history before retrying.'}elseif($Stage -eq 'BackingUp'){'Code 3 means an incomplete snapshot.'}else{'The operation did not complete successfully.'}
-   $engineError=[InvalidOperationException]::new("Restic $Stage returned exit code $($process.ExitCode). $hint See $Stage.errors.log. A memory allocation failure requires a higher memory budget.")
+  if($process.ExitCode -ne 0){
+   $engineError=[InvalidOperationException]::new((Get-EngineFailureText $Stage $process.ExitCode))
    $engineError.Data['ExitCode']=$process.ExitCode;throw $engineError
   }
  }finally{if($started -and -not $process.HasExited){$process.Kill($true)};$output.Dispose();$job.Dispose();$process.Dispose()}
+}
+function Get-LockProcess($Id) {
+ # What runs on this computer under a lock's process number. Nothing: no process has that number.
+ # Without a start time: there is one, but it cannot be examined (for example another account's).
+ try{$p=[Diagnostics.Process]::GetProcessById([int]$Id)}catch [ArgumentException]{return}catch{return [pscustomobject]@{Name='';StartedUtc=$null}}
+ try{[pscustomobject]@{Name=$p.ProcessName;StartedUtc=$p.StartTime.ToUniversalTime()}}
+ catch{try{[void][Diagnostics.Process]::GetProcessById([int]$Id)}catch [ArgumentException]{return}catch{};[pscustomobject]@{Name='';StartedUtc=$null}}
+ finally{$p.Dispose()}
+}
+function Read-RepositoryLockIds([string]$Stage) {
+ Invoke-EngineStep @('list','locks','--no-lock') $Stage
+ @([IO.File]::ReadAllLines((Join-Path $RunDirectory ($Stage+'.jsonl')))|ForEach-Object {$_.Trim()}|Where-Object {$_})
+}
+function Clear-EndedLocks {
+ # Reads every lock in the repository and removes them only when all of them were left by runs on this
+ # computer that have ended (Get-LockReleaseDecision). Removing is left to restic's own "unlock", never
+ # with --remove-all: it lets go of a lock of this computer whose process is gone, or of one that is
+ # over 30 minutes old, and keeps every other one, so a lock goes only when both tests agree. Returns
+ # the locks that are gone afterwards and, when none is, why. The worker's own run lock is held here.
+ $found=@(foreach($id in @(Read-RepositoryLockIds 'ReadingLocks')){
+  $record=$null;$process=$null
+  if($id -cmatch '^[0-9a-f]{64}$'){try{Invoke-EngineStep @('cat','lock',$id,'--no-lock') 'ReadingLock';$record=Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingLock.jsonl') -Raw|ConvertFrom-Json}catch{$record=$null}}
+  if($record -is [pscustomobject] -and $record.PSObject.Properties['pid']){$process=Get-LockProcess $record.pid}
+  [pscustomobject]@{Id=$id;Lock=$record;Process=$process}
+ })
+ # restic records the computer's DNS host name, as this returns it.
+ $decision=Get-LockReleaseDecision $found ([Net.Dns]::GetHostName())
+ if(-not $decision.Release){return [pscustomobject]@{Released=@();Reason=$decision.Reason}}
+ Invoke-EngineStep @('unlock') 'ReleasingLock'
+ $left=@(Read-RepositoryLockIds 'ReadingLocksAgain')
+ $gone=@($decision.Locks|Where-Object {$_.Id -cnotin $left})
+ $kept=@($decision.Locks|Where-Object {$_.Id -cin $left})
+ [pscustomobject]@{Released=$gone;Reason=$(if($kept.Count){"the run that made the lock has ended, but restic still sees a process under its number ($($kept[0].Pid)) and keeps the lock until $(([DateTimeOffset]::Parse($kept[0].CreatedUtc,[Globalization.CultureInfo]::InvariantCulture)).ToLocalTime().AddMinutes(30).ToString('HH:mm')), 30 minutes after it was made. Try again after that."}else{''})}
+}
+function Run-Engine([string[]]$EngineArguments,[string]$Stage,[string]$InputSecret) {
+ # One restic step. A run that was stopped, crashed or was ended by the memory cap leaves its lock in the
+ # repository, and every later step that needs the repository then ends with exit code 11. The first
+ # time that happens in a run the locks are examined; when they were all left by ended runs of this
+ # computer they are removed, the result records it (LockReleased) and the step is tried once more.
+ # Otherwise nothing is removed and the failure says whose lock it is. A step that is locked out later
+ # in the same run fails as it is: one removal and one second try per run.
+ try{Invoke-EngineStep @PSBoundParameters;return}catch{if($_.Exception.Data['ExitCode'] -ne 11 -or $script:lockExamined){throw};$locked=$_}
+ $script:lockExamined=$true;$outcome=$null
+ try{$outcome=Clear-EndedLocks}catch{}
+ if(-not $outcome -or (-not @($outcome.Released).Count -and -not $outcome.Reason)){throw $locked}
+ if(-not @($outcome.Released).Count){
+  $stillLocked=[InvalidOperationException]::new((Get-EngineFailureText $Stage 11 $outcome.Reason));$stillLocked.Data['ExitCode']=11;throw $stillLocked
+ }
+ $script:status.LockReleased=[ordered]@{Stage=$Stage;Locks=@($outcome.Released|ForEach-Object {[ordered]@{Id=$_.Id;Pid=$_.Pid;CreatedUtc=$_.CreatedUtc;Exclusive=$_.Exclusive}})}
+ # What the first try reported stays beside the second try's files.
+ try{[IO.File]::Move((Join-Path $RunDirectory ($Stage+'.errors.log')),(Join-Path $RunDirectory ($Stage+'.locked.errors.log')),$true)}catch{}
+ Invoke-EngineStep @PSBoundParameters
 }
 function Save-RecoveryLocation([string]$Path) {
  $fresh=Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json
  if($fresh.PasswordDpapiPath -ine $script:config.PasswordDpapiPath -or $fresh.DestinationVolumeId -cne $script:config.DestinationVolumeId -or $fresh.RepositoryFolder -cne $script:config.RepositoryFolder){throw 'Configuration changed during key management. Resume with the original repository configuration.'}
  $fresh.RecoveryKeyPath=$Path;[void](Write-BackupStatus $fresh $ConfigPath);$script:config=$fresh
+}
+function Set-PartialMark([string]$Id) {
+ # Marks a version partial and returns its new ID (changing the tag changes the ID).
+ Run-Engine (Get-PartialMarkArguments $Id) 'MarkingPartial'
+ $changed=@([IO.File]::ReadAllLines((Join-Path $RunDirectory 'MarkingPartial.jsonl'))|ForEach-Object {try{$_|ConvertFrom-Json}catch{}}|Where-Object {$_ -and $_ -is [pscustomobject] -and $_.PSObject.Properties['message_type'] -and $_.message_type -eq 'changed'})
+ if($changed.Count -ne 1 -or $changed[0].new_snapshot_id -cnotmatch '^[0-9a-f]{64}$'){throw 'the engine did not report the marked version'}
+ $changed[0].new_snapshot_id
+}
+# A partial version that could not be marked (for example while the repository is locked) still looks
+# like a complete one. It is noted beside the password file and marked on a later run, before anything
+# is deleted: until then neither the clean-up nor a deletion by hand goes ahead.
+function Save-PendingPartialMark([string]$Id) {
+ $path=$keyPath+'.partial-pending.local.json'
+ $ids=@(if(Test-Path -LiteralPath $path){Get-Content -LiteralPath $path -Raw|ConvertFrom-Json})+$Id
+ [void](Write-BackupStatus @($ids|Select-Object -Unique) $path)
+}
+function Complete-PendingPartialMarks {
+ $path=$keyPath+'.partial-pending.local.json'
+ if(-not(Test-Path -LiteralPath $path)){return}
+ $pending=@(Get-Content -LiteralPath $path -Raw|ConvertFrom-Json)
+ Run-Engine @('snapshots') 'ReadingPartialMarks'
+ $saved=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingPartialMarks.jsonl') -Raw|ConvertFrom-Json)
+ foreach($id in $pending){
+  $version=@($saved|Where-Object {$_.id -ceq $id})
+  if($version.Count -and -not (Test-PartialSnapshot $version[0])){[void](Set-PartialMark $id)}
+ }
+ [IO.File]::Delete($path)
 }
 function Read-RepositoryKeys([string]$Stage) {
  Run-Engine @('key','list') $Stage
@@ -98,7 +184,7 @@ function Invoke-KeyManagement {
   if(-not(Test-Path -LiteralPath $journalPath)){throw 'There is no interrupted password change to resume'}
   $journal=Get-Content -LiteralPath $journalPath -Raw|ConvertFrom-Json
   if($journal.Version -ne 1 -or $journal.OldKeyId -cnotmatch '^[0-9a-f]{64}$'){throw 'Password-change journal is invalid; keep the existing protected credential and recovery files'}
-  if($journal.Repository -ine $script:repository -or $journal.ConfigPath -ine [IO.Path]::GetFullPath($ConfigPath)){throw 'Password-change journal belongs to another configuration or repository'}
+  Assert-RotationJournalTarget $journal ([string]$script:config.DestinationVolumeId) ([string]$script:config.RepositoryFolder) $script:repository
   if($RequestPath){
    $request=Get-Content -LiteralPath $RequestPath -Raw|ConvertFrom-Json
    if($request.RecoveryKeyPath -ine $journal.RecoveryKeyPath){
@@ -113,6 +199,8 @@ function Invoke-KeyManagement {
   $export=Assert-PrivateExportPath $request.RecoveryKeyPath @($source,$script:repository,$PSScriptRoot) @($keyPath,$ConfigPath,$journalPath)
   if(Test-Path -LiteralPath $export){throw 'The recovery-key destination already exists. Choose a new file; existing files are never overwritten.'}
   if($Action -eq 'ExportKey'){
+   # A recovery key that does not open the repository is worse than none: check the stored password first.
+   try{[void](Read-RepositoryKeys 'CheckingPassword')}catch{if($_.Exception.Data['ExitCode'] -eq 12){throw 'The password stored on this computer does not open this backup repository, so no recovery key was saved. Use an earlier recovery key file to regain access.'};throw}
    New-PrivateTextFile $export (Get-RecoveryKeyText $script:repository $script:password)
    Save-RecoveryLocation $export
    $script:status|Add-Member -NotePropertyName RecoveryKeyPath -NotePropertyValue $export -Force
@@ -124,7 +212,7 @@ function Invoke-KeyManagement {
   if($newPassword -ceq $script:password){throw 'The new password must differ from the current password'}
   $keys=@(Read-RepositoryKeys 'ReadingAccessKeys');$current=@($keys|Where-Object {$_.current -eq $true})
   if($current.Count -ne 1 -or $current[0].id -cnotmatch '^[0-9a-f]{64}$'){throw 'Cannot identify the currently used repository access key'}
-  $journal=[pscustomobject]@{Version=1;Repository=$script:repository;ConfigPath=[IO.Path]::GetFullPath($ConfigPath);RecoveryKeyPath=$export;OldKeyId=$current[0].id;NewKeyId=$null;OldPasswordDpapi=([IO.File]::ReadAllText($keyPath)).Trim();NewPasswordDpapi=$protectedNew.Trim();Phase='Prepared';CreatedUtc=[DateTime]::UtcNow.ToString('o')}
+  $journal=[pscustomobject]@{Version=1;Repository=$script:repository;ConfigPath=[IO.Path]::GetFullPath($ConfigPath);DestinationVolumeId=[string]$script:config.DestinationVolumeId;RepositoryFolder=[string]$script:config.RepositoryFolder;RecoveryKeyPath=$export;OldKeyId=$current[0].id;NewKeyId=$null;OldPasswordDpapi=([IO.File]::ReadAllText($keyPath)).Trim();NewPasswordDpapi=$protectedNew.Trim();Phase='Prepared';CreatedUtc=[DateTime]::UtcNow.ToString('o')}
   New-PrivateTextFile $journalPath ($journal|ConvertTo-Json -Depth 6)
  }
  $oldPassword=[Net.NetworkCredential]::new('',($journal.OldPasswordDpapi|ConvertTo-SecureString)).Password
@@ -158,6 +246,8 @@ function Invoke-KeyManagement {
 try {
  Save-Status
  $script:config=Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json
+ # The test folder never goes together with real settings or key files.
+ if($TestRoot){$temporary=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\';foreach($testPath in @($ConfigPath,$script:config.PasswordDpapiPath,$script:config.RecoveryKeyPath)){if(-not [IO.Path]::GetFullPath([string]$testPath).StartsWith($temporary,[StringComparison]::OrdinalIgnoreCase)){throw 'TestRoot is for the test suite only: the settings and key files must be under the temporary directory too'}}}
  $script:engine=Join-Path $PSScriptRoot 'bin\restic_0.19.1_windows_amd64.exe'
  if(-not(Test-Path -LiteralPath $script:engine)){throw 'Run Install-BackupEngine.ps1 first'}
  if($script:config.MemoryMiB -lt 512 -or $script:config.MemoryMiB -gt 8192){throw 'Memory budget must be 512..8192 MiB'}
@@ -169,14 +259,18 @@ try {
  $script:backendConnections=if($script:config.PSObject.Properties['BackendConnections']){[int]$script:config.BackendConnections}else{1}
  if($script:backendConnections -lt 1 -or $script:backendConnections -gt 8){throw 'BackendConnections must be 1..8'}
  $source=[IO.Path]::GetFullPath($script:config.Source).TrimEnd('\')+'\'
- if($Action -in @('Backup','Preview')){Assert-PlainAncestors $source;if((Get-Volume -DriveLetter $source.Substring(0,1)).UniqueId -ne $script:config.SourceVolumeId){throw 'Source volume identity changed'}}
- $volume=@(Get-Volume -UniqueId $script:config.DestinationVolumeId|Where-Object {$_.DriveLetter})
- if($volume.Count -ne 1){throw 'Expected destination volume is missing or ambiguous'}
- if($volume[0].UniqueId -eq $script:config.SourceVolumeId){throw 'Backup must use a separate volume'}
+ if($Action -in @('Backup','Preview')){Assert-PlainAncestors $source;if(-not $TestRoot -and (Get-Volume -DriveLetter $source.Substring(0,1)).UniqueId -ne $script:config.SourceVolumeId){throw 'Source volume identity changed'}}
+ if($TestRoot){$destinationRoot=$TestRoot;$free=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($TestRoot)).AvailableFreeSpace}
+ else{
+  $volume=@(Get-Volume -UniqueId $script:config.DestinationVolumeId|Where-Object {$_.DriveLetter})
+  if($volume.Count -ne 1){throw 'Expected destination volume is missing or ambiguous'}
+  if($volume[0].UniqueId -eq $script:config.SourceVolumeId){throw 'Backup must use a separate volume'}
+  $destinationRoot=$volume[0].DriveLetter+':\';$free=$volume[0].SizeRemaining
+ }
  $folder=[string]$script:config.RepositoryFolder
  if($folder -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' -or $folder.EndsWith('.')){throw 'RepositoryFolder must be a single plain folder name'}
- $script:repository=Join-Path ($volume[0].DriveLetter+':\') $folder;Assert-PlainAncestors $script:repository
- if($Action -in @('Backup','Preview') -and $volume[0].SizeRemaining -lt 5GB){throw 'Less than 5 GiB free on the backup volume'}
+ $script:repository=Join-Path $destinationRoot $folder;Assert-PlainAncestors $script:repository
+ if($Action -in @('Backup','Preview') -and $free -lt 5GB){throw 'Less than 5 GiB free on the backup volume'}
  # What to back up comes from the per-folder Mode shared with the plain mirror (Versioned or Both).
  $sources=@();$selectionExcludes=@();$privateExcludes=@()
  if($Action -in @('Backup','Preview')){
@@ -213,7 +307,7 @@ try {
   })
   $script:status.Sources=$sources;$script:status.SelectionExcludes=$selectionExcludes
  }
- $script:cache=Join-Path $env:LOCALAPPDATA 'DevDriveMirror\restic-cache';New-Item -ItemType Directory -Path $script:cache -Force|Out-Null
+ $script:cache=if($TestRoot){Join-Path $TestRoot 'engine-cache'}else{Join-Path $env:LOCALAPPDATA 'DevDriveMirror\restic-cache'};New-Item -ItemType Directory -Path $script:cache -Force|Out-Null
  $keyPath=[IO.Path]::GetFullPath($script:config.PasswordDpapiPath);$exists=Test-Path -LiteralPath (Join-Path $script:repository 'config')
  $recoveryPath=[IO.Path]::GetFullPath($script:config.RecoveryKeyPath)
  if($keyPath -ieq $recoveryPath){throw 'Protected password and portable recovery key must be different files'}
@@ -251,7 +345,23 @@ try {
  switch($Action){
   {$_ -in @('ExportKey','ChangePassword','ResumePasswordChange')} {Invoke-KeyManagement}
   'Backup' {
-   Run-Engine ($base+@('--')+$sources) 'BackingUp';Run-Engine @('check') 'CheckingStructure'
+   try{Run-Engine ($base+@('--')+$sources) 'BackingUp'}
+   catch{
+    # Exit code 3: restic saved a version although some files could not be read. Mark it (the tag
+    # changes, and with it the version's ID) so the clean-up rule and the newest-complete protection
+    # never treat it as a complete version, then fail the run as before.
+    if($_.Exception.Data['ExitCode'] -ne 3 -or -not $script:status.Snapshot){throw}
+    $script:status.Partial=$true;$markError=$null
+    try{
+     $marked=Set-PartialMark $script:status.Snapshot
+     $script:status.Snapshot=$marked;if($script:status.BackupSummary){$script:status.BackupSummary.snapshot_id=$marked}
+    }catch{$markError=$_.Exception.Message;try{Save-PendingPartialMark $script:status.Snapshot}catch{$markError+=' It could not be noted for later either: '+$_.Exception.Message}}
+    $partialText='Some files could not be read, so this version is incomplete (restic exit code 3). '
+    if($markError){throw ($partialText+"It was saved, but could not be marked as partial yet, so for now the history shows it like a complete version; it is marked on a later run, before any version is deleted. See BackingUp.errors.log for the files that were skipped, then back up again. ($markError)")}
+    throw ($partialText+'It was saved and marked as partial: the history shows it as partial and the automatic clean-up of old versions leaves it alone. See BackingUp.errors.log for the files that were skipped (for example files another program keeps open), then back up again.')
+   }
+   try{Run-Engine @('check') 'CheckingStructure'}
+   catch{if($_.Exception.Data['ExitCode'] -eq 11){throw ('The new version was saved, but it could not be checked. '+$_.Exception.Message)};throw}
    if($KeepDays+$KeepWeeks+$KeepMonths -gt 0){
     # The backup itself has succeeded and been checked. A clean-up that fails is reported, not a failed
     # backup. Old versions are deleted first and their space freed in a second step, so the result says
@@ -259,29 +369,35 @@ try {
     # a repository that fails this check fails the run, since it may be damaged.
     $new=$script:status.Snapshot
     $retention=[ordered]@{Days=$KeepDays;Weeks=$KeepWeeks;Months=$KeepMonths;Removed=0;Kept=$null;SpaceFreed=$false}
-    $remove=@();$deleting=$false
+    $remove=@();$deleting=$false;$computer=''
     try{
-     Run-Engine (Get-RetentionArguments $KeepDays $KeepWeeks $KeepMonths) 'PlanningCleanUp'
-     $plan=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'PlanningCleanUp.jsonl') -Raw|ConvertFrom-Json)
+     # The rule covers this computer's complete versions only (tag devdrive: a partial version carries
+     # another tag). The computer name is read from the version just made, as restic recorded it.
+     try{Complete-PendingPartialMarks}catch{throw "An earlier partial version is not marked yet, so nothing was cleaned up. $($_.Exception.Message)"}
      Run-Engine @('snapshots','--tag','devdrive') 'ReadingHistory'
      $available=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistory.jsonl') -Raw|ConvertFrom-Json)
-     $remove=@(Get-RetentionRemovals $plan $new $available)
+     $made=@($available|Where-Object {$new -and $_.id -ceq $new})
+     if($made.Count -ne 1 -or -not $made[0].hostname){throw 'The version this backup just made was not found among the saved versions, so the clean-up cannot protect it. Nothing was deleted.'}
+     $computer=[string]$made[0].hostname
+     Run-Engine (Get-RetentionArguments $KeepDays $KeepWeeks $KeepMonths $computer) 'PlanningCleanUp'
+     $plan=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'PlanningCleanUp.jsonl') -Raw|ConvertFrom-Json)
+     $remove=@(Get-RetentionRemovals $plan $new $available $computer)
      [IO.File]::WriteAllText((Join-Path $RunDirectory 'clean-up-plan.json'),(ConvertTo-Json @($remove) -Depth 8))
-     $retention.Kept=$available.Count-$remove.Count
+     $retention.Kept=@($available|Where-Object {$_.hostname -ceq $computer}).Count-$remove.Count
      if($remove.Count){
       $deleting=$true
-      Run-Engine (@('forget')+@($remove|ForEach-Object {$_.id})) 'DeletingOldVersions'
-      $retention.Removed=$remove.Count
+      # In batches: one command line cannot hold more than about 500 IDs.
+      foreach($batch in @(Split-SnapshotIdBatches @($remove|ForEach-Object {$_.id}))){Run-Engine (@('forget')+@($batch)) 'DeletingOldVersions';$retention.Removed+=@($batch).Count}
       Run-Engine @('prune') 'FreeingSpace'
       $retention.SpaceFreed=$true
      }
     }catch{
      $retention.Error=$_.Exception.Message
      # Deleting may have stopped part way: count the versions that are really gone.
-     if($remove.Count -and -not $retention.Removed){
+     if($remove.Count -and $retention.Removed -lt $remove.Count){
       try{
        Run-Engine @('snapshots','--tag','devdrive') 'ReadingHistoryAgain'
-       $still=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistoryAgain.jsonl') -Raw|ConvertFrom-Json|ForEach-Object {$_.id})
+       $still=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistoryAgain.jsonl') -Raw|ConvertFrom-Json|Where-Object {$_.hostname -ceq $computer}|ForEach-Object {$_.id})
        $retention.Removed=@($remove|Where-Object {$_.id -notin $still}).Count
        $retention.Kept=@($still).Count
       }catch{}
@@ -308,13 +424,18 @@ try {
    if(-not $RequestPath){throw 'An explicit history deletion request is required'}
    $request=Get-Content -LiteralPath $RequestPath -Raw|ConvertFrom-Json
    if($request.Confirmation -cne 'DELETE SELECTED HISTORY'){throw 'History deletion was not confirmed'}
+   try{Complete-PendingPartialMarks}catch{throw "An earlier partial version is not marked yet, so nothing was deleted. $($_.Exception.Message)"}
    Run-Engine @('snapshots') 'ReadingHistory'
    $available=Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingHistory.jsonl') -Raw|ConvertFrom-Json
    $plan=@(Get-HistoryDeletionPlan $available @($request.SnapshotIds))
    [IO.File]::WriteAllText((Join-Path $RunDirectory 'deletion-plan.json'),($plan|ConvertTo-Json -Depth 8))
-   $forgetArgs=@('forget')+@($plan.id)
-   if($request.ReclaimSpace -eq $true){$forgetArgs+='--prune'}
-   Run-Engine $forgetArgs 'DeletingHistory'
+   # In batches: one command line cannot hold more than about 500 IDs. Space is reclaimed with the last.
+   $batches=@(Split-SnapshotIdBatches @($plan|ForEach-Object {$_.id}))
+   for($i=0;$i -lt $batches.Count;$i++){
+    $forgetArgs=@('forget')+@($batches[$i])
+    if($request.ReclaimSpace -eq $true -and $i -eq $batches.Count-1){$forgetArgs+='--prune'}
+    Run-Engine $forgetArgs 'DeletingHistory'
+   }
    Run-Engine @('check') 'CheckingStructure'
   }
   'Restore' {
@@ -338,7 +459,23 @@ try {
     $restoreArguments+=@('--include-file',$includeFile)
    }
    foreach($path in $RestoreInclude){$restoreArguments+=@('--include',$path)}
-   Run-Engine $restoreArguments 'Restoring'
+   try{Run-Engine $restoreArguments 'Restoring'}
+   catch{
+    # A restore below a protected folder (for example C:\Users) can restore every file but fail to set
+    # the dates of the recreated parent folders; restic then ends with exit code 1 and skips its content
+    # check. That is a warning, not a failed restore, but the restore is reported as not verified. Which
+    # folders are parents is read from the restored version itself.
+    if($_.Exception.Data['ExitCode'] -ne 1){throw}
+    $failure=$_;$summary=$script:status.Progress;$warnings=@()
+    try{
+     Run-Engine @('snapshots',$Snapshot) 'ReadingVersion'
+     $version=@(Get-Content -LiteralPath (Join-Path $RunDirectory 'ReadingVersion.jsonl') -Raw|ConvertFrom-Json)
+     if($version.Count -eq 1){$warnings=@(Get-RestoreParentWarnings ([IO.File]::ReadAllText((Join-Path $RunDirectory 'Restoring.errors.log'))) @($version[0].paths) $summary)}
+    }catch{}
+    if(-not $warnings.Count){throw $failure}
+    $script:status.Warnings=$warnings
+   }
+   $script:status.ContentVerified=-not $script:status.Contains('Warnings')
   }
  }
  $script:status.State='Completed';$script:status.UpdatedUtc=[DateTime]::UtcNow.ToString('o');[void](Write-BackupStatus $script:status (Join-Path $RunDirectory 'result.json'));Save-Status

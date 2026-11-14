@@ -24,7 +24,8 @@ function Run($action,$extra=@{}){
  $state
 }
 $first=Run 'Backup';Assert ($first.Snapshot.Length -gt 7) 'encrypted first snapshot created'
-Assert ($first.PeakMemoryMiB -lt 512) '512 MiB memory budget observed'
+# Peak resident memory as reported by the worker; the hard cap itself is tested by Test-BackupResourceControls.ps1.
+Assert ($first.PeakMemoryMiB -gt 0 -and $first.PeakMemoryMiB -lt 512) 'peak memory of the engine is reported and stays below the 512 MiB budget'
 $restored=Join-Path $private 'restored-first'
 [void](Run 'Restore' @{RestoreTarget=$restored;Snapshot=$first.Snapshot})
 $file=Get-ChildItem -LiteralPath $restored -Recurse -File|Where-Object {$_.Name -eq 'עברית [sample].txt'}
@@ -90,7 +91,7 @@ Assert ($remaining.Count -eq 1 -and $remaining[0].id -eq $forced.Snapshot) 'expl
 Assert ([IO.File]::ReadAllText($changed) -eq 'forced version') 'retained snapshot restores after history pruning without source changes'
 [IO.File]::WriteAllText($changed,'version with clean-up')
 $kept=Run 'Backup' @{KeepDays=7;KeepWeeks=4;KeepMonths=3}
-Assert ($kept.Retention -and -not $kept.Retention.PSObject.Properties['Error'] -and $kept.Retention.Removed -eq 0 -and $kept.Retention.Kept -eq 2) 'a backup with Keep versions plans the clean-up and keeps both versions of today'
+Assert ($kept.Retention -and -not $kept.Retention.PSObject.Properties['Error'] -and $kept.Retention.Removed -eq 0 -and $kept.Retention.Kept -eq 2) 'a backup with Keep versions plans the clean-up; with only two versions nothing is deleted (the oldest one inside the period is kept)'
 Assert (Test-Path -LiteralPath (Join-Path $kept.RunDirectory 'clean-up-plan.json')) 'the clean-up plan is saved with the run'
 Write-Output ('Artifacts: '+$private)
 Write-Output ('Disposable source: '+$root)

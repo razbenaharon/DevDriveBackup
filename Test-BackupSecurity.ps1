@@ -68,6 +68,7 @@ Assert ([IO.File]::ReadAllText($occupied) -ceq 'Preserve this unrelated file.' -
 [void](Run 'Restore' $null @{Snapshot=$first.Snapshot;RestoreTarget=(Join-Path $private 'restored-after-resume')})
 $second=Run 'Backup';Assert ($second.Snapshot) 'incremental backup still works after password rotation and resume'
 $secretLeak=$false
-foreach($log in Get-ChildItem -LiteralPath $private -Recurse -File|Where-Object {$_.Extension -in @('.json','.jsonl','.log') -or $_.Name -eq 'worker-error.txt'}){$body=[IO.File]::ReadAllText($log.FullName);if($body.Contains($new) -or $body.Contains($next) -or $body.Contains($old)){$secretLeak=$true}}
-Assert (-not $secretLeak) 'passwords never appear in operation logs or status results'
+# Every file of any kind, as UTF-8 and as UTF-16; only the recovery key files may hold a password.
+foreach($log in Get-ChildItem -LiteralPath $private -Recurse -File -Force|Where-Object {$_.Name -notlike '*recovery*.txt'}){$body=[Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($log.FullName));foreach($secret in @($new,$next,$old)){foreach($encoding in @([Text.Encoding]::UTF8,[Text.Encoding]::Unicode)){if($body.Contains([Text.Encoding]::Latin1.GetString($encoding.GetBytes($secret)))){$secretLeak=$true}}}}
+Assert (-not $secretLeak) 'passwords never appear in plain text in any file written, recovery keys aside'
 Write-Output ('Artifacts: '+$private)
