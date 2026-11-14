@@ -16,8 +16,12 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           BASE: ${{ github.event.pull_request.base.sha }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ github.ref_name }}
         run: |
-          $range = if ($env:BASE) { "$env:BASE..HEAD" } elseif ($env:BEFORE -and $env:BEFORE -notmatch '^0+$') { "$env:BEFORE..HEAD" } else { "origin/${{ github.event.repository.default_branch }}..HEAD" }
+          # A new branch is compared with the default branch. The first push of the default branch itself
+          # (a new repository or fork) has nothing to compare with, so its whole history is checked.
+          $range = if ($env:BASE) { "$env:BASE..HEAD" } elseif ($env:BEFORE -and $env:BEFORE -notmatch '^0+$') { "$env:BEFORE..HEAD" } elseif ($env:BRANCH -eq $env:DEFAULT) { 'HEAD' } else { "origin/$env:DEFAULT..HEAD" }
           ./Test-PrivacyGuard.ps1 -Range $range
       - name: Verify the privacy check itself
         shell: pwsh
@@ -80,6 +84,8 @@ jobs:
         shell: pwsh
         run: |
           ./Install-BackupEngine.ps1
+          # Without the engine the test would skip its real part and still pass.
+          if (-not (Test-Path -LiteralPath ./bin/restic_0.19.1_windows_amd64.exe)) { throw 'The versions engine was not installed, so the test would not run.' }
           pwsh -NoProfile -File ./Test-BackupVersions.ps1
       - name: Verify the window's data and run results
         shell: pwsh
