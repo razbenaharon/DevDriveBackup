@@ -62,9 +62,6 @@ jobs:
       - name: Verify colour themes and contrast
         shell: pwsh
         run: pwsh -NoProfile -File ./Test-BackupTheme.ps1
-      - name: Verify the clean-up of old versions
-        shell: pwsh
-        run: pwsh -NoProfile -File ./Test-BackupRetention.ps1
       - name: Verify history selection safeguards
         shell: pwsh
         run: pwsh -NoProfile -File ./Test-BackupHistory.ps1
@@ -80,13 +77,15 @@ jobs:
       - name: Verify the rules for versions
         shell: pwsh
         run: pwsh -NoProfile -File ./Test-BackupVersionsRules.ps1
-      - name: Verify versions against a disposable repository
+      - name: Verify versions and the clean-up of old versions against a disposable repository
         shell: pwsh
         run: |
           ./Install-BackupEngine.ps1
           # Without the engine the test would skip its real part and still pass.
           if (-not (Test-Path -LiteralPath ./bin/restic_0.19.1_windows_amd64.exe)) { throw 'The versions engine was not installed, so the test would not run.' }
           pwsh -NoProfile -File ./Test-BackupVersions.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File ./Test-BackupRetention.ps1
       - name: Verify the window's data and run results
         shell: pwsh
         run: pwsh -NoProfile -File ./Test-BackupData.ps1
