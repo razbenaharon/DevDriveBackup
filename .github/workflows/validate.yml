@@ -21,7 +21,7 @@ jobs:
           ./Test-PrivacyGuard.ps1 -Range $range
       - name: Verify the privacy check itself
         shell: pwsh
-        run: ./Test-PrivacyGuardRules.ps1
+        run: pwsh -NoProfile -File ./Test-PrivacyGuardRules.ps1
       - name: Parse all PowerShell sources
         shell: pwsh
         run: |
@@ -48,50 +48,51 @@ jobs:
           if ($config.MemoryMiB -lt 512 -or $config.Include.Count -eq 0) { throw 'Invalid example' }
       - name: Verify concurrent status access
         shell: pwsh
-        run: ./Test-BackupStatus.ps1
+        run: pwsh -NoProfile -File ./Test-BackupStatus.ps1
       - name: Verify drive check rules
         shell: pwsh
-        run: ./Test-BackupDriveCheck.ps1
+        run: pwsh -NoProfile -File ./Test-BackupDriveCheck.ps1
       - name: Verify the AI session activity rule
         shell: pwsh
-        run: ./Test-BackupActivity.ps1
+        run: pwsh -NoProfile -File ./Test-BackupActivity.ps1
       - name: Verify colour themes and contrast
         shell: pwsh
-        run: ./Test-BackupTheme.ps1
+        run: pwsh -NoProfile -File ./Test-BackupTheme.ps1
       - name: Verify the clean-up of old versions
         shell: pwsh
-        run: ./Test-BackupRetention.ps1
+        run: pwsh -NoProfile -File ./Test-BackupRetention.ps1
       - name: Verify history selection safeguards
         shell: pwsh
-        run: ./Test-BackupHistory.ps1
+        run: pwsh -NoProfile -File ./Test-BackupHistory.ps1
       - name: Verify private credential file safeguards
         shell: pwsh
-        run: ./Test-BackupSecuritySafety.ps1
+        run: pwsh -NoProfile -File ./Test-BackupSecuritySafety.ps1
       - name: Verify plain copy rules
         shell: pwsh
-        run: ./Test-BackupCopyRules.ps1
+        run: pwsh -NoProfile -File ./Test-BackupCopyRules.ps1
       - name: Verify plain copy runs, failures and recovery folders
         shell: pwsh
-        run: ./Test-BackupMirror.ps1
+        run: pwsh -NoProfile -File ./Test-BackupMirror.ps1
       - name: Verify the rules for versions
         shell: pwsh
-        run: ./Test-BackupVersionsRules.ps1
+        run: pwsh -NoProfile -File ./Test-BackupVersionsRules.ps1
       - name: Verify versions against a disposable repository
         shell: pwsh
         run: |
           ./Install-BackupEngine.ps1
-          ./Test-BackupVersions.ps1
+          pwsh -NoProfile -File ./Test-BackupVersions.ps1
       - name: Verify the window's data and run results
         shell: pwsh
-        run: ./Test-BackupData.ps1
+        run: pwsh -NoProfile -File ./Test-BackupData.ps1
       - name: Verify the window opens on every page
         shell: pwsh
-        run: ./Test-BackupWindow.ps1
+        run: pwsh -NoProfile -File ./Test-BackupWindow.ps1
       - name: Verify drive tools and the report generator
         shell: pwsh
         run: |
-          ./Test-BackupTools.ps1
+          pwsh -NoProfile -File ./Test-BackupTools.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }   # a failing first test must not be hidden by the next command
           python ./Test-BackupToolsReport.py
       - name: Verify the hard memory limit
         shell: pwsh
-        run: ./Test-BackupResourceControls.ps1
+        run: pwsh -NoProfile -File ./Test-BackupResourceControls.ps1
