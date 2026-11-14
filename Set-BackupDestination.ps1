@@ -16,18 +16,38 @@ $config=if(Test-Path -LiteralPath $ConfigPath){Get-Content -LiteralPath $ConfigP
 if($Apply -and -not $config){throw "Configuration not found: $ConfigPath"}
 $letter=$DestinationDrive.ToUpperInvariant()
 
+# The same-disk rule, kept in two functions so that Test-BackupTools.ps1 can run it on made-up disks.
+# DiskOfLetter: the disk behind a drive letter (Get-Partition|Get-Disk here).
+function Get-BackupPhysicalDisk($Disk,[scriptblock]$DiskOfLetter) {
+ # The disk a volume really lives on. A virtual disk (a VHD or VHDX file, such as a Dev Drive) is
+ # followed to the disk that holds its file, also through a virtual disk inside another one. A file
+ # without a drive letter (a network share) or a host that cannot be found ends the search there.
+ for($i=0;$i -lt 8 -and $Disk -and [string]$Disk.BusType -eq 'File Backed Virtual' -and [string]$Disk.Location -match '^([A-Za-z]):\\';$i++){
+  $inside=$null;try{$inside=& $DiskOfLetter $Matches[1]}catch{};if(-not $inside){break};$Disk=$inside
+ }
+ $Disk
+}
+function Get-BackupSameDiskReason($SourceDisk,$DestinationDisk,[scriptblock]$DiskOfLetter) {
+ # '' when no single physical disk holds both the source and its backup; otherwise why it is refused.
+ # A backup on the disk that also holds the source, or the source's file, fails together with it,
+ # and that is so whichever of the two sides is the virtual disk.
+ if($DestinationDisk.Number -eq $SourceDisk.Number){return 'The destination is on the same disk as the source'}
+ $s=Get-BackupPhysicalDisk $SourceDisk $DiskOfLetter;$d=Get-BackupPhysicalDisk $DestinationDisk $DiskOfLetter
+ if($s.Number -ne $d.Number){return ''}
+ $sourceVirtual=$s.Number -ne $SourceDisk.Number;$destinationVirtual=$d.Number -ne $DestinationDisk.Number
+ if($sourceVirtual -and -not $destinationVirtual){"The destination is on the physical disk that holds the Dev Drive file ($($SourceDisk.Location))"}
+ elseif($destinationVirtual -and -not $sourceVirtual){"The destination is a virtual disk whose file ($($DestinationDisk.Location)) is on the source's physical disk"}
+ else{"The source and the destination are virtual disks whose files are on the same physical disk ($($SourceDisk.Location) and $($DestinationDisk.Location))"}
+}
+
 # --- Identify the destination and refuse unsafe targets ---------------------------------------
 $volume=Get-Volume -DriveLetter $letter
 $disk=Get-Partition -DriveLetter $letter|Get-Disk
 if($config){
  if($volume.UniqueId -eq $config.SourceVolumeId){throw 'The destination is the source volume'}
  $sourceDisk=Get-Partition -DriveLetter $config.Source.Substring(0,1)|Get-Disk
- if($disk.Number -eq $sourceDisk.Number){throw 'The destination is on the same disk as the source'}
- if($sourceDisk.BusType -eq 'File Backed Virtual' -and $sourceDisk.Location -match '^([A-Za-z]):\\'){
-  # A VHDX Dev Drive lives on another disk; a backup on that same physical disk fails together with it.
-  $hostDisk=Get-Partition -DriveLetter $Matches[1]|Get-Disk
-  if($disk.Number -eq $hostDisk.Number){throw "The destination is on the physical disk that holds the Dev Drive file ($($sourceDisk.Location))"}
- }
+ $sameDisk=Get-BackupSameDiskReason $sourceDisk $disk {param($Letter) Get-Partition -DriveLetter $Letter|Get-Disk}
+ if($sameDisk){throw $sameDisk}
 }
 $physical=Get-PhysicalDisk|Where-Object {[string]$_.DeviceId -eq [string]$disk.Number}|Select-Object -First 1
 $media=if($physical){[string]$physical.MediaType}else{'Unknown'}
@@ -99,4 +119,4 @@ try{
  [void](Write-BackupStatus $fresh $ConfigPath)
 }finally{$lock.Dispose()}
 Write-Output "Applied. Backups now go to $($letter):\$($config.RepositoryFolder) with the $($rec.Profile) profile."
-Write-Output 'The first backup creates a new password and a recovery-key file in Documents. Copy that key to a password manager or a safe place off this computer.'
+Write-Output "The first backup to a new drive creates a new password and a recovery-key file in $(Split-Path -Parent $fresh.RecoveryKeyPath). Copy that key to a password manager or a safe place off this computer."

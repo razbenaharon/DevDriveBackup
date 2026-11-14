@@ -48,7 +48,7 @@ $scan.VerySlowCount=4
 Assert ((Get-DriveSurfaceFindings $sample $scan).Status -eq 'Warning') 'places that took seconds to read are a warning'
 $scan.BadCount=2;$scan.Bad=@([pscustomobject]@{Offset=5GB;Length=64KB;Code=23})
 $s=Get-DriveSurfaceFindings $sample $scan
-Assert ($s.Status -eq 'Problem' -and $s.Lines[0] -match 'first at 5.0 GB') 'unreadable areas are a problem and say where'
+Assert ($s.Status -eq 'Problem' -and $s.Lines[0] -match 'first at 5.0 GiB') 'unreadable areas are a problem and say where, in the unit the number is counted in'
 $part=[pscustomobject]@{Size=1TB;NextOffset=0.37TB;Complete=$false;Finished=$null;BadCount=0;VerySlowCount=0;SlowCount=0;Bad=@()}
 Assert (((Get-DriveSurfaceFindings $sample $part).Lines -join ' ') -match 'stopped at 37%') 'a stopped scan shows how far it got'
 
@@ -112,6 +112,123 @@ $n=Get-DriveSelfTest $noLog
 Assert ($null -eq $n.Last -and $null -eq $n.LastShort -and $null -eq $n.LastLong -and (Get-DriveHealthFindings $noLog).Status -eq 'OK') 'a drive with an empty self-test log is fine'
 $nvme.nvme_self_test_log.table=@([pscustomobject]@{self_test_code=[pscustomobject]@{value=1};self_test_result=[pscustomobject]@{value=0;string='Completed without error'};power_on_hours=99},[pscustomobject]@{self_test_code=[pscustomobject]@{value=2};self_test_result=[pscustomobject]@{value=7;string='Completed: failed segments'};power_on_hours=90})
 Assert ((Get-DriveHealthFindings $nvme).Status -eq 'Problem') 'on NVMe too, a short self-test that passed does not hide a failed long one'
+
+# --- Controller resets name no disk: only the drive's own kind of connection counts ---------------
+$reset=@('storahci','stornvme','uaspstor'|ForEach-Object {[pscustomobject]@{ProviderName=$_;Id=129;TimeCreated=$now;Message='Reset to device, \Device\RaidPort0, was issued.'}})
+Assert (@(Get-DriveEventFindings @($reset[0],$reset[1]) 2 'E' $true @() 'USB').Count -eq 0) 'a reset of an internal drive is not held against a USB drive'
+Assert (@(Get-DriveEventFindings @($reset[1],$reset[2]) 2 'E' $false @() 'SATA').Count -eq 0) 'an NVMe or USB reset is not held against a SATA drive'
+Assert (@(Get-DriveEventFindings $reset 2 'E' $false @() 'NVMe').Count -eq 1 -and @(Get-DriveEventFindings $reset 2 'E' $true @() 'USB').Count -eq 1) 'a reset on the drive''s own kind of connection still counts'
+
+# --- Nothing checked is not "no problems" ---------------------------------------------------------
+Assert ((Get-DriveConnectionFindings ([pscustomobject]@{Error='Hub interface error 13'}) 'USB' $null $null).Status -eq 'Unavailable') 'a USB link that could not be read, with no counters at all, is not available rather than OK'
+Assert ((Get-DriveConnectionFindings $null 'USB' (Ata @{199=0}) $null).Status -eq 'OK') 'the drive''s own transfer counter is a check even when the link speed could not be read'
+$flag=Json '{"smart_status":{"passed":true}}'
+$f=Get-DriveHealthFindings $flag
+Assert ($f.Status -eq 'Unavailable' -and -not (Test-DriveSmartAnswer $flag) -and $f.Lines[0] -match 'only') 'a box that passes on only the overall "passed" flag gives no health verdict'
+Assert ((Get-DriveHealthFindings (Json '{"smart_status":{"passed":false}}')).Status -eq 'Problem') 'a drive that says it is failing is a problem even with nothing else reported'
+$un=New-DriveGroup 'Unavailable' 'u'
+$view=Get-DriveCheckView ([pscustomobject]@{Finished=$now.ToString('o');Sample=$sample;Events=@();Health=$un;Connection=(New-DriveGroup 'OK' 'y');FileSystem=$un}) $null
+Assert ($view.Overall -eq 'OK' -and $view.Summary -match 'not checked: .*health report.*file system' -and $view.Unchecked.Count -eq 2) 'the one-line summary names the parts that could not be checked'
+$view=Get-DriveCheckView ([pscustomobject]@{Finished=$now.ToString('o');Sample=$sample;Events=@();Health=(New-DriveGroup 'OK' 'x');Connection=(New-DriveGroup 'OK' 'y');FileSystem=(New-DriveGroup 'OK' 'z')}) $null
+Assert ($view.Summary -eq 'no problems' -and $view.Unchecked.Count -eq 0) 'the summary is plain when every part was checked'
+
+# --- A failed self-test of any kind counts ----------------------------------------------------------
+$sel=Ata @{5=0};$sel.ata_smart_self_test_log.standard.table=@((SelfTest 'Short offline' 0 19999),(SelfTest 'Selective offline' 0x70 19990))
+$m=Get-DriveHealthFindings $sel
+Assert ($m.Status -eq 'Problem' -and ($m.Lines -join ' ') -match 'Selective self-test: failed') 'a short self-test that passed does not hide a selective one that failed before it'
+$sel.ata_smart_self_test_log.standard.table=@((SelfTest 'Selective offline' 0 19999),(SelfTest 'Selective offline' 0x70 19990),(SelfTest 'Conveyance offline' 0x70 19000))
+$m=Get-DriveHealthFindings $sel
+Assert ($m.Status -eq 'Problem' -and ($m.Lines -join ' ') -match 'Conveyance self-test: failed' -and ($m.Lines -join ' ') -notmatch 'Selective self-test: failed') 'each kind of self-test is judged by its own newest result'
+
+# --- The full scan's saved position -----------------------------------------------------------------
+$work=Join-Path ([IO.Path]::GetTempPath()) ('drive-check-state-'+[guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $work -Force|Out-Null
+try{
+ $state=Join-Path $work 'surface.json'
+ # A record as the version before this one wrote it: no Previous, no RecoveredCount.
+ $doneBad='{"Identity":"SER|1","Size":1099511627776,"NextOffset":1099511627776,"Complete":true,"Started":"2026-01-01T00:00:00","Finished":"2026-01-02T00:00:00","Seconds":9.5,"BadCount":2,"VerySlowCount":0,"SlowCount":0,"Bad":[{"Offset":5368709120,"Length":65536,"Code":23}],"Slow":[]}'
+ Set-Content -LiteralPath $state -Value $doneBad
+ $read=Read-DriveScanState $state 'SER|1'
+ Assert ($null -eq $read.State -and $read.Previous.BadCount -eq 2 -and -not $read.SetAside) 'a finished scan is not continued, and what it found is handed to the next scan'
+ $new=New-DriveScanState 'SER|1' 1TB $read.Previous;$new.NextOffset=512MB
+ $s=Get-DriveSurfaceFindings $sample ($new|ConvertTo-Json -Depth 8|ConvertFrom-Json)
+ Assert ($s.Status -eq 'Problem' -and ($s.Lines -join ' ') -match 'Earlier full scan: 2 areas could not be read \(first at 5.0 GiB\)') 'starting a new full scan does not erase the bad areas the last one found'
+ $new.NextOffset=1TB;$new.Complete=$true;$new.Finished=(Get-Date).ToString('o');$new.Previous=$null
+ Assert ((Get-DriveSurfaceFindings $sample ($new|ConvertTo-Json -Depth 8|ConvertFrom-Json)).Status -eq 'OK') 'a new scan that finished clean replaces the earlier findings'
+ Assert ($null -eq (Read-DriveScanState $state 'OTHER|1').Previous) 'another drive''s scan is not held against this drive'
+ Set-Content -LiteralPath $state -Value ($doneBad -replace '"NextOffset":1099511627776,"Complete":true','"NextOffset":536870912,"Complete":false')
+ $read=Read-DriveScanState $state 'SER|1'
+ Assert ($read.State.NextOffset -eq 512MB -and $read.State.RecoveredCount -eq 0 -and $null -eq $read.State.Previous -and (Test-Path -LiteralPath $state)) 'an unfinished scan saved by the previous version continues where it stopped'
+ foreach($damaged in '','{"Identity":"SER|1","Size":10','{}','[1,2]','{"Identity":"SER|1","Size":100,"NextOffset":500,"Complete":false}'){
+  Set-Content -LiteralPath $state -Value $damaged -NoNewline
+  $read=Read-DriveScanState $state 'SER|1'
+  Assert ($null -eq $read.State -and $read.SetAside -and (Test-Path -LiteralPath $read.SetAside) -and -not (Test-Path -LiteralPath $state) -and (Get-Content -LiteralPath $read.SetAside -Raw) -eq $(if($damaged){$damaged}else{$null})) "a damaged saved position ($($damaged.Length) characters) is set aside, not deleted, and the scan starts again"
+ }
+ Assert (-not (Read-DriveScanState $state 'SER|1').SetAside) 'no saved position is simply a first scan'
+ Assert ((Get-DriveSurfaceFindings ([pscustomobject]@{Regions=@()}) $null).Status -eq 'NotRun') 'a quick check stopped before its first sample read is not a verdict and does not fail'
+ Assert ((Get-DriveSurfaceFindings $sample ([pscustomobject]@{})).Status -eq 'OK' -and (Get-DriveCheckView $null ('[]'|ConvertFrom-Json)).Overall -eq 'NotRun') 'a scan record without its fields is shown as no scan'
+
+ # --- Stopping ------------------------------------------------------------------------------------
+ $stop=Join-Path $work 'stop.request'
+ Assert (-not (Test-DriveStopRequest $stop (Get-Date))) 'no stop file is no request'
+ Set-Content -LiteralPath $stop -Value '';(Get-Item -LiteralPath $stop).LastWriteTime=(Get-Date).AddMinutes(-5)
+ Assert (-not (Test-DriveStopRequest $stop (Get-Date).AddMinutes(-1))) 'a stop request left by an earlier run does not count'
+ Assert (Test-DriveStopRequest $stop (Get-Date).AddMinutes(-10)) 'a stop request made since the check''s process started counts, even before the check was ready'
+
+ # --- The reader, on an ordinary file instead of a disk ---------------------------------------------
+ Add-DriveScannerType
+ $disk=Join-Path $work 'disk.bin';[IO.File]::WriteAllBytes($disk,[byte[]]::new(12MB))
+ $old=(Get-Date).AddMinutes(-1).Ticks
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,(Get-Date).Ticks)|ConvertFrom-Json
+ Assert ($r.Bytes -eq 12MB -and $r.BadCount -eq 0 -and $r.RecoveredCount -eq 0 -and -not $r.Stopped) 'three chunks are read; the old stop request is ignored'
+ $r=[BackupDriveScanner]::Read($disk,0,16MB,512,1000,$stop,(Get-Date).Ticks)|ConvertFrom-Json
+ Assert ($r.BadCount -eq 64 -and $r.Bad[0].Offset -eq 12MB -and $r.Bad[0].Length -eq 64KB -and $r.Bytes -eq 16MB) 'a chunk that cannot be read is named in 64 KiB pieces'
+ # A chunk that fails once and then reads in pieces: the drive needed a second try there.
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -eq 4MB -and $n -eq 4MB){23}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,(Get-Date).Ticks)|ConvertFrom-Json
+ Assert ($r.BadCount -eq 0 -and $r.RecoveredCount -eq 1 -and $r.Recovered[0].Offset -eq 4MB -and $r.Recovered[0].Code -eq 23 -and $r.Bytes -eq 12MB) 'a chunk that reads only at the second try is recorded, not forgotten'
+ $again=New-DriveScanState 'SER|1' 12MB $null;$again.NextOffset=12MB;$again.Complete=$true;$again.Finished=(Get-Date).ToString('o');$again.RecoveredCount=$r.RecoveredCount
+ $s=Get-DriveSurfaceFindings $sample $again
+ Assert ($s.Status -eq 'Warning' -and ($s.Lines -join ' ') -match '1 places? could be read only at the second try') 'places that needed a second try are a warning'
+ # A stop asked for in the middle of a stretch ends it after the chunk being read, with the position kept.
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -eq 4MB){Set-Content -LiteralPath $stop -Value ''};0}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert ($r.Stopped -and $r.Bytes -eq 8MB) 'a stop request is honoured inside a stretch, not only after 512 MiB'
+ [BackupDriveScanner]::Fault=$null
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert ($r.Stopped -and $r.Bytes -eq 0) 'a stop request made before the first read stops at once'
+
+ # --- The health tool that runs as administrator ----------------------------------------------------
+ $fake=Join-Path $work 'smartctl.exe';Set-Content -LiteralPath $fake -Value 'not smartctl'
+ $t=Open-DriveCheckSmartTool $fake
+ Assert ($t.Problem -match 'not the official smartctl 7\.5' -and $null -eq $t.Hold) 'a health tool given by path is refused too when it is not the official build'
+ Assert ((Open-DriveCheckSmartTool (Join-Path $work 'missing.exe')).Problem -match 'not installed') 'a missing health tool is named as not installed'
+ # What lies beside the tool is loaded by it as administrator too: its drive database, and any library.
+ # The made-up tool below stands in for the official one by handing in its own checksum.
+ $side=Join-Path $work 'side';New-Item -ItemType Directory -Path $side|Out-Null
+ $exe=Join-Path $side 'smartctl.exe';Set-Content -LiteralPath $exe -Value 'stand-in tool';$exeHash=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+ $db=Join-Path $side 'drivedb.h';Set-Content -LiteralPath $db -Value 'stand-in database';$dbHash=(Get-FileHash -LiteralPath $db -Algorithm SHA256).Hash
+ $t=Open-DriveCheckSmartTool $exe -ToolHash $exeHash -DatabaseHash $dbHash
+ Assert (-not $t.Problem -and $t.Hold -and $t.DatabaseHold) 'the tool with its own drive database beside it is accepted, and both stay open while the check runs'
+ $t.Hold.Dispose();$t.DatabaseHold.Dispose()
+ Add-Content -LiteralPath $db -Value 'changed'
+ $t=Open-DriveCheckSmartTool $exe -ToolHash $exeHash -DatabaseHash $dbHash
+ Assert ($t.Problem -match 'drive database' -and $null -eq $t.Hold) 'a drive database that is not the one from the official installer stops the tool from running'
+ Remove-Item -LiteralPath $db
+ $t=Open-DriveCheckSmartTool $exe -ToolHash $exeHash -DatabaseHash $dbHash
+ Assert (-not $t.Problem -and $t.Hold -and $null -eq $t.DatabaseHold) 'without a database file the tool runs on its built-in one'
+ $t.Hold.Dispose()
+ # A database that cannot be opened (another program holds it) must not leave the tool itself held open.
+ Set-Content -LiteralPath $db -Value 'stand-in database';$busy=[IO.File]::Open($db,'Open','ReadWrite','None')
+ try{$t=Open-DriveCheckSmartTool $exe -ToolHash $exeHash -DatabaseHash $dbHash}finally{$busy.Dispose()}
+ $free=try{$w=[IO.File]::Open($exe,'Open','ReadWrite','None');$w.Dispose();$true}catch{$false}
+ Assert ($t.Problem -match 'drive database' -and $null -eq $t.Hold -and $free) 'a drive database that cannot be read stops the tool, and nothing is left held open'
+ Remove-Item -LiteralPath $db
+ Set-Content -LiteralPath (Join-Path $side 'version.dll') -Value 'x'
+ $t=Open-DriveCheckSmartTool $exe -ToolHash $exeHash -DatabaseHash $dbHash
+ Assert ($t.Problem -match 'version\.dll' -and $null -eq $t.Hold) 'a library placed beside the tool stops it from running, and is named'
+}finally{if('BackupDriveScanner' -as [type]){[BackupDriveScanner]::Fault=$null};Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue}
+Assert ((Format-DriveOffset 300MB) -eq '300 MiB' -and (Format-DriveOffset 5GB) -eq '5.0 GiB') 'sizes counted in binary units are labelled MiB and GiB'
 
 # --- Running as administrator: who could change what the check runs ---------------------------
 $me='S-1-5-21-1-2-3-1001'

@@ -6,8 +6,8 @@
 #  Surface       reads every part of the disk; stops on request and later continues from there
 #  LongSelfTest  asks the drive to read itself completely. The drive works alone for hours;
 #                the next quick check shows the result.
-# Only reads. Nothing on the drive is written, moved or repaired. The bundled smartctl runs only
-# when its SHA-256 matches the official 7.5 build.
+# Only reads. Nothing on the drive is written, moved or repaired. smartctl (the bundled copy, or
+# one given with -SmartTool) runs only when its SHA-256 matches the official 7.5 build.
 # Into -OutputDirectory it writes progress.json while it runs and run.json at the end, plus
 # report.json (quick check) and surface.json (full scan). A file named stop.request ends the run.
 param(
@@ -24,78 +24,22 @@ Import-Module (Join-Path $PSScriptRoot 'Backup.DriveCheck.psm1') -Force
 New-Item -ItemType Directory -Path $OutputDirectory -Force|Out-Null
 $stopFile=Join-Path $OutputDirectory 'stop.request'
 $started=Get-Date
+# Stop requests are compared with the moment Windows started this process, not the moment this line
+# ran: a Stop pressed while PowerShell was still starting must count too.
+$stopSince=[Diagnostics.Process]::GetCurrentProcess().StartTime
 # One check per drive at a time. The lock is held until this process ends; a second check stops
 # here without touching the first one's files.
 try{$lock=[IO.File]::Open((Join-Path $OutputDirectory 'check.lock'),'OpenOrCreate','ReadWrite','None')}
 catch{[Console]::Error.WriteLine('Another drive check of this drive is running.');exit 1}
-# smartctl runs as administrator here, so the bundled copy must be the official 7.5 build. It stays
-# open (others may only read it) until this check ends, so it cannot be replaced after the check.
-# A tool that is missing now is never run later in this check, even if a file appears meanwhile.
-$script:smartProblem='The health tool is not installed. Use "Install health tool" on this page, then check again.'
-if(Test-Path -LiteralPath $SmartTool -PathType Leaf){
- $script:smartProblem=''
- $script:smartHold=[IO.File]::Open($SmartTool,'Open','Read','Read')
- $bundled=[IO.Path]::GetFullPath($SmartTool) -ieq [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'bin\smartmontools\bin\smartctl.exe'))
- if($bundled -and (Get-FileHash -InputStream $script:smartHold -Algorithm SHA256).Hash -ne (Get-DriveCheckSmartToolHash)){
-  $script:smartProblem='The health tool in bin\smartmontools is not the official smartctl 7.5, so it was not run. Use "Install health tool" on this page again, then check again.'
- }
-}
+# smartctl runs as administrator here, so the copy that is asked for (the bundled one, or another
+# path given with -SmartTool) must be the official 7.5 build. It stays open (others may only read
+# it) until this check ends, so it cannot be replaced after the check. A tool that is missing now
+# is never run later in this check, even if a file appears meanwhile.
+$tool=Open-DriveCheckSmartTool $SmartTool
+$script:smartProblem=$tool.Problem;$script:smartHold=$tool.Hold
 
-Add-Type -TypeDefinition @'
-using System; using System.Collections.Generic; using System.ComponentModel; using System.Diagnostics; using System.Globalization; using System.Runtime.InteropServices; using System.Text; using Microsoft.Win32.SafeHandles;
-public static class BackupDriveScanner {
- [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string n,uint a,uint s,IntPtr sa,uint d,uint f,IntPtr t);
- [DllImport("kernel32.dll",SetLastError=true)] static extern bool ReadFile(SafeFileHandle h,IntPtr b,uint n,out uint done,IntPtr o);
- [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFilePointerEx(SafeFileHandle h,long d,out long np,uint m);
- [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr VirtualAlloc(IntPtr a,UIntPtr n,uint t,uint p);
- [DllImport("kernel32.dll")] static extern bool VirtualFree(IntPtr a,UIntPtr n,uint t);
- [DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint flags);
- // These mean the drive is gone (unplugged, asleep, box reset), not that an area is bad.
- static readonly int[] Gone={2,3,6,21,55,433,1167};
- static string N(double v){return v.ToString("0.###",CultureInfo.InvariantCulture);}
- public static void KeepAwake(bool on){SetThreadExecutionState(on?0x80000001u:0x80000000u);}
- static int ReadAt(SafeFileHandle h,IntPtr buf,long pos,int n){
-  long np;if(!SetFilePointerEx(h,pos,out np,0))return Marshal.GetLastWin32Error();
-  uint got;if(!ReadFile(h,buf,(uint)n,out got,IntPtr.Zero))return Marshal.GetLastWin32Error();
-  return got==(uint)n?0:38;
- }
- // Reads [start, start+length) of a physical disk without the Windows cache, 4 MiB at a time.
- // A chunk that fails is read again in 64 KiB pieces so the report names the damaged place.
- // VerySlow: a chunk over verySlowMs (the drive retried hard). Slow: over 10x the median and 250 ms.
- public static string Read(string device,long start,long length,int sector,double verySlowMs){
-  const int chunk=4*1024*1024;int piece=Math.Max(sector,64*1024);
-  IntPtr buf=VirtualAlloc(IntPtr.Zero,(UIntPtr)chunk,0x3000,4);if(buf==IntPtr.Zero)throw new Win32Exception();
-  var times=new List<double>();var where=new List<long>();var bad=new StringBuilder();int badCount=0;long done=0;var total=Stopwatch.StartNew();
-  try{
-   using(var h=CreateFile(device,0x80000000,3,IntPtr.Zero,3,0x20000000,IntPtr.Zero)){
-    if(h.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
-    long end=start+length;
-    for(long pos=start;pos<end;pos+=chunk){
-     int n=(int)Math.Min(chunk,end-pos);var w=Stopwatch.StartNew();int err=ReadAt(h,buf,pos,n);double ms=w.Elapsed.TotalMilliseconds;
-     if(err==0){times.Add(ms);where.Add(pos);}
-     else{
-      if(Array.IndexOf(Gone,err)>=0)throw new Win32Exception(err,"The drive stopped answering ("+err+"). Check that it is still connected.");
-      for(long p=pos;p<pos+n;p+=piece){
-       int m=(int)Math.Min(piece,pos+n-p);int e=ReadAt(h,buf,p,m);if(e==0)continue;
-       if(Array.IndexOf(Gone,e)>=0)throw new Win32Exception(e,"The drive stopped answering ("+e+"). Check that it is still connected.");
-       if(badCount<200){if(bad.Length>0)bad.Append(',');bad.Append("{\"Offset\":"+p+",\"Length\":"+m+",\"Code\":"+e+"}");}
-       badCount++;
-      }
-     }
-     done+=n;
-    }
-   }
-  }finally{VirtualFree(buf,UIntPtr.Zero,0x8000);}
-  double[] sorted=times.ToArray();Array.Sort(sorted);double median=sorted.Length>0?sorted[sorted.Length/2]:0;double max=sorted.Length>0?sorted[sorted.Length-1]:0;
-  var slow=new StringBuilder();int slowCount=0,verySlow=0;double slowMs=Math.Max(250,10*median);
-  for(int i=0;i<times.Count;i++){
-   bool very=times[i]>=verySlowMs;if(very)verySlow++;
-   if(very||times[i]>=slowMs){if(slowCount<200){if(slow.Length>0)slow.Append(',');slow.Append("{\"Offset\":"+where[i]+",\"Ms\":"+N(times[i])+"}");}slowCount++;}
-  }
-  return "{\"Bytes\":"+done+",\"Seconds\":"+N(total.Elapsed.TotalSeconds)+",\"MedianMs\":"+N(median)+",\"MaxMs\":"+N(max)+",\"BadCount\":"+badCount+",\"Bad\":["+bad+"],\"SlowCount\":"+slowCount+",\"VerySlowCount\":"+verySlow+",\"Slow\":["+slow+"]}";
- }
-}
-'@
+# The reader (BackupDriveScanner) lives in Backup.DriveCheck.psm1, where it is tested on a file.
+Add-DriveScannerType
 
 function Set-CheckProgress([string]$Text,[double]$Percent=-1){
  [void](Write-BackupStatus ([ordered]@{Mode=$Mode;Text=$Text;Percent=[math]::Round($Percent,1);Updated=(Get-Date).ToString('o')}) (Join-Path $OutputDirectory 'progress.json') -BestEffort)
@@ -103,8 +47,7 @@ function Set-CheckProgress([string]$Text,[double]$Percent=-1){
 function Complete-Check([bool]$Success,[string]$Message){
  [void](Write-BackupStatus ([ordered]@{Mode=$Mode;Success=$Success;Message=$Message;Started=$started.ToString('o');Finished=(Get-Date).ToString('o')}) (Join-Path $OutputDirectory 'run.json'))
 }
-# A request left over from an earlier run does not count, only one made after this run started.
-function Test-StopRequested{(Test-Path -LiteralPath $stopFile) -and (Get-Item -LiteralPath $stopFile).LastWriteTime -ge $started}
+function Test-StopRequested{Test-DriveStopRequest $stopFile $stopSince}
 function Invoke-Smart([string[]]$Arguments){
  if($script:smartProblem){return [pscustomobject]@{Code=-1;Json=$null}}
  $out=& $SmartTool @Arguments '--json' 2>$null;$code=$LASTEXITCODE;$json=$null
@@ -113,15 +56,19 @@ function Invoke-Smart([string[]]$Arguments){
 }
 function Get-SmartReport{
  # Decided once at the start: missing, not the official build, or held open and checked.
- if($script:smartProblem){return [pscustomobject]@{Json=$null;Type=$null;Why=$script:smartProblem}}
+ if($script:smartProblem){return [pscustomobject]@{Json=$null;Type=$null;Seen=$null;Why=$script:smartProblem}}
  # First the type smartctl detects itself; many USB boxes answer only when the standard SAT pass-through is named.
+ # Seen: an answer that carried only the overall "passed" flag, kept so that the report can say so.
+ $seen=$null
  foreach($t in @('auto','sat')){
   $r=Invoke-Smart @('-a','-d',$t,$script:smartDevice)
-  if(Test-DriveSmartAnswer $r.Json){return [pscustomobject]@{Json=$r.Json;Type=$t;Why=''}}
+  if(Test-DriveSmartAnswer $r.Json){return [pscustomobject]@{Json=$r.Json;Type=$t;Seen=$null;Why=''}}
+  if(Test-DriveSmartFlagOnly $r.Json){$seen=$r.Json}
  }
- [pscustomobject]@{Json=$null;Type=$null;Why='The drive did not answer. Its USB box or adapter does not pass the health request on, so this part cannot be checked through it.'}
+ [pscustomobject]@{Json=$null;Type=$null;Seen=$seen;Why='The drive did not answer. Its USB box or adapter does not pass the health request on, so this part cannot be checked through it.'}
 }
-function Read-DiskRegion([long]$Start,[long]$Length){[BackupDriveScanner]::Read($script:device,$Start,$Length,$script:sector,1000)|ConvertFrom-Json}
+# The reader looks for a stop request before every 4 MiB chunk, so Stop does not wait for a whole stretch.
+function Read-DiskRegion([long]$Start,[long]$Length){[BackupDriveScanner]::Read($script:device,$Start,$Length,$script:sector,1000,$stopFile,$stopSince.Ticks)|ConvertFrom-Json}
 
 try{
  if(-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
@@ -152,29 +99,34 @@ try{
  if($Mode -eq 'Surface'){
   $statePath=Join-Path $OutputDirectory 'surface.json'
   $identity="$($disk.SerialNumber)|$size"
-  $state=$null
-  if(Test-Path -LiteralPath $statePath){$old=Read-BackupStatus $statePath;if($old.Identity -eq $identity -and -not $old.Complete){$state=$old}}
-  if(-not $state){$state=[pscustomobject]@{Identity=$identity;Size=$size;NextOffset=[long]0;Complete=$false;Started=(Get-Date).ToString('o');Finished=$null;Seconds=0.0;BadCount=0;VerySlowCount=0;SlowCount=0;Bad=@();Slow=@()}}
+  # An unfinished scan of this drive continues. A new one carries what the last finished scan found
+  # (Previous) until it is through; a saved position that cannot be read is set aside, never deleted.
+  $saved=Read-DriveScanState $statePath $identity
+  $state=if($saved.State){$saved.State}else{New-DriveScanState $identity $size $saved.Previous}
   $from=[long]$state.NextOffset;$session=[Diagnostics.Stopwatch]::StartNew()
   [BackupDriveScanner]::KeepAwake($true)
   try{
    while([long]$state.NextOffset -lt $size -and -not (Test-StopRequested)){
     $pos=[long]$state.NextOffset;$len=[math]::Min([long]512MB,$size-$pos)
     $r=Read-DiskRegion $pos $len
-    $state.BadCount+=$r.BadCount;$state.SlowCount+=$r.SlowCount;$state.VerySlowCount+=$r.VerySlowCount;$state.Seconds=[double]$state.Seconds+[double]$r.Seconds
+    $state.BadCount+=$r.BadCount;$state.SlowCount+=$r.SlowCount;$state.VerySlowCount+=$r.VerySlowCount;$state.RecoveredCount+=$r.RecoveredCount;$state.Seconds=[double]$state.Seconds+[double]$r.Seconds
     $state.Bad=@(@($state.Bad)+@($r.Bad)|Where-Object {$_}|Select-Object -First 200)
     $state.Slow=@(@($state.Slow)+@($r.Slow)|Where-Object {$_}|Select-Object -First 200)
-    $state.NextOffset=$pos+$len
+    $state.Recovered=@(@($state.Recovered)+@($r.Recovered)|Where-Object {$_}|Select-Object -First 200)
+    # A stretch cut short by a stop request ends at its last whole chunk; the scan goes on from there.
+    $state.NextOffset=$pos+[long]$r.Bytes
     [void](Write-BackupStatus $state $statePath)
     $readNow=[long]$state.NextOffset-$from;$rate=$readNow/[math]::Max(1,$session.Elapsed.TotalSeconds)
     $left=[TimeSpan]::FromSeconds(($size-[long]$state.NextOffset)/[math]::Max(1,$rate))
     $found=if($state.BadCount){"$($state.BadCount) unreadable areas so far"}else{'no unreadable areas so far'}
-    Set-CheckProgress ('Full scan: {0:N0} of {1:N0} GB read, {2:N0} MB/s, about {3}h {4:D2}m left. {5}.' -f ([long]$state.NextOffset/1GB),($size/1GB),($rate/1e6),[int][math]::Floor($left.TotalHours),$left.Minutes,$found) (100*[double]$state.NextOffset/$size)
+    Set-CheckProgress ('Full scan: {0:N0} of {1:N0} GiB read, {2:N0} MB/s, about {3}h {4:D2}m left. {5}.' -f ([long]$state.NextOffset/1GB),($size/1GB),($rate/1e6),[int][math]::Floor($left.TotalHours),$left.Minutes,$found) (100*[double]$state.NextOffset/$size)
+    if($r.Stopped){break}
    }
   }finally{[BackupDriveScanner]::KeepAwake($false)}
-  if([long]$state.NextOffset -ge $size){$state.Complete=$true;$state.Finished=(Get-Date).ToString('o')}
+  if([long]$state.NextOffset -ge $size){$state.Complete=$true;$state.Finished=(Get-Date).ToString('o');$state.Previous=$null}
   [void](Write-BackupStatus $state $statePath)
   $msg=if($state.Complete){if($state.BadCount){"Full scan finished: $($state.BadCount) areas could not be read."}else{'Full scan finished: every part of the drive could be read.'}}else{'Full scan stopped at {0:N0}%. It continues from there next time.' -f (100*[double]$state.NextOffset/$size)}
+  if($saved.SetAside){$msg+=" The saved position of an earlier scan could not be read, so this scan started from the beginning; that file was kept as $(Split-Path -Leaf $saved.SetAside)."}
   Complete-Check $true $msg
   return
  }
@@ -188,7 +140,8 @@ try{
  $regions=foreach($r in @(@('start',[long]0),@('middle',[long]([math]::Floor($size/2/$chunk)*$chunk)),@('end',[long]($size-$len)))){
   if(Test-StopRequested){break}
   $x=Read-DiskRegion $r[1] $len
-  [pscustomobject]@{Name=$r[0];Offset=$r[1];MBps=[math]::Round([double]$x.Bytes/[math]::Max(0.001,[double]$x.Seconds)/1e6);BadCount=[int]$x.BadCount;VerySlowCount=[int]$x.VerySlowCount;Bad=@($x.Bad)}
+  if($x.Stopped){break}
+  [pscustomobject]@{Name=$r[0];Offset=$r[1];MBps=[math]::Round([double]$x.Bytes/[math]::Max(0.001,[double]$x.Seconds)/1e6);BadCount=[int]$x.BadCount;VerySlowCount=[int]$x.VerySlowCount;RecoveredCount=[int]$x.RecoveredCount;Bad=@($x.Bad)}
  }
  $testStarted=$null
  if($smart.Json){
@@ -219,7 +172,7 @@ try{
    if($d['Capacity'] -and $d['Capacity'] -ne '0'){$connections.Add([pscustomobject]@{Time=$e.TimeCreated;DiskNumber=[int]$d['DiskNumber'];Key=(Get-DriveConnectionKey $d['SerialNumber'] $d['Model'] $d['Capacity'])})}
   }
  }catch{if($_.FullyQualifiedErrorId -notlike 'NoMatching*'){$unread.Add("drive connections ($($_.Exception.Message))")}}
- $eventFindings=@(Get-DriveEventFindings @($events) $disk.Number $letter ([string]$disk.BusType -eq 'USB') $connections)
+ $eventFindings=@(Get-DriveEventFindings @($events) $disk.Number $letter ([string]$disk.BusType -eq 'USB') $connections ([string]$disk.BusType))
  if($unread.Count){$eventFindings+=[pscustomobject]@{Group='Connection';Status='NotRun';Line='Part of the Windows log could not be read: '+($unread -join '; ')}}
  Set-CheckProgress 'Checking the connection...' 36
  $link=$null
@@ -249,7 +202,7 @@ try{
   Drive=$letter;DiskNumber=$disk.Number;BusType=[string]$disk.BusType;Format=[string]$volume.FileSystem;SmartType=$smart.Type
   Started=$started.ToString('o');Finished=(Get-Date).ToString('o')
   Sample=[ordered]@{Regions=@($regions)};Events=$eventFindings
-  Health=Merge-DriveEvents (Get-DriveHealthFindings $final $smart.Why) $eventFindings 'Health'
+  Health=Merge-DriveEvents (Get-DriveHealthFindings $(if($final){$final}else{$smart.Seen}) $smart.Why) $eventFindings 'Health'
   Connection=Merge-DriveEvents (Get-DriveConnectionFindings $link ([string]$disk.BusType) $final $counters) $eventFindings 'Connection'
   FileSystem=Merge-DriveEvents (Get-DriveFileSystemFindings $letter ([string]$volume.FileSystem) $fsResult $fsError ([string]$volume.HealthStatus)) $eventFindings 'FileSystem'
  }

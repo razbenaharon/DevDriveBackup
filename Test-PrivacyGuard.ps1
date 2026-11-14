@@ -2,12 +2,14 @@
 # Blocks private backup details from reaching the public repository.
 # Without switches it checks every tracked file and the last commit (CI). -Staged checks what the next
 # commit would publish (pre-commit hook); -MessageFile checks a commit message (commit-msg hook).
+# -Range OLD..NEW also checks every commit in that range, its message and each file version it adds
+# or changes, so that a detail added in one pushed commit and removed in the next is still caught (CI).
 # Generic rules run everywhere. On your own computer it also blocks the specific values found in your
 # git-ignored settings (*.local.json) and drive inventory (hardware.json): volume and key identifiers,
 # drive models and labels, folder names, computer name and personal email. Those values are read at run
 # time and never stored in the repository.
 # -ListTerms prints the private values it found on this computer and checks nothing.
-param([switch]$Staged,[string]$MessageFile,[switch]$ListTerms)
+param([switch]$Staged,[string]$MessageFile,[switch]$ListTerms,[string]$Range)
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $ci=[bool]$env:GITHUB_ACTIONS
@@ -18,6 +20,20 @@ function Read-Blob($id){
  $psi.WorkingDirectory=$PSScriptRoot;$psi.RedirectStandardOutput=$true;$psi.UseShellExecute=$false
  $p=[Diagnostics.Process]::Start($psi);$ms=[IO.MemoryStream]::new();$p.StandardOutput.BaseStream.CopyTo($ms);$p.WaitForExit()
  if($p.ExitCode){throw ('git cat-file blob '+$id+' failed')};$ms.ToArray()
+}
+function Get-BlobText([byte[]]$bytes){
+ # The text to check in a file's bytes. A zero byte used to mean "binary, skip", which let UTF-16
+ # text and plain text behind a single zero byte through. Now: a byte order mark decides the
+ # encoding; without one and without zero bytes it is UTF-8; anything else is searched the way the
+ # "strings" tool does, for runs of 8 or more printable characters as single bytes and as UTF-16,
+ # one run per line. Compressed data in a picture or icon has no such runs that look like a rule.
+ if(-not $bytes){return ''}
+ if($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE){return [Text.Encoding]::Unicode.GetString($bytes)}
+ if($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF){return [Text.Encoding]::BigEndianUnicode.GetString($bytes)}
+ if([Array]::IndexOf($bytes,[byte]0) -lt 0){return [Text.UTF8Encoding]::new($false).GetString($bytes)}
+ $raw=[Text.Encoding]::Latin1.GetString($bytes)
+ $runs=foreach($m in [regex]::Matches($raw,'(?:[\x20-\x7E\t]\x00){8,}|(?:\x00[\x20-\x7E\t]){8,}|[\x20-\x7E\t]{8,}')){$m.Value.Replace("`0",'')}
+ @($runs) -join "`n"
 }
 function Get-Strings($node){
  if($node -is [string]){$node}elseif($node -is [pscustomobject]){foreach($p in $node.PSObject.Properties){Get-Strings $p.Value}}elseif($node -is [Collections.IEnumerable]){foreach($i in $node){Get-Strings $i}}
@@ -63,14 +79,27 @@ if(-not $ci){
  foreach($scope in '--global','--system'){$email=& git config $scope --get user.email 2>$null;if($email -and $email -notmatch 'noreply'){Add-Term $email}}
  Add-Term $env:COMPUTERNAME;Add-Term $env:USERNAME
 }
+# For Test-PrivacyGuardRules.ps1 only: made-up values to check the rules with, so the test never needs
+# this computer's real ones. They can only add to what is blocked.
+if($env:PRIVACY_GUARD_TEST_TERMS){foreach($t in $env:PRIVACY_GUARD_TEST_TERMS -split ';'){Add-Term $t}}
 if($ListTerms){@($terms)|Sort-Object;return}
 
 $rules=@(
  @{Name='volume identifier';Pattern='(?i)Volume\{[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\}'},
- @{Name='user profile path';Pattern='(?i)\b[a-z]:[\\/]+Users[\\/]+(?!(YOUR_USER|Public|Default)\b)(?![%$<{])[^\\/\s"''<>|*?]+'},
- @{Name='email address';Pattern='(?i)[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}\b';Allow='(?i)noreply|@example\.(com|org|net)$'}
+ # The second form is the same folder as Git Bash and WSL write it (drive letter as a folder, with
+ # /mnt in front under WSL); it must start the word, so the path part of a web address does not count.
+ @{Name='user profile path';Pattern='(?i)(\b[a-z]:[\\/]+|(?<![\w.:/-])/(mnt/)?[a-z]/)Users[\\/]+(?!(YOUR_USER|Public|Default)\b)(?![%$<{])[^\\/\s"''<>|*?]+'},
+ # Allowed: a sender named noreply or no-reply, GitHub's private commit addresses, and example.com.
+ # An address that merely contains "noreply" somewhere is a real address and is not.
+ @{Name='email address';Pattern='(?i)[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}\b';Allow='(?i)^no-?reply@|@users\.noreply\.github\.com$|@example\.(com|org|net)$'}
 )
-if($terms.Count){$rules+=@{Name='private value from your local settings';Pattern='(?i)(?<![a-z0-9])('+((@($terms)|Sort-Object Length -Descending|ForEach-Object {[regex]::Escape($_)}) -join '|')+')(?![a-z0-9])'}}
+# A short value counts only as a word of its own, or ordinary words would raise alarms. A value of 8
+# characters or more is found inside a longer word as well (myDriveNameCopy). Two rules over two
+# separate sets, so one place is never reported twice.
+$join={param($set)(@($set)|Sort-Object Length -Descending|ForEach-Object {[regex]::Escape($_)}) -join '|'}
+$longTerms=@(@($terms)|Where-Object {$_.Length -ge 8});$shortTerms=@(@($terms)|Where-Object {$_.Length -lt 8})
+if($shortTerms.Count){$rules+=@{Name='private value from your local settings';Pattern='(?i)(?<![a-z0-9])('+(& $join $shortTerms)+')(?![a-z0-9])'}}
+if($longTerms.Count){$rules+=@{Name='private value from your local settings';Pattern='(?i)('+(& $join $longTerms)+')'}}
 
 $findings=[Collections.Generic.List[string]]::new()
 # CI logs are public, so there the matched text is not repeated.
@@ -94,17 +123,36 @@ if($MessageFile){
   $entries=@($entries|Where-Object {$_.Path -in $changed});$ignored=@($ignored|Where-Object {$_ -in $changed})
  }
  foreach($p in $ignored){$findings.Add($p+'  file matches .gitignore and was added by force')}
+ $seen=[Collections.Generic.HashSet[string]]::new()
  foreach($e in $entries){
   $scanned++;Test-Text ('file name '+$e.Path) $e.Path
   if($e.Path -match '(?i)\.local\.json$|\.dpapi$|\.password$|recovery-key\.txt$'){$findings.Add($e.Path+'  private settings or key file')}
   if($e.Mode -eq '160000'){continue}
-  $bytes=Read-Blob $e.Id;if([Array]::IndexOf($bytes,[byte]0) -ge 0){continue}
-  Test-Text $e.Path ([Text.UTF8Encoding]::new($false).GetString($bytes))
+  [void]$seen.Add($e.Id);Test-Text $e.Path (Get-BlobText (Read-Blob $e.Id))
+ }
+ # Every commit of a push: what it says and each file version it adds or changes. Emails on commits
+ # are left out for the reason given below. A merge adds no content of its own.
+ $commits=@()
+ if($Range -and -not $Staged){
+  $commits=@(& git -C $PSScriptRoot rev-list $Range 2>$null)
+  # After a forced push the old end of the range is no longer in the repository.
+  if($LASTEXITCODE){$commits=@();Write-Warning 'The commits of this push could not be listed; only the newest commit is checked.'}
+ }
+ foreach($c in $commits){
+  $scanned++;$short=$c.Substring(0,7)
+  Test-Text ('commit '+$short) ((Invoke-Git log -1 --format='%an%n%cn%n%B' $c) -join "`n")
+  $raw=Split-Zero (Invoke-Git diff-tree -r --root --no-commit-id --no-abbrev --diff-filter=ACMR -z $c)
+  for($i=0;$i+1 -lt $raw.Count;$i+=2){
+   $meta=$raw[$i] -split ' ';$path=$raw[$i+1];$id=$meta[3]
+   Test-Text ('file name '+$path+' in commit '+$short) $path
+   if($meta[1] -eq '160000' -or -not $seen.Add($id)){continue}
+   Test-Text ($path+' in commit '+$short) (Get-BlobText (Read-Blob $id))
+  }
  }
  if($Staged){foreach($v in 'GIT_AUTHOR_IDENT','GIT_COMMITTER_IDENT'){Test-Text $v ((Invoke-Git var $v) -replace '\s+\d+\s+[+-]\d{4}$','')}}
  # The last commit's author and committer emails are not checked: merges on GitHub (and its pull request
  # test merges) carry the account's own email, which the owner chose to show. Names and the message still are.
- else{& git -C $PSScriptRoot rev-parse --verify -q HEAD *>$null;if(-not $LASTEXITCODE){Test-Text 'last commit' ((Invoke-Git log -1 --format='%an%n%cn%n%B') -join "`n")}}
+ elseif(-not $commits.Count){& git -C $PSScriptRoot rev-parse --verify -q HEAD *>$null;if(-not $LASTEXITCODE){Test-Text 'last commit' ((Invoke-Git log -1 --format='%an%n%cn%n%B') -join "`n")}}
 }
 
 if($findings.Count){
