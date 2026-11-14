@@ -7,9 +7,21 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Every commit being pushed is checked, not only the newest: a detail added and removed again
+      # would otherwise stay in the history.
       - name: Check for private backup details
         shell: pwsh
-        run: ./Test-PrivacyGuard.ps1
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          $range = if ($env:BASE) { "$env:BASE..HEAD" } elseif ($env:BEFORE -and $env:BEFORE -notmatch '^0+$') { "$env:BEFORE..HEAD" } else { "origin/${{ github.event.repository.default_branch }}..HEAD" }
+          ./Test-PrivacyGuard.ps1 -Range $range
+      - name: Verify the privacy check itself
+        shell: pwsh
+        run: ./Test-PrivacyGuardRules.ps1
       - name: Parse all PowerShell sources
         shell: pwsh
         run: |
@@ -58,6 +70,28 @@ jobs:
       - name: Verify plain copy rules
         shell: pwsh
         run: ./Test-BackupCopyRules.ps1
+      - name: Verify plain copy runs, failures and recovery folders
+        shell: pwsh
+        run: ./Test-BackupMirror.ps1
+      - name: Verify the rules for versions
+        shell: pwsh
+        run: ./Test-BackupVersionsRules.ps1
+      - name: Verify versions against a disposable repository
+        shell: pwsh
+        run: |
+          ./Install-BackupEngine.ps1
+          ./Test-BackupVersions.ps1
+      - name: Verify the window's data and run results
+        shell: pwsh
+        run: ./Test-BackupData.ps1
+      - name: Verify the window opens on every page
+        shell: pwsh
+        run: ./Test-BackupWindow.ps1
+      - name: Verify drive tools and the report generator
+        shell: pwsh
+        run: |
+          ./Test-BackupTools.ps1
+          python ./Test-BackupToolsReport.py
       - name: Verify the hard memory limit
         shell: pwsh
         run: ./Test-BackupResourceControls.ps1

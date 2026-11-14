@@ -35,7 +35,7 @@ Most backup tools either copy everything slowly or hide your files in a format o
 1. Install [PowerShell 7.2 or newer](https://aka.ms/powershell).
 2. Get the code: `git clone https://github.com/razbenaharon/DevDriveBackup.git`, or download the ZIP and run `Get-ChildItem -Recurse | Unblock-File` in the folder so Windows allows the scripts.
 3. Only if you want versioned history: `pwsh -NoProfile -File ./Install-BackupEngine.ps1` downloads restic 0.19.1 into `bin\` and checks its pinned SHA-256.
-4. Only if you want the drive's own health report in *Drive check*: **Install health tool** on that page, or `pwsh -NoProfile -File ./Install-DriveTools.ps1`, downloads smartmontools 7.5, checks its pinned SHA-256 and installs only `smartctl` into `bin\smartmontools` (the installer asks for administrator rights; no service, Start menu entry or PATH change).
+4. Only if you want the drive's own health report in *Drive check*: **Install health tool** on that page, or `pwsh -NoProfile -File ./Install-DriveTools.ps1`, downloads smartmontools 7.5, checks its pinned SHA-256 and installs only `smartctl` and its drive database into `bin\smartmontools` (the installer asks for administrator rights; no service, Start menu entry or PATH change).
 5. Optional: `pwsh -NoProfile -File ./New-DevDriveBackupShortcut.ps1` puts a **DevDriveBackup** shortcut with the program icon on the desktop.
 
 Backups need no administrator rights, PATH changes or services. Only *Drive check* asks Windows for administrator rights, each time it runs, because reading a drive directly needs them.
@@ -49,13 +49,13 @@ Keep DevDriveBackup in a folder only you can change, for example `C:\Users\YOUR_
 3. On **What to back up**, **Add folder...** for each drive or folder, and set each subfolder to *Plain copy*, *Versions*, *Both* or *Skip*.
 4. Choose a **Computer load** level and press **Back up now**.
 
-The first plain copy is verified automatically, file by file. After that, back up whenever you like; the overview shows how long ago the last complete backup was.
+Only one window runs at a time: starting it again brings the open one to the front. The first plain copy is verified automatically, file by file. After that, back up whenever you like; the overview shows how long ago the last complete backup was, and warns when the latest run failed or was stopped.
 
 ## How it works
 
-**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`, or **Keep deleted for** on the overview); `-KeepRecovery N` then deletes all but the newest N dated recovery folders. Nothing is moved aside after a run in which robocopy failed. Verification hashes both sides in parallel and counts selected files missing from the copy. DevDriveBackup's own password, recovery-key and state folders are never copied by either engine, even when one of them is selected itself; an older copy of one found in the plain copy is named in the run's result so you can delete it.
+**Plain copy** (`Invoke-FastMirror.ps1`) runs robocopy per selected folder with `/E /COPY:DAT /DCOPY:DAT /XJ`, retries once, and skips caches and links. A file that stays locked is counted and reported without stopping the run. A run in which robocopy ended early, without its totals, is a failed run. Files that exist only in the copy are reported, and moved to `<copy folder>-recovery\<date>` only when you ask for it (`-MoveExtras`, or **Keep deleted for** on the overview); `-KeepRecovery N` then deletes all but the newest N dated recovery folders. Nothing is moved aside after a run in which robocopy failed. A file and a folder that swapped kinds heal themselves: the old one goes to the dated recovery folder and the new one is copied in the same run. **Repair differing files** (`-Repair`) copies again only what the last content check reported, keeps each old version in a recovery folder, compares every repaired file with the source, deletes nothing and does not count as a backup. The run's result also names files skipped through their short Windows name by an `Exclude` pattern, and names that differ only by letter case. Verification hashes both sides in parallel and counts selected files missing from the copy. DevDriveBackup's own password, recovery-key and state folders are never copied by either engine, even when one of them is selected itself; an older copy of one found in the plain copy is named in the run's result so you can delete it.
 
-**Versions** (`Backup-Worker.ps1`) run restic with a random 256-bit password stored for your Windows account (DPAPI) plus a portable recovery key file, a hard memory cap (Windows Job Object), CPU and I/O limits, and a structural `restic check` after every backup. Restore always goes to a new folder and verifies restored content.
+**Versions** (`Backup-Worker.ps1`) run restic with a random 256-bit password stored for your Windows account (DPAPI) plus a portable recovery key file, a hard memory cap (Windows Job Object), CPU and I/O limits, and a structural `restic check` after every backup. A lock left by a run that was stopped or crashed is removed by itself, only when it was made on this computer and its process has ended, and the step is tried once more. A backup that could not read every file is kept as a *partial* version: it is labelled in the history, reported as a failed run, and never counted or deleted by *Keep versions*. Restore always goes to a new folder and verifies restored content; when only the dates of protected parent folders cannot be set, it completes with a warning and says that the content was not verified.
 
 **Folder modes** are stored once per source and read by both engines (`Backup.Selection.psm1`). The most specific entry wins, so `Projects` = Both with `Projects\big\cache` = Skip works as expected.
 
@@ -87,7 +87,7 @@ The first plain copy is verified automatically, file by file. After that, back u
 | `New-DevDriveBackupShortcut.ps1`, `New-DevDriveBackupIcon.ps1`, `DevDriveBackup.ico`, `design/icon` | Desktop shortcut; the program icon and its vector sources |
 | `Test-*.ps1`, `.githooks`, `.github/workflows` | Tests, the privacy hooks and the checks that run on every push |
 | `config.example.json`, `BACKUP-SYSTEM.md`, `CHANGELOG.md`, `THIRD-PARTY.md`, `LICENSE` | Example configuration, versioned engine details, changes, third-party software, license |
-| `profiles.local.json`, `jobs\*.local.json`, `backup.local.json` | Your personal settings (git-ignored) |
+| `profiles.local.json`, `jobs\*.local.json`, `backup.local.json` | Your personal settings (git-ignored). `profiles.lastgood.local.json` is the last good copy of the first, offered when it is damaged; a damaged file is kept as `profiles.damaged-<date>.local.json` |
 
 Personal skips go in a job file: `Exclude` takes folder names (wildcards allowed) or paths below the source, and `NeverBackUp` lists folders that are never backed up by either engine, such as a folder holding credentials. See [config.example.json](config.example.json) and [BACKUP-SYSTEM.md](BACKUP-SYSTEM.md).
 
@@ -131,7 +131,7 @@ pwsh -NoProfile -File ./Test-BackupSystem.ps1 -DestinationDrive Y      # version
 pwsh -NoProfile -File ./Test-BackupSecurity.ps1 -DestinationDrive Y    # password change and recovery keys
 ```
 
-`Test-BackupCopyRules.ps1`, `Test-BackupActivity.ps1`, `Test-BackupTheme.ps1`, `Test-BackupRetention.ps1` (its real restic part runs where restic is installed), `Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
+`Test-BackupCopyRules.ps1`, `Test-BackupMirror.ps1` (real plain copies into a temporary folder: runs that end early, recovery folders, skips), `Test-BackupVersionsRules.ps1`, `Test-BackupVersions.ps1` (a disposable repository; needs restic), `Test-BackupData.ps1`, `Test-BackupWindow.ps1` (opens every page with disposable settings), `Test-BackupTools.ps1`, `Test-BackupToolsReport.py`, `Test-PrivacyGuardRules.ps1`, `Test-BackupActivity.ps1`, `Test-BackupTheme.ps1`, `Test-BackupRetention.ps1` (its real restic part runs where restic is installed), `Test-BackupDriveCheck.ps1`, `Test-BackupHistory.ps1`, `Test-BackupStatus.ps1`, `Test-BackupSecuritySafety.ps1` and `Test-BackupResourceControls.ps1` need no drive and run in CI.
 
 ### Keeping your own details out of a fork
 
@@ -151,4 +151,4 @@ pwsh -NoProfile -File ./Test-PrivacyGuard.ps1 -ListTerms   # show the private va
 
 ## License
 
-MIT, see [LICENSE](LICENSE). restic and Chart.js are separate projects under their own licenses, see [THIRD-PARTY.md](THIRD-PARTY.md).
+MIT, see [LICENSE](LICENSE). restic, smartmontools (GPL-2.0-or-later, downloaded and run as a separate program) and Chart.js are separate projects under their own licenses, see [THIRD-PARTY.md](THIRD-PARTY.md).
