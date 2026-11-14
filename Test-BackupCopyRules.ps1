@@ -45,6 +45,18 @@ try{
  $bad=@([MirrorVerifier]::Compare((Join-Path $root 'flat-copy'),(Join-Path $root 'flat'),2,$ep,$eo,$true,[string[]]@(),[string[]]@(),[string[]]@(),[ref]$vf,[ref]$vb))
  Assert ($bad.Count -eq 0 -and $vf -eq 1) 'a source with no subfolders listed is checked in full'
 
+ # --- Repair of single files: the same rules, one path at a time ---------------------------------
+ $rec=Join-Path $root 'recovery';Put (Join-Path $root 'outside.txt') 'outside the copy'
+ $left=@('work\node_modules\x.js','work\build\cache\c.bin','work\notes.secret','private\keys\k.txt','skipped\s.txt','work\deleted.txt','..\outside.txt','work\..\..\outside.txt',(Join-Path $root 'outside.txt'))
+ $done=@([MirrorVerifier]::Repair($dst,$src+'\',$rec,2,[string[]]@(@('work\changed.txt','work\resized.txt','work\not-copied.txt','work\same.txt')+$left),$paths,$on,$true,[string[]]@('node_modules'),[string[]]@('*.secret'),[string[]]@('work\build\cache'),[string[]]@()))
+ $what={param($rel)(@($done|Where-Object {$_.Split("`t")[1] -eq $rel})[0]).Split("`t")[0]}
+ Assert ((& $what 'work\changed.txt') -eq 'REPAIRED' -and (& $what 'work\resized.txt') -eq 'REPAIRED' -and (& $what 'work\not-copied.txt') -eq 'REPAIRED' -and (& $what 'work\same.txt') -eq 'MATCHES') 'a repair copies again the files that differ or are missing, and leaves a matching file alone'
+ Assert (@($left|Where-Object {(& $what $_) -ne 'SKIPPED'}).Count -eq 0) 'it leaves alone skipped names, personal names, Exclude paths, NeverBackUp and Skip folders, files only in the copy, and paths that lead out of the copy'
+ Assert ((@(Get-ChildItem -LiteralPath $rec -Recurse -File|ForEach-Object {$_.FullName.Substring($rec.Length+1)}|Sort-Object) -join '|') -eq 'work\changed.txt|work\resized.txt' -and [IO.File]::ReadAllText((Join-Path $rec 'work\changed.txt')) -ceq 'work\changed.tXt') 'the old versions are in the recovery folder, and nothing else is'
+ Assert (-not(Test-Path -LiteralPath (Join-Path $dst 'work\node_modules')) -and -not(Test-Path -LiteralPath (Join-Path $dst 'private')) -and [IO.File]::ReadAllText((Join-Path $root 'outside.txt')) -eq 'outside the copy' -and @(Get-ChildItem -LiteralPath (Join-Path $dst 'work') -File).Count -eq 5) 'nothing else was written, and no working file is left'
+ $bad=@([MirrorVerifier]::Compare($dst,$src+'\',2,$paths,$on,$true,[string[]]@('node_modules'),[string[]]@('*.secret'),[string[]]@('work\build\cache'),[ref]$vf,[ref]$vb))
+ Assert (($bad -join '|') -eq "MISSING-IN-SOURCE`twork\deleted.txt" -and $vf -eq 4) 'after the repair the content check finds only the file that is only in the copy'
+
  # --- Files gone from the source (robocopy /MT listing) --------------------------------------
  # Line shapes seen in a real /MT log: a record's path on the next line, a path followed by the
  # next record, two records on one line, and an error line that names a folder that is not extra.
@@ -64,6 +76,12 @@ try{
  Assert (($found -join '|') -eq (($want|Sort-Object) -join '|')) 'every extra in a /MT listing is found, split lines included'
  Assert ('G:\Mirror\locked\' -notin $found) 'a folder named on an error line is not an extra'
  Assert ('G:\Mirror-recovery\elsewhere.txt' -notin $found) 'a path beside the mirror folder is not an extra'
+ # Also seen: a record that names a source path, followed at once by one that names a path in the copy
+ # (and the reverse). Both paths must come out whole, each for its own side.
+ $glued=@("`t  *MISMATCH   `t`t      15`tE:\Src\swap2\yG:\Mirror\swap\x","`t  *EXTRA File `t`t       4`tg:\mirror\f\zE:\Src\q\w\","`t    New File  `t`t      17`tE:\Src\swap\x\new.txt")
+ Assert ((@(Get-RoboExtraPaths $glued 'G:\Mirror' 'E:\Src\'|Sort-Object) -join '|') -eq 'g:\mirror\f\z|G:\Mirror\swap\x') 'a path in the copy glued to a source path is still found whole'
+ Assert ((@(Get-RoboExtraPaths $glued 'E:\Src\' @('G:\Mirror','')|Sort-Object) -join '|') -eq 'E:\Src\q\w\|E:\Src\swap\x\new.txt|E:\Src\swap2\y') 'and so is the source path'
+ Assert ((@(Get-RoboExtraPaths @("`t  *EXTRA File `t`t 1`tG:\x\a.txtE:\y\b.txt") 'G:\' 'E:\') -join '|') -eq 'G:\x\a.txt') 'also when both sides are drive roots'
 
  # --- Drive identity -----------------------------------------------------------------------
  $letter=$src.Substring(0,1)
@@ -71,8 +89,14 @@ try{
  if($other.Count){
   $job=Join-Path $root 'job.json'
   [pscustomobject]@{Source=$src+'\';SourceVolumeId=(Get-Volume -DriveLetter $letter).UniqueId;DestinationVolumeId='not-this-drive';DefaultMode='Mirror';Choices=@()}|ConvertTo-Json|Set-Content -LiteralPath $job
-  Assert (Throws {& (Join-Path $PSScriptRoot 'Invoke-FastMirror.ps1') -ConfigPath $job -DestinationDrive ([string]$other[0].DriveLetter) -Folder 'never-created'} 'not the backup drive') 'the plain copy refuses a drive that is not the one in the job'
-  Assert (-not(Test-Path -LiteralPath ([string]$other[0].DriveLetter+':\never-created'))) 'nothing was created on that drive'
+  # This runs the real tool against a real drive and relies on the very check it tests. So it only
+  # asks for a content check, which never creates a copy, and keeps the run records in the disposable
+  # folder: if the check ever let the drive through, nothing would be written to that drive or to
+  # the real state folder.
+  $realState=$env:LOCALAPPDATA;$env:LOCALAPPDATA=Join-Path $root 'state'
+  try{Assert (Throws {& (Join-Path $PSScriptRoot 'Invoke-FastMirror.ps1') -ConfigPath $job -DestinationDrive ([string]$other[0].DriveLetter) -Folder 'never-created' -VerifyOnly} 'not the backup drive') 'the plain copy refuses a drive that is not the one in the job'}
+  finally{$env:LOCALAPPDATA=$realState}
+  Assert (-not(Test-Path -LiteralPath ([string]$other[0].DriveLetter+':\never-created')) -and -not(Test-Path -LiteralPath (Join-Path $root 'state'))) 'nothing was created on that drive, and no run was recorded'
  }else{Write-Output 'SKIP drive identity: this computer has only one lettered volume'}
 
  # --- Plain copy folder names and job files ------------------------------------------------
