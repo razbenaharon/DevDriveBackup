@@ -161,6 +161,9 @@ try{
   foreach($k in $environment.Keys){$psi.Environment[$k]=$environment[$k]};foreach($a in $arguments){[void]$psi.ArgumentList.Add($a)}
   [Diagnostics.Process]::Start($psi)
  }
+ # Killing a tree returns before every process in it is really gone, and a lock is released only when its
+ # process has ended. On a slow computer the next run came too early; so wait for the engine to be gone.
+ function Wait-EngineGone([datetime]$Before){$until=(Get-Date).AddSeconds(60);while((Get-Date) -lt $until -and @(Get-Process -Name 'restic*' -ErrorAction SilentlyContinue|Where-Object {try{$_.StartTime -le $Before}catch{$false}}).Count){Start-Sleep -Milliseconds 200}}
  function Start-Engine([string[]]$arguments){Start-Hidden $engine (@('-r',$repo,'--cache-dir',(Join-Path $base 'direct-cache'),'--quiet')+$arguments) @{RESTIC_PASSWORD=(Read-Password)}}
  Assert ($after.PSObject.Properties['LockReleased'] -and $null -eq $after.LockReleased -and -not(Test-Path -LiteralPath (Join-Path $after.RunDirectory 'ReadingLocks.jsonl'))) 'a run that meets no lock looks for none and reports none'
  [IO.File]::WriteAllBytes((Join-Path $source 'large.bin'),[Security.Cryptography.RandomNumberGenerator]::GetBytes(6MB))
@@ -168,7 +171,7 @@ try{
  $slowPath=Join-Path $private 'settings-slow.json';$config.RateMBps=0.05;$config|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $slowPath;$config.RateMBps=0
  $killedRun=Join-Path $private 'runs\Backup-killed'
  $worker=Start-Hidden ([Environment]::ProcessPath) @('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'Backup-Worker.ps1'),'-ConfigPath',$slowPath,'-Action','Backup','-RunDirectory',$killedRun,'-TestRoot',$moved)
- try{Wait-Lock}finally{$worker.Kill($true);$worker.WaitForExit();$worker.Dispose()}
+ try{Wait-Lock}finally{$worker.Kill($true);$worker.WaitForExit();$worker.Dispose();Wait-EngineGone (Get-Date)}
  $left=@(Lock-Names)
  Assert ($left.Count -eq 1 -and (Read-BackupStatus (Join-Path $killedRun 'status.json')).State -eq 'BackingUp' -and -not(Test-Path -LiteralPath (Join-Path $killedRun 'result.json'))) 'a backup whose worker is killed part way leaves its lock in the repository'
  $healed=Run 'Backup' @{} $null $moved
@@ -176,7 +179,7 @@ try{
  Assert (@(Lock-Names).Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory 'CheckingStructure.locked.errors.log')) -like '*already locked*' -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory 'CheckingStructure.errors.log')) -notlike '*already locked*') 'the step that met the lock was tried once more and passed; what its first try reported is kept beside it'
  # A check that was killed leaves a lock of the other kind (exclusive), which stops even listing the versions.
  $check=Start-Engine @('--limit-download','20','check','--read-data')
- try{Wait-Lock}finally{$check.Kill($true);$check.WaitForExit();$check.Dispose()}
+ try{Wait-Lock}finally{$check.Kill($true);$check.WaitForExit();$check.Dispose();Wait-EngineGone (Get-Date)}
  $left=@(Lock-Names)
  $listed=Run 'Snapshots' @{} $null $moved
  Assert ($left.Count -eq 1 -and $listed.State -eq 'Completed' -and $listed.LockReleased.Stage -eq 'ListingSnapshots' -and $listed.LockReleased.Locks[0].Id -ceq $left[0] -and $listed.LockReleased.Locks[0].Exclusive -eq $true -and @(Lock-Names).Count -eq 0) 'the lock of a killed check is removed the same way when the versions are listed'
