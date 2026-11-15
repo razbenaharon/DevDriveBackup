@@ -260,7 +260,7 @@ try{
  Check 'more than 10 recovery folders without a keep rule: the overview suggests one, quietly, and changes nothing' {$r.Code -eq 0 -and $s.Warning -eq "14 recovery folders have piled up beside the plain copy of Music. Set 'Keep deleted in' to keep only the newest ones." -and $s.WarningLevel -eq 'Advice' -and -not $s.Drives[0].Alert -and -not (& $read5).PSObject.Properties['KeepDeleted']}
  $d5=Read-CenterProfiles;Remove-CenterSource $d5 $p5.Id $fresh.Id;Save-CenterProfiles $d5
  $r=Open-Window $add @('-AutoCloseSeconds','2','-TestAction','AddFolder','-TestPath',(Join-Path $src 'Music'),'-Answer','Use the earlier','-TestState',$st);$s=Read-State $st
- Check 'Use the earlier settings: its settings file and folders are taken up again, and the window says so' {$q=@((& $read5).Sources);$q.Count -eq 1 -and $q[0].ConfigPath -in $mu.ConfigPath,$fresh.ConfigPath -and $s.Log.Added.Status -like '*with its earlier settings*is continued*'}
+ Check 'Use the earlier settings: its settings file and folders are taken up again, and the window says so' {$q=@((& $read5).Sources);$q.Count -eq 1 -and $q[0].ConfigPath -in $mu.ConfigPath,$fresh.ConfigPath -and $s.Log.Added.Status -like '*with its earlier settings*is continued. Nothing old is deleted until you approve the first clean-up again.'}
  Check 'adding folders logged no error in an event handler' {-not (Test-Path -LiteralPath (Join-Path $add 'logs\ui-errors.log'))}
 
  # --- The settings file is damaged or changed on disk while the window is open ---

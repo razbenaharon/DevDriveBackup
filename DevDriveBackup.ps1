@@ -1413,7 +1413,7 @@ function Add-SourceFolder($P,[string]$Path,[string]$Label,[string]$Mode){
  $s=Add-CenterSource -Data $script:data -ProfileId $P.Id -Path $Path -Label $Label -DefaultMode $Mode -Earlier $how;Save-Settings
  Update-Details;$srcList.SelectedIndex=$srcList.Items.Count-1
  if($old -and $how -eq 'Fresh'){$runStatus.Text="Added $($s.Label) as a new backup. The earlier folders stay on the drive untouched: $($kept -join ' and ')."}
- elseif($old){$runStatus.Text="Added $($s.Label) with its earlier settings; its backup in $($kept -join ' and ') is continued."}
+ elseif($old){$runStatus.Text="Added $($s.Label) with its earlier settings; its backup in $($kept -join ' and ') is continued. Nothing old is deleted until you approve the first clean-up again."}
  $s
 }
 function Get-OverviewSource {

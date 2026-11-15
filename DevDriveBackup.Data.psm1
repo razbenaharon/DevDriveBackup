@@ -431,6 +431,13 @@ function Add-CenterSource {
  }
  $source=[pscustomobject]@{Id=$id;Label=$Label.Trim();Path=$root;ConfigPath=$config;MirrorFolder=$MirrorFolder;Created=(Get-Date).ToString('o')}
  $profile.Sources=@($profile.Sources)+$source
+ # An earlier job, versions folder or plain copy folder is taken up: its old versions and recovery
+ # folders were never in a list the user approved. The first clean-up is shown again (see
+ # Test-CenterRetentionConfirmed); a list approved before did not hold them either and is dropped.
+ if($ExistingConfigPath -or $PSBoundParameters.ContainsKey('MirrorFolder')){
+  [void](Remove-CenterRetentionApproved $profile)
+  $profile|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $false -Force
+ }
  $source
 }
 function Get-CenterDriveJobs($Profile) {

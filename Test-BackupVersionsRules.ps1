@@ -179,6 +179,18 @@ Assert $true 'the newest complete version of every set of folders survives every
 $wrongClock=@((Ver 1 '2027-01-01T12:00:00Z'),(Ver 2 '2027-01-02T12:00:00Z'),(Ver 3 '2026-11-12T10:00:00Z'))
 $p=Plan $wrongClock 1 0 3
 Assert ((Same (Gone $p) (Ids 1)) -and (Same (Why $p 3) @('JustMade')) -and (Same (Why $p 2) @('NewestComplete','LastN'))) 'the version just made stays even when versions dated later exist (a clock that was wrong)'
+# One version saved while the clock was a year ahead must not move the months away from today's: the
+# months before the version just made still keep their version. (Counting only from the newest version,
+# the 6 months were Jun 2027 to Nov 2027, nothing real was in them, and every month's version went.)
+$ahead=@(foreach($m in 3..10){foreach($day in 1,8,15,22){Ver ($m*100+$day) ('2026-{0:d2}-{1:d2}T10:00:00Z' -f $m,$day)}})+@((Ver 1 '2026-11-15T10:00:00Z'),(Ver 2 '2027-11-01T10:00:00Z'))
+$p=Plan $ahead 10 6 1
+Assert ((Same (Kept $p) (Ids (@(1,2,1022,1015,1008,1001,922,915,908,901,822)+@(722,622)))) -and (Same (Why $p 622) @('Monthly')) -and (Same (Why $p 2) @('NewestComplete','LastN','Monthly'))) 'a version dated a year ahead (a wrong clock) does not cost the months before the version just made their versions'
+# A clock that was behind when the version was made: the months before the newest version still count,
+# and the months between the two windows do not.
+$behind=@(foreach($m in 3..10){Ver ($m*100) ('2026-{0:d2}-20T10:00:00Z' -f $m)})+@((Ver 1 '2025-01-15T10:00:00Z'),(Ver 3 '2025-06-15T10:00:00Z'),(Ver 4 '2024-12-15T10:00:00Z'))
+$p=Plan $behind 1 6 1
+Assert ((Same (Kept $p) (Ids @(1,4,1000,900,800,700,600,500))) -and (Same (Why $p 1) @('JustMade','Monthly')) -and (Same (Gone $p) (Ids @(3,300,400)))) 'a version just made with a clock that was behind keeps the months before the newest version and the months up to its own, and nothing between them'
+Assert ((Same (Kept (Plan $ahead 10 0 1)) (Ids @(1,2,1022,1015,1008,1001,922,915,908,901)))) 'with 0 months no month keeps a version, also with a wrong clock'
 
 # --- What the plan refuses ----------------------------------------------------------------------------
 Assert-Throws {Get-VersionRetentionPlan $mixed 2 0 'pc' ''} '*not known*' 'without the ID of the version just made nothing is planned'
@@ -337,6 +349,43 @@ $d=Get-LockReleaseDecision @((Left 10),(Left 12 $null 'Work-PC' '2026-11-14T10:0
 Assert ($d.Release -eq $true -and @($d.Locks).Count -eq 2 -and $d.Locks[1].Exclusive -eq $true -and $d.Locks[1].Pid -eq 5151) 'several locks that all belong to ended runs of this computer may be removed together'
 $d=Get-LockReleaseDecision @() 'Work-PC'
 Assert ($d.Release -eq $false -and $d.Reason -eq '' -and @($d.Locks).Count -eq 0) 'no lock: nothing to remove and nothing to report'
+# --- The same rule against real processes, looked up the way the worker looks them up ------------------
+# Windows hands the number of an ended process to the next program now and then. That cannot be caused on
+# purpose, but what the worker then sees can: a lock that names the number of a program that is running
+# now, written a little before or after that program started. The lock times are taken from the
+# program's own start time, so nothing here depends on timing. ping stands in for "another program"; a
+# copy of it named restic-standin stands in for another restic run.
+$stand=Join-Path ([IO.Path]::GetTempPath()) ('devdrive-lock-test-'+[guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stand|Out-Null
+$programs=[Collections.Generic.List[Diagnostics.Process]]::new()
+function Start-Waiting([string]$file){$psi=[Diagnostics.ProcessStartInfo]::new($file);$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;foreach($a in '-n','120','127.0.0.1'){[void]$psi.ArgumentList.Add($a)};$p=[Diagnostics.Process]::Start($psi);$programs.Add($p);$p}
+# What the worker sees under the program's number; the test stops when the program could not be seen.
+function Seen($program,[string]$name){
+ $seen=Get-LockProcess $program.Id
+ if($program.HasExited -or $null -eq $seen -or $seen.Name -ine $name -or $null -eq $seen.StartedUtc){throw "FAIL the stand-in $name could not be looked up while it ran: $($seen|ConvertTo-Json -Compress)"}
+ $seen
+}
+# A lock that names the program's number, written $seconds after (or, when negative, before) it started.
+function LockAt($program,$seen,[int]$seconds){
+ [pscustomobject]@{Id=(Id 20);Lock=[pscustomobject]@{time=([DateTimeOffset]$seen.StartedUtc).AddSeconds($seconds).ToString('o');exclusive=$false;hostname='Work-PC';username='Work-PC\me';pid=$program.Id};Process=$seen}
+}
+try{
+ $ping=Join-Path ([Environment]::SystemDirectory) 'ping.exe';$standin=Join-Path $stand 'restic-standin.exe';Copy-Item -LiteralPath $ping -Destination $standin
+ $other=Start-Waiting $ping;$engineLike=Start-Waiting $standin
+ $seen=Seen $other 'ping'
+ $d=Get-LockReleaseDecision @((LockAt $other $seen -5)) 'Work-PC'
+ Assert ($d.Release -eq $true -and $d.Locks[0].State -eq 'Ended' -and $d.Locks[0].Pid -eq $other.Id) 'a real program that started after the lock was made now has its process number (Windows reused it): the run that made the lock has ended, and the lock may go'
+ $d=Get-LockReleaseDecision @((LockAt $other $seen 5)) 'Work-PC'
+ Assert ($d.Release -eq $false -and $d.Locks[0].State -eq 'Unclear' -and $d.Reason -like "*process $($other.Id)*already running*") 'a real program that was already running under that number when the lock was made keeps the lock'
+ $seenEngine=Seen $engineLike 'restic-standin'
+ $d=Get-LockReleaseDecision @((LockAt $engineLike $seenEngine -5)) 'Work-PC'
+ Assert ($d.Release -eq $false -and $d.Locks[0].State -eq 'Unclear' -and $d.Reason -like "*another backup program*($($engineLike.Id))*") 'a real restic program that started after the lock under its number cannot be told from the run that made it: the lock stays'
+ $d=Get-LockReleaseDecision @((LockAt $engineLike $seenEngine 5)) 'Work-PC'
+ Assert ($d.Release -eq $false -and $d.Locks[0].State -eq 'Running' -and $d.Reason -like "*still running*process $($engineLike.Id)*") 'a real restic program that was running when the lock was made is the run that made it: the lock stays'
+}finally{
+ foreach($p in $programs){try{if(-not $p.HasExited){$p.Kill()};[void]$p.WaitForExit(10000)}catch{};$p.Dispose()}
+ Remove-Item -LiteralPath $stand -Recurse -Force -ErrorAction SilentlyContinue
+}
 $text=Get-EngineFailureText 'CheckingStructure' 11 'a backup is still running on this computer (process 4242). Wait until it has finished, then try again.'
 Assert ($text -like '*exit code 11*locked: a backup is still running on this computer (process 4242).*Nothing is damaged*CheckingStructure.errors.log*' -and $text -notlike '*memory*' -and $text -notlike '*An earlier run was stopped*') 'a lock that was examined and left in place is reported with its own reason instead of the general guess'
 Write-Output 'All versioned-engine rule tests passed.'

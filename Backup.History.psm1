@@ -111,7 +111,9 @@ function Get-VersionRetentionPlan($Snapshots,[int]$Last,[int]$Months,[string]$Ho
  #  - LastN: the $Last newest complete versions stay, whatever their dates.
  #  - Monthly: the newest complete version of each calendar month stays, for $Months months: the month
  #    of the group's newest complete version and the $Months-1 months before it. Counting back from that
- #    version and not from today, a long pause between backups never empties the history.
+ #    version and not from today, a long pause between backups never empties the history. The months
+ #    ending with the month of the version just made count as well, so that one version saved while
+ #    the clock was far ahead does not move every month out of the rule.
  #  - A version that any rule keeps stays. NewestComplete (the newest complete version of the group)
  #    and JustMade ($NewSnapshot, the version this backup made) stay whatever the numbers.
  #  - A partial version never counts for LastN, Monthly or NewestComplete. It stays (PartialKept) until
@@ -119,9 +121,10 @@ function Get-VersionRetentionPlan($Snapshots,[int]$Last,[int]$Months,[string]$Ho
  #    (PartialAfter3Complete). Its age alone is never a reason.
  #  - $Last = 0 and $Months = 0: the clean-up is off and every version stays (CleanUpOff).
  # With both rules on, a group keeps at most $Last+$Months-1 complete versions by the two rules (the
- # newest one is always both among the last N and its month's version: 15 with 10 and 6), and never
- # more than $Last+$Months: the one more is the version just made when versions dated later than it
- # exist, after a clock that was wrong. Partial versions come on top.
+ # newest one is always both among the last N and its month's version: 15 with 10 and 6). After a
+ # clock that was wrong (versions dated later than the version just made) it can keep more: the version
+ # just made itself, and up to $Months more months' versions (the months before the version just made).
+ # Versions made at exactly the same moment count as one. Partial versions come on top.
  #
  # Month boundaries: a version belongs to the calendar month of the moment it was made as THIS computer's
  # clock shows it ($TimeZone, by default the computer's own time zone), which is the date the history
@@ -148,6 +151,7 @@ function Get-VersionRetentionPlan($Snapshots,[int]$Last,[int]$Months,[string]$Ho
  $made=@($all|Where-Object {$_.Id -ceq $NewSnapshot})
  if($made.Count -ne 1){throw 'The version this backup just made was not found among this computer''s saved versions, so the clean-up cannot protect it. Nothing was deleted.'}
  if($made[0].Partial){throw 'The version this backup just made is partial, so nothing is cleaned up on its account. Nothing was deleted.'}
+ $madeMonth=$made[0].MonthNumber
  foreach($group in $groups.Values){
   if(-not $enabled){foreach($d in $group){$d.Reasons=[string[]]@('CleanUpOff')};continue}
   # Newest first.
@@ -155,9 +159,13 @@ function Get-VersionRetentionPlan($Snapshots,[int]$Last,[int]$Months,[string]$Ho
   if($complete.Count){
    $newest=$complete[0].Ticks
    $lastFrom=if($Last -gt 0){$complete[[math]::Min($Last,$complete.Count)-1].Ticks}else{$null}
-   $monthFrom=$complete[0].MonthNumber-$Months   # months after this one are inside the rule
+   # The months inside the rule: the $Months months that end with the newest complete version's month,
+   # and the $Months months that end with the month of the version just made (today, by this computer's
+   # clock). While the clock is right both are the same or the second adds nothing; after a wrong clock
+   # one version dated far ahead or behind no longer moves every month out of the rule.
+   $windows=@(@($complete[0].MonthNumber,$madeMonth)|Select-Object -Unique)
    $monthNewest=@{}
-   foreach($d in $complete){if($d.MonthNumber -gt $monthFrom -and -not $monthNewest.ContainsKey($d.MonthNumber)){$monthNewest[$d.MonthNumber]=$d.Ticks}}
+   foreach($d in $complete){if(@($windows|Where-Object {$d.MonthNumber -gt $_-$Months -and $d.MonthNumber -le $_}).Count -and -not $monthNewest.ContainsKey($d.MonthNumber)){$monthNewest[$d.MonthNumber]=$d.Ticks}}
    foreach($d in $complete){
     $why=@()
     if($d.Id -ceq $NewSnapshot){$why+='JustMade'}
@@ -261,6 +269,14 @@ function Get-ApprovedRetentionPlan($Plan,[string[]]$ApprovedIds) {
   $copy
  }
 }
+function Get-LockProcess($Id) {
+ # What runs on this computer under a lock's process number. Nothing: no process has that number.
+ # Without a start time: there is one, but it cannot be examined (for example another account's).
+ try{$p=[Diagnostics.Process]::GetProcessById([int]$Id)}catch [ArgumentException]{return}catch{return [pscustomobject]@{Name='';StartedUtc=$null}}
+ try{[pscustomobject]@{Name=$p.ProcessName;StartedUtc=$p.StartTime.ToUniversalTime()}}
+ catch{try{[void][Diagnostics.Process]::GetProcessById([int]$Id)}catch [ArgumentException]{return}catch{};[pscustomobject]@{Name='';StartedUtc=$null}}
+ finally{$p.Dispose()}
+}
 function Get-LockReleaseDecision($Locks,[string]$ComputerName) {
  # Which locks in the repository may be removed without asking: only when EVERY lock present was made on
  # this computer by a process that has ended. A run that was stopped, crashed or was ended by the memory
@@ -301,4 +317,4 @@ function Get-LockReleaseDecision($Locks,[string]$ComputerName) {
  $blocking=@($judged|Where-Object {$_.State -ne 'Ended'})
  [pscustomobject]@{Release=[bool]($judged.Count -and -not $blocking.Count);Reason=$(if($blocking.Count){$blocking[0].Why}else{''});Locks=$judged}
 }
-Export-ModuleMember -Function Assert-SnapshotId,Assert-SnapshotPath,ConvertTo-ResticLiteralPattern,ConvertTo-HistoryDate,Test-PartialSnapshot,Get-PartialMarkArguments,Get-PartialTags,Split-SnapshotIdBatches,Get-RestoreParentWarnings,Get-HistoryDeletionPlan,Get-VersionRetentionPlan,Get-RetentionRemovals,Get-RetentionApprovedIds,Get-ApprovedRetentionPlan,Get-LockReleaseDecision
+Export-ModuleMember -Function Assert-SnapshotId,Assert-SnapshotPath,ConvertTo-ResticLiteralPattern,ConvertTo-HistoryDate,Test-PartialSnapshot,Get-PartialMarkArguments,Get-PartialTags,Split-SnapshotIdBatches,Get-RestoreParentWarnings,Get-HistoryDeletionPlan,Get-VersionRetentionPlan,Get-RetentionRemovals,Get-RetentionApprovedIds,Get-ApprovedRetentionPlan,Get-LockProcess,Get-LockReleaseDecision

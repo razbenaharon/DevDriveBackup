@@ -113,14 +113,6 @@ function Invoke-EngineStep([string[]]$EngineArguments,[string]$Stage,[string]$In
   }
  }finally{if($started -and -not $process.HasExited){$process.Kill($true)};$output.Dispose();$job.Dispose();$process.Dispose()}
 }
-function Get-LockProcess($Id) {
- # What runs on this computer under a lock's process number. Nothing: no process has that number.
- # Without a start time: there is one, but it cannot be examined (for example another account's).
- try{$p=[Diagnostics.Process]::GetProcessById([int]$Id)}catch [ArgumentException]{return}catch{return [pscustomobject]@{Name='';StartedUtc=$null}}
- try{[pscustomobject]@{Name=$p.ProcessName;StartedUtc=$p.StartTime.ToUniversalTime()}}
- catch{try{[void][Diagnostics.Process]::GetProcessById([int]$Id)}catch [ArgumentException]{return}catch{};[pscustomobject]@{Name='';StartedUtc=$null}}
- finally{$p.Dispose()}
-}
 function Read-RepositoryLockIds([string]$Stage) {
  Invoke-EngineStep @('list','locks','--no-lock') $Stage
  @([IO.File]::ReadAllLines((Join-Path $RunDirectory ($Stage+'.jsonl')))|ForEach-Object {$_.Trim()}|Where-Object {$_})

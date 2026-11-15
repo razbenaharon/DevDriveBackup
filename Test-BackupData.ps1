@@ -492,6 +492,23 @@ try{
  $rf2=(New-Item -ItemType Directory -Path (Join-Path $src 'Again2')).FullName
  $o2=Add-CenterSource -Data $d -ProfileId $p.Id -Path $rf2 -Label 'Again2' -DefaultMode Both;Remove-CenterSource $d $p.Id $o2.Id
  Check 'Use the earlier settings (and a caller that does not ask) continues the earlier backup, as before' {$a=Add-CenterSource -Data $d -ProfileId $p.Id -Path $rf2 -Label 'Typed' -DefaultMode Mirror -Earlier Restore;$a.ConfigPath -eq $o2.ConfigPath -and $a.MirrorFolder -eq 'Again2-Mirror' -and (Read-CenterJob $a.ConfigPath).DefaultMode -eq 'Both' -and $a.Label -eq 'Typed'}
+ # The versions and recovery folders of an earlier backup were never shown in a list. Continuing it on a
+ # drive whose clean-up runs by the rule would delete them unseen, so its first clean-up is shown again.
+ $wasConfirmed=Test-CenterRetentionConfirmed $p
+ try{
+  $rf3=(New-Item -ItemType Directory -Path (Join-Path $src 'Again3')).FullName
+  $o3=Add-CenterSource -Data $d -ProfileId $p.Id -Path $rf3 -Label 'Again3' -DefaultMode Both;Remove-CenterSource $d $p.Id $o3.Id
+  $p|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $true -Force
+  $p|Add-Member -NotePropertyName RetentionApproved -NotePropertyValue ([pscustomobject]@{When=(Get-Date).ToString('o');Last=10;Months=6;KeepDeleted=5;Versions=@();RecoveryFolders=@()}) -Force
+  $a3=Add-CenterSource -Data $d -ProfileId $p.Id -Path $rf3 -Label 'Again3' -DefaultMode Both -Earlier Restore
+  Check 'continuing an earlier backup of this drive has the first clean-up shown again: an approval or a list approved before are dropped' {$a3.ConfigPath -eq $o3.ConfigPath -and -not (Test-CenterRetentionConfirmed $p) -and -not $p.PSObject.Properties['RetentionApproved'] -and (Get-CenterRetentionState $p) -eq 'The first clean-up will be shown to you for approval.'}
+  $p|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $true -Force
+  $rf4=(New-Item -ItemType Directory -Path (Join-Path $src 'Brand-new')).FullName
+  [void](Add-CenterSource -Data $d -ProfileId $p.Id -Path $rf4 -Label 'Brand new' -DefaultMode Both)
+  $o5=Add-CenterSource -Data $d -ProfileId $p.Id -Path (New-Item -ItemType Directory -Path (Join-Path $src 'Again5')).FullName -Label 'Again5' -DefaultMode Both;Remove-CenterSource $d $p.Id $o5.Id
+  [void](Add-CenterSource -Data $d -ProfileId $p.Id -Path $o5.Path -Label 'Again5' -DefaultMode Both -Earlier Fresh)
+  Check 'a folder that starts a new backup (never a source, or Start fresh) keeps the approval: it has nothing old to delete' {Test-CenterRetentionConfirmed $p}
+ }finally{$p|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $wasConfirmed -Force;[void](Remove-CenterRetentionApproved $p)}
 
  # --- The size the window opens with ---
  Check 'a screen with room opens the window at its full size' {$f=Get-CenterWindowFit 1200 800 1904 1040;$f.Factor -eq 1 -and $f.Width -eq 1200 -and $f.Height -eq 800}
