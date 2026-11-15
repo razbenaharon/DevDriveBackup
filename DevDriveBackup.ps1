@@ -13,7 +13,9 @@ param(
  [int]$AutoCloseSeconds=0,   # tests: run normally, then close after this many seconds
  [switch]$Quiet,             # tests: open off the screen, without taking the keyboard or a taskbar button
  [string]$Answer,            # tests: the answer given to a question (the start of its button text) instead of showing it; for Keep versions 'Save' or 'Save <newest> <months>'
- [ValidateSet('','Refresh','Links')][string]$TestAction='',  # tests: once the window is shown, do what a user would (see "Test hooks")
+ [ValidateSet('','Refresh','Links','AfterRun','AddFolder','SaveAfter')][string]$TestAction='',  # tests: once the window is shown, do what a user would (see "Test hooks")
+ [string]$TestPath,          # tests: what -TestAction works on. AfterRun: a JSON file with the entries of a finished run. AddFolder: the folder to add. SaveAfter: a file that is copied over the settings file before a save
+ [string]$TestArea,          # tests: the room of the screen as WIDTHxHEIGHT, for the size the window opens with
  [string]$TestState          # tests: write what the window shows to this file (JSON) when it closes
 )
 $ErrorActionPreference='Stop'
@@ -158,7 +160,7 @@ Themes: Light, Dark, Sand, Ocean and High contrast are checked so every text sta
 
 Custom: pick the window background, the panels, the text and the main buttons. Secondary text, lines and selection are worked out from them. If a pair is hard to read, this page says which one and by how much.
 
-Size: make the window larger or maximise it and everything grows in the same proportion, text included. The smallest size is the original one.
+Size: make the window larger or maximise it and everything grows in the same proportion, text included. It can also be made smaller, down to 80% of its original size; on a small screen it opens at the largest size that fits.
 '@
 }
 
@@ -204,7 +206,14 @@ if($Quiet){
  Add-Type -ReferencedAssemblies System.Windows.Forms,System.Windows.Forms.Primitives,System.ComponentModel.Primitives,System.Drawing.Primitives -TypeDefinition 'public class DevDriveBackupQuietForm : System.Windows.Forms.Form { protected override bool ShowWithoutActivation { get { return true; } } protected override System.Windows.Forms.CreateParams CreateParams { get { var p = base.CreateParams; p.ExStyle |= 0x08000000 | 0x00000080; return p; } } }'   # WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW
  $form=[DevDriveBackupQuietForm]::new()
 }else{$form=[Windows.Forms.Form]::new()}
-$form.Text='DevDriveBackup';$form.ClientSize=[Drawing.Size]::new(1200,800);$form.StartPosition='CenterScreen';$form.Font=$font;$form.MinimumSize=[Drawing.Size]::new(1216,839);$form.BackColor=$ui.Paper;$form.ForeColor=$ui.Ink
+$form.Text='DevDriveBackup';$form.ClientSize=[Drawing.Size]::new(1200,800);$form.StartPosition='CenterScreen';$form.Font=$font;$form.BackColor=$ui.Paper;$form.ForeColor=$ui.Ink
+# The window can be made smaller down to 80% of the size it is drawn for (see "Zoom"). On a screen
+# without room for the full size it opens at the largest size that fits. Tests keep the full size
+# whatever screen they run on, unless they name a screen (-TestArea).
+$frame=[Drawing.Size]::new($form.Width-$form.ClientSize.Width,$form.Height-$form.ClientSize.Height)
+$form.MinimumSize=[Drawing.Size]::new(960+$frame.Width,640+$frame.Height)
+$room=if($TestArea -match '^(\d+)x(\d+)$'){[Drawing.Size]::new([int]$Matches[1],[int]$Matches[2])}elseif(-not $script:testMode){[Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Size}else{$null}
+if($room){$fit=Get-CenterWindowFit 1200 800 ($room.Width-$frame.Width) ($room.Height-$frame.Height);if($fit.Factor -lt 1){$form.ClientSize=[Drawing.Size]::new($fit.Width,$fit.Height)}}
 if($Quiet){$form.StartPosition='Manual';$form.Location=[Drawing.Point]::new(-30000,-30000);$form.ShowInTaskbar=$false}
 $iconFile=Join-Path $PSScriptRoot 'DevDriveBackup.ico';if(Test-Path -LiteralPath $iconFile){$form.Icon=[Drawing.Icon]::new($iconFile)}
 # A taskbar button of its own, with this icon, instead of PowerShell's (see Backup.Taskbar.cs).
@@ -558,6 +567,15 @@ catch{
 }
 # Settings that were just read as valid are what a later damaged file falls back to.
 [void](Save-CenterLastGood)
+function Show-SaveNote {
+ # A save that found the settings file damaged, changed or gone on disk kept that file aside and says
+ # so (Get-CenterSaveReport). The sentence goes to the status line once the action that saved has
+ # finished, so the action's own line does not replace it.
+ $report=Get-CenterSaveReport;$note=$report.Message;if(-not $note -or $report.Number -eq $script:saveShown){return}
+ $script:saveShown=$report.Number;$script:saveNote=$note;$script:testLog.SaveNote=$note
+ if($form.IsHandleCreated){[void]$form.BeginInvoke([Action]{$runStatus.Text=$script:saveNote;$script:saveNote=''})}
+}
+function Save-Settings {Save-CenterProfiles $script:data;Show-SaveNote}
 # The detailed output of tool runs older than 30 days is deleted; the run history is kept.
 try{[void](Remove-CenterOldStepLogs)}catch{}
 $script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0;$script:waiting=$null
@@ -569,7 +587,7 @@ $script:detailsProfileId=$null;$script:modesSourceId=$null;$script:modesDirty=$f
 $script:autoRefresh=$false;$script:refreshing=$false;$script:lastRefresh=[datetime]::MinValue;$script:rateText=''
 # The reason last written to the status line for buttons that are off, the history the overview was
 # filled from, and whether a repair could start now (see Update-Details).
-$script:shownReason=$null;$script:history=@();$script:canRepair=$false;$script:hardware=$null;$script:testLog=[ordered]@{}
+$script:shownReason=$null;$script:history=@();$script:canRepair=$false;$script:hardware=$null;$script:testLog=[ordered]@{};$script:saveNote=''
 $smartTool=Join-Path $PSScriptRoot 'bin\smartmontools\bin\smartctl.exe'
 $checkColor=@{};$checkInk=@{}
 function Update-CheckColors {
@@ -670,8 +688,10 @@ function Update-Details {
  $history=@(Get-CenterHistory);$d=Get-CenterDrive $p.DestinationVolumeId;$f=Get-CenterFreshness $p $history
  $script:history=$history
  # Beside the age: the latest run of a source failed or was stopped, or a content check found a problem.
- $warn=Format-CenterRunWarnings (Get-CenterRunWarnings $p $history)
- $ovWarn.Text=$warn.Text;$ovWarn.LinkColor=if($warn.Level -eq 'Check'){$stateInk.Stale}else{$stateInk.Error};$ovWarn.ActiveLinkColor=$ovWarn.LinkColor
+ # After them, quieter: recovery folders that piled up beside a plain copy while no keep rule is set.
+ $warn=Format-CenterRunWarnings (@(Get-CenterRunWarnings $p $history)+@(Get-CenterRecoveryAdvice $p $history))
+ $ovWarn.Text=$warn.Text;$ovWarn.LinkColor=switch($warn.Level){'Check'{$stateInk.Stale}'Advice'{$ui.Muted}default{$stateInk.Error}};$ovWarn.ActiveLinkColor=$ovWarn.LinkColor
+ $script:warnLevel=$warn.Level
  $keepTip.SetToolTip($ovWarn,$(if($warn.Text){$warn.Full+"`nClick to open Recent runs."}else{''}))
  $ovTitle.Text=$p.Name
  $ovDrive.Text=if($d.Connected){"Connected as $($d.Letter):   $($p.DriveModel), $($d.FreeGB) GB free of $($d.SizeGB) GB"}else{"$($p.DriveModel). Not connected: connect it to back up, test its speed or restore."}
@@ -741,14 +761,15 @@ function Update-Details {
   $keepVersions.Text=Format-CenterVersionRetention (Get-CenterVersionRetention $p)
  }
  foreach($h in @($history|Where-Object {$_.ProfileId -eq $p.Id}|Sort-Object {$_.Finished.ToUniversalTime()} -Descending|Select-Object -First 40)){
-  $type=switch($h.Kind){'Mirror'{'Plain copy'}'Versioned'{'Versions'}'MirrorCheck'{'Copy check'}'VersionedCheck'{'Versions check'}'MirrorRepair'{'Copy repair'}default{$h.Kind}}
+  $type=switch($h.Kind){'Mirror'{'Plain copy'}'Versioned'{'Versions'}'MirrorCheck'{'Copy check'}'VersionedCheck'{'Versions check'}'MirrorRepair'{'Copy repair'}'Setting'{'Change'}default{$h.Kind}}
   # Numbers that were not read stay empty; older entries have no Seconds, Stopped or ProcessedBytes.
   $files=if($h.PSObject.Properties['CopiedFiles']){$h.CopiedFiles}else{$null};$bytes=if($h.PSObject.Properties['CopiedBytes']){$h.CopiedBytes}else{$null};$checked=if($h.PSObject.Properties['CheckedFiles']){$h.CheckedFiles}else{$null}
   $copied=if($h.Kind -like '*Check' -and $checked){'{0:N0} checked' -f $checked}elseif($null -ne $files -and $null -ne $bytes){'{0:N0} files, {1}' -f $files,(Format-Size $bytes)}elseif($null -ne $files){'{0:N0} files' -f $files}elseif($checked){'{0:N0} checked' -f $checked}else{''}
   $note=if($h.PSObject.Properties['Note'] -and $h.Note){' '+$h.Note}else{''}
   # A run's note is shown with its result whether it succeeded or not; the column is narrow, so the
   # whole text is also the cell's tooltip.
-  $result=if($h.Success){'OK.'+$note}elseif($h.PSObject.Properties['Stopped'] -and $h.Stopped){'Stopped by you.'+$note}else{'Failed: '+([string]$h.Error).TrimEnd('.')+'.'+$note}
+  # A change made on request (a file excluded from the backup) is no run: its note is the whole result.
+  $result=if($h.Kind -eq 'Setting'){$note.Trim()}elseif($h.Success){'OK.'+$note}elseif($h.PSObject.Properties['Stopped'] -and $h.Stopped){'Stopped by you.'+$note}else{'Failed: '+([string]$h.Error).TrimEnd('.')+'.'+$note}
   $i=$runsGrid.Rows.Add(('{0:d MMM HH:mm}' -f $h.Finished),$h.Label,$type,(Format-CenterRunDuration $h),$copied,(Get-CenterRunSpeed $h),$result)
   $runsGrid.Rows[$i].Cells[6].ToolTipText=$result
   if(-not $h.Success){$runsGrid.Rows[$i].DefaultCellStyle.ForeColor=$stateInk.Error}
@@ -867,7 +888,7 @@ function Set-ProfileLoad([string]$Name){
   $current=Get-CenterLoad ([pscustomobject]@{Load='Balanced'})
   $p|Add-Member -NotePropertyName CustomLoad -NotePropertyValue ([pscustomobject]@{CpuThreads=$current.CpuThreads;MemoryMiB=$current.MemoryMiB;CopyThreads=$current.CopyThreads;Priority=$current.Priority}) -Force
  }
- Save-CenterProfiles $script:data
+ Save-Settings
  # A running backup gets the new priority at once; the rest applies from its next step.
  if($script:current -and $script:runProfile -and $script:runProfile.Id -eq $p.Id){
   $L=Get-CenterLoad $p;Set-CenterRunPriority $script:current.Process $L.Priority
@@ -890,18 +911,27 @@ function Update-Modes {
   $defaultMode.SelectedValue=if($job.PSObject.Properties['DefaultMode']){[string]$job.DefaultMode}else{'Skip'}
   $kinds=Get-CenterSourceKinds $s
   $srcInfo.Text="Folder: $($s.Path)`nPlain copy goes to: \$($s.MirrorFolder)`nVersions go to: \$($job.RepositoryFolder)`nUses: "+(@(if($kinds.Mirror){'plain copy'};if($kinds.Versioned){'versions'}) -join ' and ')
+  # Files and folders left out at the user's request (a file that was always in use, an Exclude entry
+  # typed by hand) are not backed up, and are named here; the tooltip has the whole list.
+  $out=@(Get-CenterPersonalExcludes $s)
+  if($out.Count){$srcInfo.Text+="`nNot backed up (excluded): "+(@($out|Select-Object -First 2) -join ', ')+$(if($out.Count -gt 2){" and $($out.Count-2) more"})}
+  $keepTip.SetToolTip($srcInfo,$(if($out.Count){"Not backed up, because excluded:`n"+($out -join "`n")}else{''}))
  }finally{$script:loadingModes=$false}
 }
 
 # --- Running -------------------------------------------------------------------------------
-function Start-Run($Profile,[string[]]$SourceIds,[string]$Purpose){
+function Start-Run($Profile,[string[]]$SourceIds,[string]$Purpose,[string]$Kind='',[string[]]$NewRepositoryFor=@()){
+ # -Kind and -NewRepositoryFor: one kind of step only, and the sources whose versions may start in a
+ # new, empty folder; used after the user said so (Invoke-AfterRun), never otherwise.
  # Asked again here, not only by the buttons: a backup that waited for AI sessions starts by itself,
  # and a drive check or speed test of this drive may have been started in the meantime.
  $why=Get-BusyReason $Profile 'Backup';if($why){throw "The backup was not started. $why"}
  # A source in use (a restore window, a password change) is reported at once rather than after the
  # window has stood still for seconds.
  foreach($s in @($Profile.Sources|Where-Object {-not $SourceIds.Count -or $_.Id -in $SourceIds})){Sync-CenterJob $Profile $s -WaitMilliseconds 300}
- $steps=@(Get-CenterSteps $Profile $SourceIds $Purpose)
+ # A clean-up list approved for another rule than the profile has now is not used; it is dropped here.
+ if($Profile.PSObject.Properties['RetentionApproved'] -and -not (Get-CenterRetentionApproved $Profile)){[void](Remove-CenterRetentionApproved $Profile);Save-Settings}
+ $steps=@(Get-CenterSteps $Profile $SourceIds $Purpose -Kind $Kind -NewRepositoryFor $NewRepositoryFor)
  if(-not $steps.Count){[void][Windows.Forms.MessageBox]::Show('Nothing is selected for backup in these sources. Choose folders on the "What to back up" tab.','DevDriveBackup');return}
  $script:queue.Clear();foreach($s in $steps){$script:queue.Enqueue($s)}
  $script:totalSteps=$steps.Count;$script:runResults=@();$script:runProfile=$Profile
@@ -968,18 +998,53 @@ function Finish-Run {
  }
  $runStatus.Text=$msg.Split("`n")[0]
  Update-ProfileList $script:runProfile.Id
- [void][Windows.Forms.MessageBox]::Show($msg,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,$(if($bad.Count){[Windows.Forms.MessageBoxIcon]::Warning}else{[Windows.Forms.MessageBoxIcon]::Information}))
- # Before the first clean-up of this profile the tools only listed what they would delete. With such a
- # list: one question. Without one nothing is asked, and the next backup lists again.
+ if(-not $script:testMode){[void][Windows.Forms.MessageBox]::Show($msg,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,$(if($bad.Count){[Windows.Forms.MessageBoxIcon]::Warning}else{[Windows.Forms.MessageBoxIcon]::Information}))}
+ $fresh=$script:data.Profiles|Where-Object {$_.Id -eq $script:runProfile.Id}|Select-Object -First 1
+ if($fresh){Invoke-AfterRun $fresh $script:runResults}
+}
+function Invoke-AfterRun($P,$Results){
+ # What a finished run leaves to decide or to say, each at most once per run and each a question with
+ # named answers. Nothing here deletes, excludes or creates anything without a yes.
  try{
-  $pv=Get-CenterRetentionPreview $script:runResults
-  if($pv.Count){
-   $fresh=@($script:data.Profiles|Where-Object {$_.Id -eq $script:runProfile.Id})[0]
-   # Approval counts for the whole drive: asked only after a backup of every source that went through.
-   if($fresh -and (Test-CenterRetentionPreviewWhole @(Get-CenterRetentionExpected $fresh) $script:runResults)){[void](Request-RetentionApproval $fresh $pv)}
-   elseif($fresh){$runStatus.Text+=' Old versions or recovery folders are waiting for clean-up; the list is shown for approval after a backup of all sources that finishes without errors.'}
+  # 1. The first clean-up. A run that carried an approved list: when every part ran and succeeded the
+  # clean-up is handed over to the rule, otherwise the list stays for the next backup.
+  $phase=Complete-CenterRetentionRun $script:data $P.Id $Results;Show-SaveNote
+  if($phase -eq 'Confirmed'){$runStatus.Text+=' The clean-up you approved was carried out. From now on it runs by itself after every backup.'}
+  elseif($phase -eq 'Kept'){$runStatus.Text+=' The clean-up you approved is not finished: it goes on with the next backup of all sources that ends without errors.'}
+  else{
+   # Before that, the tools only listed what they would delete. With such a list: one question.
+   # Without one nothing is asked, and the next backup lists again.
+   $pv=Get-CenterRetentionPreview $Results
+   if($pv.Count){
+    # Approval counts for the whole drive: asked only after a backup of every source that went through.
+    if(Test-CenterRetentionPreviewWhole @(Get-CenterRetentionExpected $P) $Results){[void](Request-RetentionApproval $P $pv)}
+    else{$runStatus.Text+=' Old versions or recovery folders are waiting for clean-up; the list is shown for approval after a backup of all sources that finishes without errors.'}
+   }
   }
  }catch{Show-Error $_}
+ # 2. A file that was in use in three backups in a row: exclude it, or not now.
+ foreach($sid in @(@($Results)|Where-Object {$_.Kind -eq 'Mirror'}|ForEach-Object {[string]$_.SourceId}|Select-Object -Unique)){
+  try{
+   $src=$P.Sources|Where-Object {$_.Id -eq $sid}|Select-Object -First 1;if(-not $src){continue}
+   $files=@(Get-CenterLockedOffer $src @(Get-CenterHistory));if(-not $files.Count){continue}
+   if((Show-Choice 'Files in use' (Format-CenterLockedOffer $src.Label $files) @('Exclude from the backup') -Careful -CancelText 'Not now') -eq 0){
+    $added=@(Add-CenterLockedExclude $P $src $files -WaitMilliseconds 300)
+    $runStatus.Text="Excluded from the backup of $($src.Label), and not backed up from now on: $($added -join ', ')."
+   }else{Set-CenterLockedAsked $script:data $P.Id $src.Id $files;Show-SaveNote}
+  }catch{Show-Error $_}
+ }
+ # 3. The versions folder of a source was not found on the drive: a new, empty one only on a yes.
+ try{
+  $create=@()
+  foreach($m in @(Get-CenterMissingRepositories $P $Results)){
+   $text=$m.Text+"`n`nCreate a new, empty versions folder: $($m.Label) is backed up now into a new folder of that name. Earlier versions in a folder that was renamed or moved are not touched, and are not listed in this window.`nNot now: nothing is created. Put the folder back and back up again; until then the versions of this source cannot be backed up."
+   if((Show-Choice 'Versions not found' $text @('Create a new, empty versions folder') -Careful -CancelText 'Not now') -eq 0){$create+=$m.SourceId}
+  }
+  $script:testLog.NewVersions=@($create)
+  if($create.Count){Start-Run $P $create 'Backup' -Kind Versioned -NewRepositoryFor $create}
+  # The pages are filled again (an excluded file, a noted change); the line about this run stays.
+  else{$line=$runStatus.Text;Update-Details;$runStatus.Text=$line}
+ }catch{Show-Error $_;Update-Details}
 }
 # --- Waiting for AI sessions -----------------------------------------------------------------
 # A backup taken while Claude Code or Codex sessions edit files catches them half-way. Before a
@@ -1158,8 +1223,9 @@ $btnFromTheme.Add_Click({
 })
 
 # --- Zoom: the whole window grows in proportion ------------------------------------------------
-# The layout is drawn for 1200 x 800. A larger window scales every position, size and font by the
-# same factor, keeps the proportions and centres the result; the smallest window is the original size.
+# The layout is drawn for 1200 x 800. A larger or smaller window scales every position, size and font
+# by the same factor, keeps the proportions and centres the result; the smallest window is 80% of that
+# size (960 x 640), where the smallest text is still 7 points.
 $baseClient=[Drawing.Size]::new(1200,800)
 $script:baseLayout=$null;$script:fontCache=@{}
 function Get-ZoomFont([Drawing.Font]$Base,[double]$Factor){
@@ -1182,6 +1248,8 @@ function Update-RuntimeLayout {
  # Positions set while the window runs, in the current zoom.
  $z=$script:zoom
  $ageUnit.Left=$ageNumber.Right+[int](6*$z);$ageWhen.Left=$ageUnit.Left
+ # They end before the settings on the right (which start at 560), whatever the width of the number.
+ $ageUnit.Width=[math]::Max(40,[int](552*$z)-$ageUnit.Left);$ageWhen.Width=$ageUnit.Width
  $meterFill.SetBounds(0,0,[int]($meter.Width*$script:meterRatio),$meter.Height)
  # The warning line takes its room from the list of sources, and only while there is a warning.
  $warn=[bool]$ovWarn.Text;$ovWarn.Visible=$warn
@@ -1192,7 +1260,7 @@ function Update-RuntimeLayout {
 }
 function Set-Zoom {
  if(-not $script:baseLayout -or $form.WindowState -eq 'Minimized'){return}
- $cs=$form.ClientSize;$f=[math]::Max(1.0,[math]::Min($cs.Width/[double]$baseClient.Width,$cs.Height/[double]$baseClient.Height))
+ $cs=$form.ClientSize;$f=[math]::Max(0.8,[math]::Min($cs.Width/[double]$baseClient.Width,$cs.Height/[double]$baseClient.Height))
  $f=[math]::Round($f,3);if($f -eq $script:zoom -and $script:zoomedFor -eq $cs){return}
  $script:zoom=$f;$script:zoomedFor=$cs
  $ox=[int](($cs.Width-$baseClient.Width*$f)/2);$oy=[int](($cs.Height-$baseClient.Height*$f)/2)
@@ -1267,7 +1335,7 @@ function Edit-VersionRetention {
  # The "Keep versions" link: ask, save, and say in the status line what applies now.
  $p=Get-SelectedProfile;if(-not $p){return}
  $v=Show-VersionRetentionDialog $p;if(-not $v){return}
- Set-CenterVersionRetention $p $v.Last $v.Months;Save-CenterProfiles $script:data
+ Set-CenterVersionRetention $p $v.Last $v.Months;Save-Settings
  $r=Get-CenterVersionRetention $p;$keepVersions.Text=Format-CenterVersionRetention $r
  $runStatus.Text=if($r.Enabled){"Versions: after each backup, keep $(Format-CenterVersionRetention $r) and delete older ones. $(Get-CenterRetentionState $p)"}else{'Versions: every version is kept.'}
 }
@@ -1275,12 +1343,13 @@ $keepVersions.Add_LinkClicked({try{Edit-VersionRetention}catch{Show-Error $_}})
 function Request-RetentionApproval($Profile,$Preview){
  # The one question before the first clean-up of a profile: what the last backup would have deleted
  # (old versions, old recovery folders of plain copies). True = approved. Approving deletes nothing by
- # itself: from the next backup on, the tools run without their preview switches.
+ # itself: the list is stored, the next backup deletes what is in it and nothing else, and only after
+ # that backup the clean-up runs by the rule (see Set-CenterRetentionApproved).
  if(-not $Preview -or -not $Preview.Count){return $false}
  $r=Get-CenterVersionRetention $Profile
  if((Show-Choice 'Clean-up of old backups' (Format-CenterRetentionPreview $Preview $r.Last $r.Months) @('Approve clean-up') -Careful -CancelText 'Not now') -ne 0){return $false}
- Confirm-CenterRetention $script:data $Profile.Id
- $done='Approved. Nothing was deleted now: the clean-up runs by this rule with the next backup, and by itself after every backup from then on.'
+ Set-CenterRetentionApproved $script:data $Profile.Id $Preview;Show-SaveNote
+ $done='Approved. Nothing was deleted now: the next backup deletes what was listed and nothing else. After it the clean-up runs by itself after every backup.'
  $runStatus.Text=$done
  if(-not $script:testMode){[void][Windows.Forms.MessageBox]::Show($done,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)}
  $true
@@ -1328,6 +1397,25 @@ function Show-Error($e){
  if($script:testMode){[Console]::Error.WriteLine('Error: '+$e.Exception.Message);return}
  [void][Windows.Forms.MessageBox]::Show($e.Exception.Message,'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)}
 
+function Add-SourceFolder($P,[string]$Path,[string]$Label,[string]$Mode){
+ # Adds a folder to the profile. A folder that was backed up to this drive before has its settings,
+ # plain copy and versions kept: asked first whether to go on with them or to start fresh. Returns the
+ # new source, or nothing on Cancel.
+ $old=Find-CenterEarlierSource -Data $script:data -ProfileId $P.Id -Path $Path;$how='Restore'
+ $word=@{Mirror='Plain copy';Versioned='Versions';Both='Both';Skip='Skip'}
+ $kept=@(if($old){if($old.MirrorFolder){'\'+$old.MirrorFolder};if($old.RepositoryFolder){'\'+$old.RepositoryFolder}})
+ if($old){
+  $text="This folder was backed up to this drive before.`n`nFrom that time the drive holds:`n"+(@(if($old.MirrorFolder){"- its plain copy folder: \$($old.MirrorFolder)"};if($old.RepositoryFolder){"- its versions folder: \$($old.RepositoryFolder), with its password and recovery key"}) -join "`n")+"`nand its settings are kept: how each of its folders is backed up$(if($old.DefaultMode){' (folders not listed: '+$word[$old.DefaultMode]+')'}).`n`nUse the earlier settings and continue its backup: these folders and settings are used again. What you chose just now ('$($word[$Mode])') is not applied; you can change it on this page afterwards.`n`nStart fresh: a new plain copy folder and a new versions folder are started under new names, backed up as '$($word[$Mode])'. The earlier folders named above stay on the drive untouched; delete them there yourself if you no longer need them."
+  $i=Show-Choice 'Add a folder to back up' $text @('Use the earlier settings and continue its backup','Start fresh')
+  if($i -lt 0){$runStatus.Text='The folder was not added.';return}
+  if($i -eq 1){$how='Fresh'}
+ }
+ $s=Add-CenterSource -Data $script:data -ProfileId $P.Id -Path $Path -Label $Label -DefaultMode $Mode -Earlier $how;Save-Settings
+ Update-Details;$srcList.SelectedIndex=$srcList.Items.Count-1
+ if($old -and $how -eq 'Fresh'){$runStatus.Text="Added $($s.Label) as a new backup. The earlier folders stay on the drive untouched: $($kept -join ' and ')."}
+ elseif($old){$runStatus.Text="Added $($s.Label) with its earlier settings; its backup in $($kept -join ' and ') is continued."}
+ $s
+}
 function Get-OverviewSource {
  # The source a link or button of the overview acts on: the selected row, or the only source. With
  # several sources and none selected nothing is returned and the status line asks to select one;
@@ -1363,33 +1451,25 @@ $modeGrid.Add_CurrentCellDirtyStateChanged({if(-not $script:loadingModes -and $m
 $defaultMode.Add_SelectedIndexChanged({if(-not $script:loadingModes -and $script:shown){$script:modesDirty=$true}})
 $newProfile.Add_Click({try{
  $r=Show-NewProfileDialog;if(-not $r){return}
- $p=New-CenterProfile $script:data $r.Name $r.Drive.VolumeId $r.Drive.Model $r.Drive.SizeGB;Save-CenterProfiles $script:data
+ $p=New-CenterProfile $script:data $r.Name $r.Drive.VolumeId $r.Drive.Model $r.Drive.SizeGB;Save-Settings
  Update-ProfileList $p.Id;Show-Page 1
 }catch{Show-Error $_}})
 $removeProfile.Add_Click({try{
  $p=Get-SelectedProfile;if(-not $p){return}
  if([Windows.Forms.MessageBox]::Show("Remove the profile '$($p.Name)'?`n`nOnly the profile is forgotten. Nothing on the backup drive or on this computer is deleted, and the folder settings and keys are kept.",'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
- Remove-CenterProfile $script:data $p.Id;Save-CenterProfiles $script:data;Update-ProfileList
+ Remove-CenterProfile $script:data $p.Id;Save-Settings;Update-ProfileList
 }catch{Show-Error $_}})
 $btnAddSource.Add_Click({try{
  $p=Get-SelectedProfile;if(-not $p){return}
  $dlg=[Windows.Forms.FolderBrowserDialog]::new();$dlg.Description='Choose a folder or drive to back up';$dlg.UseDescriptionForTitle=$true
  if($dlg.ShowDialog($form) -ne 'OK'){return}
  $r=Show-SourceDialog $dlg.SelectedPath;if(-not $r){return}
- $restored=$null
- [void](Add-CenterSource -Data $script:data -ProfileId $p.Id -Path $dlg.SelectedPath -Label $r.Label -DefaultMode $r.Mode -Restored ([ref]$restored));Save-CenterProfiles $script:data
- Update-Details;$srcList.SelectedIndex=$srcList.Items.Count-1
- # A folder that was backed up to this drive before gets its kept settings back (so its copy, versions
- # and keys are used again, not started a second time). Say so: what was just chosen was not applied.
- if($restored){
-  $word=@{Mirror='Plain copy';Versioned='Versions';Both='Both';Skip='Skip'}
-  [void][Windows.Forms.MessageBox]::Show("This folder was backed up to this drive before, so its earlier settings were put back:`n`n- how each of its folders is backed up$(if($restored.DefaultMode){' (folders not listed: '+$word[$restored.DefaultMode]+')'})`n- its plain copy folder on the drive: \$($restored.MirrorFolder)`n- its versions folder on the drive: \$($restored.RepositoryFolder), with its password and recovery key`n`nThe name you typed is used. What you chose just now ('$($word[$r.Mode])') was NOT applied. Look at the list on this page and change it there if you want something else, then press Save changes.",'DevDriveBackup',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)
- }
+ [void](Add-SourceFolder $p $dlg.SelectedPath $r.Label $r.Mode)
 }catch{Show-Error $_}})
 $btnRemoveSource.Add_Click({try{
  $p=Get-SelectedProfile;$s=Get-SelectedSource;if(-not $s){return}
  if([Windows.Forms.MessageBox]::Show("Stop backing up '$($s.Label)' to this drive?`n`nExisting copies and versions on the drive are kept, and so are its settings and keys.",'DevDriveBackup','YesNo','Question') -ne 'Yes'){return}
- Remove-CenterSource $script:data $p.Id $s.Id;Save-CenterProfiles $script:data;Update-Details
+ Remove-CenterSource $script:data $p.Id $s.Id;Save-Settings;Update-Details
 }catch{Show-Error $_}})
 $btnAddSub.Add_Click({try{
  $s=Get-SelectedSource;if(-not $s){return}
@@ -1489,7 +1569,7 @@ $speedTimer.Add_Tick({
   $notes=@(@($r.Warnings)+@($r.Blockers)|Where-Object {$_}) -join ' '
   $target=@($script:data.Profiles|Where-Object {$_.Id -eq $script:speedProfile.Id})[0];if(-not $target){throw 'The profile was removed during the test.'}
   $target|Add-Member -NotePropertyName LastSpeedTest -NotePropertyValue ([pscustomobject]@{When=(Get-Date).ToString('o');Link=$r.Link;WriteMBps=$r.WriteMBps;ReadMBps=$r.ReadMBps;Notes=$notes}) -Force
-  Save-CenterProfiles $script:data;Update-Details
+  Save-Settings;Update-Details
  }catch{$script:speedRun=$null;Update-Details;$speedResult.Text='Speed test failed: '+$_.Exception.Message}
 })
 $btnCheckQuick.Add_Click({try{Start-DriveCheck 'Quick'}catch{Show-Error $_;Update-Details}})
@@ -1542,11 +1622,14 @@ $btnSaveLoad.Add_Click({try{
 }catch{Show-Error $_}})
 $oldDays.Add_ValueChanged({try{
  if($script:loadingDays){return};$p=Get-SelectedProfile;if(-not $p){return}
- $p.ReminderDays=[int]$oldDays.Value;Save-CenterProfiles $script:data;Update-ProfileList $p.Id
+ $p.ReminderDays=[int]$oldDays.Value;Save-Settings;Update-ProfileList $p.Id
 }catch{Show-Error $_}})
 $keepDeleted.Add_ValueChanged({try{
  if($script:loadingDays){return};$p=Get-SelectedProfile;if(-not $p){return}
- $p|Add-Member -NotePropertyName KeepDeleted -NotePropertyValue ([int]$keepDeleted.Value) -Force;Save-CenterProfiles $script:data
+ # Another number is another rule: its first clean-up is shown for approval (Set-CenterKeepDeleted).
+ Set-CenterKeepDeleted $p ([int]$keepDeleted.Value);Save-Settings
+ $runStatus.Text=if([int]$keepDeleted.Value -gt 0){"Deleted files: each backup moves them out of the plain copy and keeps the newest $([int]$keepDeleted.Value) recovery folders. $(Get-CenterRetentionState $p)"}else{'Deleted files stay in the plain copy.'}
+ Update-Details
 }catch{Show-Error $_}})
 $form.Add_FormClosing({param($s,$e)
  # Ask about everything first; stop nothing unless the window really closes.
@@ -1569,6 +1652,7 @@ $form.Add_Shown({
  # because the dark title bar and scroll bars need them.
  Save-BaseLayout
  Use-Theme (Get-ChosenTheme)
+ if($form.ClientSize -ne $baseClient){Set-Zoom}   # opened smaller, on a screen without room for the full size
  Show-Page 0
  $script:shown=$true
  Update-ProfileList
@@ -1605,6 +1689,18 @@ $form.Add_Shown({
   if($ovGrid.Rows.Count -gt 1){$ovGrid.Rows[1].Selected=$true;$s=Get-OverviewSource;$script:testLog.SecondSelected=[ordered]@{Source=$(if($s){$s.Label});Repair=$btnRepair.Enabled}}
   if($ovGrid.Rows.Count){$ovGrid.ClearSelection();$ovGrid.Rows[0].Selected=$true;$s=Get-OverviewSource;$script:testLog.FirstSelected=[ordered]@{Source=$(if($s){$s.Label});Repair=$btnRepair.Enabled}}
  }
+ if($TestAction -eq 'AfterRun'){
+  # What the end of a run asks and says, from the entries of a finished run kept in a file (no drive needed).
+  $p=Get-SelectedProfile;if($p){Invoke-AfterRun $p @(Get-Content -LiteralPath $TestPath -Raw|ConvertFrom-Json);$script:testLog.AfterRun=[ordered]@{Status=$runStatus.Text}}
+ }
+ if($TestAction -eq 'AddFolder'){
+  # "Add folder..." after the folder, its name and its mode were chosen (those boxes cannot be shown in a test).
+  $p=Get-SelectedProfile;if($p){Show-Page 1;try{$s=Add-SourceFolder $p $TestPath (Split-Path -Leaf $TestPath) 'Mirror';$script:testLog.Added=[ordered]@{Source=$(if($s){$s.Id});MirrorFolder=$(if($s){$s.MirrorFolder});Status=$runStatus.Text}}catch{Show-Error $_}}
+ }
+ if($TestAction -eq 'SaveAfter'){
+  # The settings file is replaced on disk behind the window's back, then the window saves a setting.
+  $p=Get-SelectedProfile;if($p){[IO.File]::Copy($TestPath,(Get-CenterPaths).Profiles,$true);$p.ReminderDays=[int]$p.ReminderDays+1;Save-Settings}
+ }
  # Answered by -Answer in a test run (see Show-VersionRetentionDialog and Show-Choice); what follows is what the link and the end of a run do.
  if($PreviewDialog -eq 'KeepVersions'){if($script:testMode){Edit-VersionRetention}else{[void]$form.BeginInvoke([Action]{try{Edit-VersionRetention}catch{Show-Error $_}})}}
  if($PreviewDialog -eq 'RetentionPreview'){$p=Get-SelectedProfile;if($p){$pv=Get-SampleRetentionPreview $p;$script:testLog.Retention=[ordered]@{Count=$pv.Count;Approved=[bool](Request-RetentionApproval $p $pv)}}}
@@ -1627,7 +1723,8 @@ $refreshTimer=[Windows.Forms.Timer]::new();$refreshTimer.Interval=60000;$refresh
 $form.Add_FormClosed({foreach($t in $timer,$waitTimer,$speedTimer,$checkTimer,$zoomTimer,$refreshTimer,$showTimer){try{$t.Stop();$t.Dispose()}catch{}}})
 # Tests: what the window shows, written when it closes.
 if($TestState){$form.Add_FormClosed({try{
- $state=[ordered]@{Status=$runStatus.Text;KeepVersions=$keepVersions.Text;Warning=$ovWarn.Text;WarningLevel=$(if(-not $ovWarn.Text){''}elseif($ovWarn.LinkColor -eq $stateInk.Stale){'Check'}else{'Failed'});GridTop=$ovGrid.Top;Drives=@($script:driveRows|ForEach-Object {[ordered]@{When=$_.When;Alert=$_.Alert}})
+ $state=[ordered]@{Status=$runStatus.Text;KeepVersions=$keepVersions.Text;Warning=$ovWarn.Text;WarningLevel=$(if(-not $ovWarn.Text){''}elseif($script:warnLevel -eq 'Advice'){'Advice'}elseif($ovWarn.LinkColor -eq $stateInk.Stale){'Check'}else{'Failed'});GridTop=$ovGrid.Top;Drives=@($script:driveRows|ForEach-Object {[ordered]@{When=$_.When;Alert=$_.Alert}})
+  ClientWidth=$form.ClientSize.Width;ClientHeight=$form.ClientSize.Height;Zoom=$script:zoom;SourceInfo=$srcInfo.Text
   Backup=$btnBackup.Enabled;BackupOne=$btnBackupOne.Enabled;Verify=$btnVerify.Enabled;Repair=$btnRepair.Enabled;Speed=$btnSpeed.Enabled;CheckStatus=$checkStatus.Text;SpeedResult=$speedResult.Text;LoadAdvice=$loadAdvice.Text
   Runs=@($runsGrid.Rows|ForEach-Object {[string]$_.Cells[2].Value+': '+[string]$_.Cells[6].Value});Log=$script:testLog}
  [IO.File]::WriteAllText($TestState,($state|ConvertTo-Json -Depth 6))

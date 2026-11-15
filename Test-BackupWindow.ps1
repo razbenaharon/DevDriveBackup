@@ -65,6 +65,13 @@ try{
  $r=Open-Window $data @('-RenderPreview',$png,'-PreviewTab','2','-PreviewTheme','Dark','-PreviewWidth','1500','-PreviewHeight','1000')
  Check 'a larger window in the Dark theme opens and is drawn' {$r.Code -eq 0 -and (Test-Path -LiteralPath $png)}
  Check 'at a larger size the explanations still fit' {-not @(Get-Content -LiteralPath ($png+'.layout.txt')|Where-Object {$_}).Count}
+ # The smallest window is 80% of the size it is drawn for: every page still draws and no explanation is cut off.
+ for($i=0;$i -lt $pages.Count;$i++){
+  $png=Join-Path $root "small-$i.png"
+  $r=Open-Window $data @('-RenderPreview',$png,'-PreviewTab',"$i",'-PreviewWidth','960','-PreviewHeight','640')
+  $cut=@(Get-Content -LiteralPath ($png+'.layout.txt') -ErrorAction SilentlyContinue|Where-Object {$_})
+  Check "page '$($pages[$i])' at 80% (960 x 640) is drawn and no explanation is cut off$(if($cut.Count){': '+($cut -join '; ')})" {$r.Code -eq 0 -and (Test-Path -LiteralPath $png) -and (Get-Item -LiteralPath $png).Length -gt 15000 -and (Test-Path -LiteralPath ($png+'.layout.txt')) -and -not $cut.Count}
+ }
  $r=Open-Window $data @('-AutoCloseSeconds','3')
  Check 'the window runs for a few seconds and closes cleanly' {$r.Code -eq 0}
  Check 'no error in an event handler was logged' {-not (Test-Path -LiteralPath (Join-Path (Get-CenterPaths).Logs 'ui-errors.log'))}
@@ -81,6 +88,14 @@ try{
  Check 'the drive list marks it too, beside the age' {$s.Drives[0].When -like 'Backed up*Latest run was stopped' -and $s.Drives[0].Alert -eq 'Stopped'}
  Check 'a drive that is not connected: the buttons are off and the status line says why' {-not $s.Backup -and -not $s.BackupOne -and -not $s.Verify -and -not $s.Repair -and -not $s.Speed -and $s.Status -like 'Connect this drive*'}
  Check 'a run that was stopped shows as stopped in Recent runs' {@($s.Runs|Where-Object {$_ -like 'Plain copy: Stopped by you.*'}).Count -eq 1 -and @($s.Runs|Where-Object {$_ -like 'Copy check: OK.*'}).Count -eq 1}
+
+ # --- The size the window opens with ---
+ Check 'on a screen with room (and in a test that names no screen) the window has its full size' {$s.ClientWidth -eq 1200 -and $s.ClientHeight -eq 800 -and $s.Zoom -eq 1}
+ $st=Join-Path $root 'state-size.json'
+ $r=Open-Window $data @('-AutoCloseSeconds','2','-TestArea','1100x700','-TestState',$st);$s=Read-State $st
+ Check "on a screen without room for it, the window opens at the largest size that fits ($($s.ClientWidth) x $($s.ClientHeight)), in proportion, with everything scaled" {$r.Code -eq 0 -and $s.ClientWidth -lt 1100 -and $s.ClientWidth -ge 960 -and $s.ClientHeight -lt 700 -and $s.ClientHeight -ge 640 -and [math]::Abs($s.ClientWidth/$s.ClientHeight-1.5) -lt 0.01 -and $s.Zoom -lt 1 -and $s.Zoom -ge 0.8 -and [math]::Abs($s.Zoom-$s.ClientWidth/1200) -lt 0.002}
+ $r=Open-Window $data @('-AutoCloseSeconds','2','-TestArea','640x480','-TestState',$st);$s=Read-State $st
+ Check 'on a screen smaller than that it opens at 80%, never below' {$r.Code -eq 0 -and $s.ClientWidth -eq 960 -and $s.ClientHeight -eq 640 -and $s.Zoom -eq 0.8}
 
  # --- The refresh that runs by itself keeps the user's place ---
  $st=Join-Path $root 'state-refresh.json'
@@ -169,14 +184,94 @@ try{
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Not now','-TestState',$st);$s=Read-State $st
  Check 'answered with Not now: the settings stay exactly as they were' {$r.Code -eq 0 -and -not $s.Log.Retention.Approved -and [IO.File]::ReadAllText($keepFile) -ceq $before}
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Approve','-TestState',$st);$s=Read-State $st
- Check 'answered with Approve clean-up: the approval is saved, and the window says the clean-up runs with the next backup' {$r.Code -eq 0 -and $s.Log.Retention.Approved -and (& $read).RetentionConfirmed -eq $true -and $s.Status -like '*Nothing was deleted now*next backup*' -and (& $read).VersionRetention.Last -eq 10}
+ Check 'answered with Approve clean-up: exactly the list that was shown is saved, the profile is not handed over to the rule yet, and the window says what the next backup does' {$q=& $read;$r.Code -eq 0 -and $s.Log.Retention.Approved -and $q.RetentionConfirmed -eq $false -and @($q.RetentionApproved.Versions[0].Ids).Count -eq 2 -and @($q.RetentionApproved.RecoveryFolders[0].Names).Count -eq 2 -and $q.RetentionApproved.Last -eq 10 -and $q.RetentionApproved.KeepDeleted -eq 4 -and $s.Status -like '*Nothing was deleted now*next backup deletes what was listed and nothing else*' -and $q.VersionRetention.Last -eq 10}
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','KeepVersions','-Answer','Save','-TestState',$st);$s=Read-State $st
- Check 'saving the Keep versions box with the same numbers keeps the approval' {$r.Code -eq 0 -and (& $read).RetentionConfirmed -eq $true -and $s.Status -like '*10 newest + 6 months*Clean-up runs automatically*'}
+ Check 'saving the Keep versions box with the same numbers keeps the approved list' {$q=& $read;$r.Code -eq 0 -and $q.RetentionConfirmed -eq $false -and @($q.RetentionApproved.Versions[0].Ids).Count -eq 2 -and $s.Status -like '*10 newest + 6 months*The clean-up you approved runs with the next backup*'}
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','KeepVersions','-Answer','Save 5 3','-TestState',$st);$s=Read-State $st
- Check 'other numbers are saved, shown on the overview, and their first clean-up is shown for approval again' {$q=& $read;$r.Code -eq 0 -and $q.VersionRetention.Last -eq 5 -and $q.VersionRetention.Months -eq 3 -and $q.RetentionConfirmed -eq $false -and $s.KeepVersions -eq '5 newest + 3 months' -and $s.Status -like '*5 newest + 3 months*first clean-up will be shown to you for approval*'}
+ Check 'other numbers are saved, shown on the overview, the approved list is dropped and their first clean-up is shown for approval again' {$q=& $read;$r.Code -eq 0 -and $q.VersionRetention.Last -eq 5 -and $q.VersionRetention.Months -eq 3 -and $q.RetentionConfirmed -eq $false -and -not $q.PSObject.Properties['RetentionApproved'] -and $s.KeepVersions -eq '5 newest + 3 months' -and $s.Status -like '*5 newest + 3 months*first clean-up will be shown to you for approval*'}
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','KeepVersions','-Answer','Save 0 0','-TestState',$st);$s=Read-State $st
  Check 'both numbers 0 keeps every version' {$q=& $read;$r.Code -eq 0 -and $q.VersionRetention.Last -eq 0 -and $q.VersionRetention.Months -eq 0 -and $s.KeepVersions -eq 'every version' -and $s.Status -like '*every version is kept*'}
  Check 'none of it made a second copy of the earlier settings or logged an error' {@(Get-ChildItem -LiteralPath $keep -Filter 'profiles.before-retention-*').Count -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $keep 'logs\ui-errors.log'))}
+
+ # --- After a run: the approved clean-up, a file always in use, a versions folder that is gone ---
+ # The entries of a finished run are handed to the window from a file (-TestAction AfterRun); the drive
+ # is not plugged in, so nothing can run. Photos2 uses the plain copy only, Projects2 both.
+ $after=Join-Path $root 'after';New-Item -ItemType Directory -Path $after,(Join-Path $src 'Photos2\a'),(Join-Path $src 'Projects2\a') -Force|Out-Null
+ [void](Set-CenterPaths $after)
+ $d4=Read-CenterProfiles;$p4=New-CenterProfile $d4 'After' 'NO-SUCH-VOLUME-6' 'Test model' 100
+ $ph=Add-CenterSource -Data $d4 -ProfileId $p4.Id -Path (Join-Path $src 'Photos2') -Label 'Photos2' -DefaultMode Mirror
+ $pr=Add-CenterSource -Data $d4 -ProfileId $p4.Id -Path (Join-Path $src 'Projects2') -Label 'Projects2' -DefaultMode Both
+ Set-CenterVersionRetention $p4 10 6;Set-CenterKeepDeleted $p4 3;Save-CenterProfiles $d4
+ $read4={@((Read-CenterProfiles).Profiles)[0]}
+ $part={param($sid,$kind,$more=@{})$h=[ordered]@{ProfileId=$p4.Id;SourceId=$sid;Label=$(if($sid -eq $ph.Id){'Photos2'}else{'Projects2'});Kind=$kind;Success=$true;Stopped=$false;RetentionPlanFailed=$false};foreach($k in $more.Keys){$h[$k]=$more[$k]};[pscustomobject]$h}
+ $runFile={param($name,$entries)$f=Join-Path $root $name;[IO.File]::WriteAllText($f,(ConvertTo-Json @($entries) -Depth 8));$f}
+ $st=Join-Path $root 'state-after.json'
+ $listed=& $runFile 'run-listed.json' @((& $part $ph.Id 'Mirror'),(& $part $pr.Id 'Mirror' @{RetentionPreview=@{Versions=@();RecoveryFolders=@('20260102-101500')}}),(& $part $pr.Id 'Versioned' @{RetentionPreview=@{Versions=@(@{Id='aaaa1111';Time='2026-03-01T10:15:00';Partial=$false;Host='PC';Paths=@('E:\P')});RecoveryFolders=@()}}))
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',$listed,'-Answer','Approve','-TestState',$st);$s=Read-State $st
+ Check 'after a backup that listed what it would delete, Approve clean-up stores that list and deletes nothing' {$q=& $read4;$r.Code -eq 0 -and $q.RetentionConfirmed -eq $false -and $q.RetentionApproved.Versions[0].SourceId -eq $pr.Id -and (@($q.RetentionApproved.Versions[0].Ids) -join ',') -eq 'aaaa1111' -and (@($q.RetentionApproved.RecoveryFolders[0].Names) -join ',') -eq '20260102-101500' -and $s.Log.AfterRun.Status -like 'Approved. Nothing was deleted now*'}
+ $approvedRun=@((& $part $ph.Id 'Mirror' @{RetentionPhase='Approved'}),(& $part $pr.Id 'Mirror' @{RetentionPhase='Approved'}),(& $part $pr.Id 'Versioned' @{RetentionPhase='Approved'}))
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',(& $runFile 'run-one.json' @($approvedRun[0])),'-Answer','Approve','-TestState',$st);$s=Read-State $st
+ Check 'a backup of one source during this phase leaves the approved list as it is and says that it goes on with the next backup' {$q=& $read4;$r.Code -eq 0 -and $q.RetentionConfirmed -eq $false -and (@($q.RetentionApproved.Versions[0].Ids) -join ',') -eq 'aaaa1111' -and $s.Log.AfterRun.Status -like '*not finished*next backup of all sources*'}
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',(& $runFile 'run-whole.json' $approvedRun),'-TestState',$st);$s=Read-State $st
+ Check 'after a whole backup that carried the approved list, the clean-up is handed over to the rule and the list is gone' {$q=& $read4;$r.Code -eq 0 -and $q.RetentionConfirmed -eq $true -and -not $q.PSObject.Properties['RetentionApproved'] -and $s.Log.AfterRun.Status -like '*was carried out*runs by itself after every backup*'}
+ # A file in use: three failed plain copies of Photos2 in a row name it.
+ $locked={param($mins)Add-CenterHistory ([pscustomobject]@{ProfileId=$p4.Id;SourceId=$ph.Id;Label='Photos2';Kind='Mirror';Finished=$n.AddMinutes($mins).ToString('o');Seconds=5.0;Success=$false;Stopped=$false;Error='1 files could not be copied; see copy-errors.txt in C:\runs\x';LockedFiles=@('cache\db.lock')})}
+ foreach($m in -30,-20,-10){& $locked $m}
+ $excludes={@((Read-CenterJob $ph.ConfigPath).Exclude)}
+ $before=(& $excludes).Count;$lastRun=& $runFile 'run-locked.json' @(& $part $ph.Id 'Mirror' @{Success=$false})
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',$lastRun,'-TestState',$st);$s=Read-State $st
+ Check 'a file in use in three backups in a row, answered with Not now: nothing is excluded, and the answer is remembered with the source' {$q=@((& $read4).Sources|Where-Object {$_.Id -eq $ph.Id})[0];$r.Code -eq 0 -and (& $excludes).Count -eq $before -and @($q.LockedAsked).Count -eq 1 -and $q.LockedAsked[0].Path -eq 'cache\db.lock'}
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',$lastRun,'-Answer','Exclude','-TestState',$st)
+ Check 'the same three backups do not ask again: also an Exclude answer has nothing to act on' {$r.Code -eq 0 -and (& $excludes).Count -eq $before}
+ $since=((Get-Date)-$n).TotalMinutes;foreach($m in 1,2,3){& $locked ($since+$m)}   # three further backups with the file in use, later than the answer above
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',$lastRun,'-Answer','Exclude','-TestState',$st);$s=Read-State $st
+ Check 'after three further such backups it is asked again; answered with Exclude from the backup, the file is added to the source''s Exclude list once' {$r.Code -eq 0 -and (& $excludes).Count -eq $before+1 -and (& $excludes)[-1] -eq 'cache\db.lock' -and $s.Log.AfterRun.Status -like 'Excluded from the backup of Photos2*cache\db.lock*'}
+ Check 'the window lists it as not backed up, and Recent runs note the change' {$s.SourceInfo -like '*Not backed up (excluded): cache\db.lock*' -and @($s.Runs|Where-Object {$_ -like 'Change: Excluded from the backup at your request*cache\db.lock*not backed up.'}).Count -eq 1}
+ # The versions folder is gone.
+ $gone=& $runFile 'run-gone.json' @((& $part $pr.Id 'Versioned' @{Success=$false;RepositoryMissing=$true;Error='The versions folder was not found.'}))
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',$gone,'-TestState',$st);$s=Read-State $st
+ Check 'a versions folder that was not found, answered with Not now: no new folder is started' {$r.Code -eq 0 -and @($s.Log.NewVersions).Count -eq 0 -and $r.Text -notlike '*not connected*'}
+ $r=Open-Window $after @('-AutoCloseSeconds','2','-TestAction','AfterRun','-TestPath',$gone,'-Answer','Create','-TestState',$st);$s=Read-State $st
+ Check 'answered with Create a new, empty versions folder: a versioned backup of that source is started (here the drive is not connected, which it says)' {$r.Code -eq 0 -and (@($s.Log.NewVersions) -join ',') -eq $pr.Id -and $r.Text -like '*not connected*'}
+ Check 'none of these questions logged an error in an event handler' {-not (Test-Path -LiteralPath (Join-Path $after 'logs\ui-errors.log'))}
+
+ # --- Adding a folder that was backed up to this drive before: asked first ---
+ $add=Join-Path $root 'add';New-Item -ItemType Directory -Path $add,(Join-Path $src 'Music\a') -Force|Out-Null
+ [void](Set-CenterPaths $add)
+ $d5=Read-CenterProfiles;$p5=New-CenterProfile $d5 'Add' 'NO-SUCH-VOLUME-7' 'Test model' 100
+ $mu=Add-CenterSource -Data $d5 -ProfileId $p5.Id -Path (Join-Path $src 'Music') -Label 'Music' -DefaultMode Both
+ Remove-CenterSource $d5 $p5.Id $mu.Id;Save-CenterProfiles $d5
+ $oldJob=[IO.File]::ReadAllText($mu.ConfigPath);$read5={@((Read-CenterProfiles).Profiles)[0]}
+ $st=Join-Path $root 'state-add.json'
+ $r=Open-Window $add @('-AutoCloseSeconds','2','-TestAction','AddFolder','-TestPath',(Join-Path $src 'Music'),'-TestState',$st);$s=Read-State $st
+ Check 'a folder that was backed up to this drive before is asked about first; unanswered, it is not added' {$r.Code -eq 0 -and @((& $read5).Sources).Count -eq 0 -and $s.Log.Added.Status -eq 'The folder was not added.' -and -not $s.Log.Added.Source}
+ $r=Open-Window $add @('-AutoCloseSeconds','2','-TestAction','AddFolder','-TestPath',(Join-Path $src 'Music'),'-Answer','Start fresh','-TestState',$st);$s=Read-State $st
+ Check 'Start fresh: added with new folder names; the earlier folders are named and the earlier settings file is untouched' {$q=@((& $read5).Sources);$q.Count -eq 1 -and $q[0].ConfigPath -ne $mu.ConfigPath -and $q[0].MirrorFolder -ine 'Music-Mirror' -and [string](Read-CenterJob $q[0].ConfigPath).RepositoryFolder -ine 'Music-Versions' -and (Read-CenterJob $q[0].ConfigPath).DefaultMode -eq 'Mirror' -and $s.Log.Added.Status -like '*as a new backup*stay on the drive untouched: \Music-Mirror and \Music-Versions*' -and [IO.File]::ReadAllText($mu.ConfigPath) -ceq $oldJob}
+ # Recovery folders piled up beside its plain copy, and the drive has no keep rule: suggested, nothing more.
+ $fresh=@((& $read5).Sources)[0]
+ Add-CenterHistory ([pscustomobject]@{ProfileId=$p5.Id;SourceId=$fresh.Id;Label='Music';Kind='Mirror';Finished=$n.AddHours(-1).ToString('o');Seconds=20.0;Success=$true;CopiedFiles=3;CopiedBytes=3000;RecoveryFolderCount=14})
+ $r=Open-Window $add @('-AutoCloseSeconds','2','-TestState',$st);$s=Read-State $st
+ Check 'more than 10 recovery folders without a keep rule: the overview suggests one, quietly, and changes nothing' {$r.Code -eq 0 -and $s.Warning -eq "14 recovery folders have piled up beside the plain copy of Music. Set 'Keep deleted in' to keep only the newest ones." -and $s.WarningLevel -eq 'Advice' -and -not $s.Drives[0].Alert -and -not (& $read5).PSObject.Properties['KeepDeleted']}
+ $d5=Read-CenterProfiles;Remove-CenterSource $d5 $p5.Id $fresh.Id;Save-CenterProfiles $d5
+ $r=Open-Window $add @('-AutoCloseSeconds','2','-TestAction','AddFolder','-TestPath',(Join-Path $src 'Music'),'-Answer','Use the earlier','-TestState',$st);$s=Read-State $st
+ Check 'Use the earlier settings: its settings file and folders are taken up again, and the window says so' {$q=@((& $read5).Sources);$q.Count -eq 1 -and $q[0].ConfigPath -in $mu.ConfigPath,$fresh.ConfigPath -and $s.Log.Added.Status -like '*with its earlier settings*is continued*'}
+ Check 'adding folders logged no error in an event handler' {-not (Test-Path -LiteralPath (Join-Path $add 'logs\ui-errors.log'))}
+
+ # --- The settings file is damaged or changed on disk while the window is open ---
+ $live2=Join-Path $root 'live2';New-Item -ItemType Directory -Path $live2 -Force|Out-Null
+ [void](Set-CenterPaths $live2)
+ $d6=Read-CenterProfiles;[void](New-CenterProfile $d6 'Open drive' 'NO-SUCH-VOLUME-8' 'Test model' 100);Save-CenterProfiles $d6
+ $file6=(Get-CenterPaths).Profiles;$good6=Join-Path $live2 'profiles.lastgood.local.json'
+ $same6={[Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($good6),[byte[]][IO.File]::ReadAllBytes($file6))}
+ $cutFile=Join-Path $root 'cut.json';[IO.File]::WriteAllText($cutFile,$cut)
+ $st=Join-Path $root 'state-save.json'
+ $r=Open-Window $live2 @('-AutoCloseSeconds','2','-TestAction','SaveAfter','-TestPath',$cutFile,'-TestState',$st);$s=Read-State $st
+ Check 'a settings file damaged after the window read it is not written over: it is kept beside the settings, and the status line says so' {$k=@(Get-ChildItem -LiteralPath $live2 -Filter 'profiles.damaged-*.local.json');$r.Code -eq 0 -and $k.Count -eq 1 -and [IO.File]::ReadAllText($k[0].FullName) -ceq $cut -and $s.Status -like 'The settings file had been damaged outside DevDriveBackup; it was kept as profiles.damaged-*.local.json and the settings were saved again.'}
+ Check 'the window''s settings were saved as the new file, and the last good copy is that file' {$q=@((Read-CenterProfiles).Profiles)[0];$q.Name -eq 'Open drive' -and $q.ReminderDays -eq 8 -and (& $same6)}
+ $otherFile=Join-Path $root 'other.json';[IO.File]::WriteAllText($otherFile,'{"Version":1,"Profiles":[{"Id":"zz","Name":"Edited elsewhere","DestinationVolumeId":"VOL-OTHER","ReminderDays":7,"Sources":[]}]}')
+ $r=Open-Window $live2 @('-AutoCloseSeconds','2','-TestAction','SaveAfter','-TestPath',$otherFile,'-TestState',$st);$s=Read-State $st
+ Check 'a settings file changed elsewhere while the window was open is kept aside too, and the status line names the copy' {$k=@(Get-ChildItem -LiteralPath $live2 -Filter 'profiles.changed-*.local.json');$r.Code -eq 0 -and $k.Count -eq 1 -and [IO.File]::ReadAllText($k[0].FullName) -ceq [IO.File]::ReadAllText($otherFile) -and $s.Status -like 'The settings file had been changed outside DevDriveBackup; that version was kept as profiles.changed-*' -and @((Read-CenterProfiles).Profiles)[0].ReminderDays -eq 9 -and (& $same6)}
+ [void](Set-CenterPaths $data)
 
  # --- One window only ---
  function Start-Window([string]$DataRoot,[string[]]$More){

@@ -166,12 +166,13 @@ function Restore-CenterLastGood {
 
 function Read-CenterProfiles {
  $p=(Get-CenterPaths).Profiles
- if(-not(Test-Path -LiteralPath $p)){return [pscustomobject]@{Version=1;Profiles=@()}}
+ if(-not(Test-Path -LiteralPath $p)){Set-CenterProfilesSeen $p $null;return [pscustomobject]@{Version=1;Profiles=@()}}
  # A file that is empty, cut off or not shaped like the settings is reported by name and left exactly as
  # it is: guessing (for example "no profiles") would let the next save write over what is left of it.
- $data=$null
- $why=try{Get-CenterProfilesProblem (Get-Content -LiteralPath $p -Raw) ([ref]$data)}catch{$_.Exception.Message}
+ $data=$null;$bytes=$null
+ $why=try{Get-CenterProfilesProblem (Read-CenterFileText $p ([ref]$bytes)) ([ref]$data)}catch{$_.Exception.Message}
  if($why){throw "The settings file $p is damaged and cannot be read ($why). Nothing was changed."}
+ Set-CenterProfilesSeen $p $bytes
  $data.Profiles=@($data.Profiles|ForEach-Object {$_.Sources=@($_.Sources);$_})
  # A source's settings file is stored by full path. When the tool folder is moved or renamed, that path
  # goes stale; a file of the same name in the jobs folder or beside the profiles file is the same file, moved.
@@ -221,12 +222,57 @@ function Save-CenterRetentionCopy {
  }
  throw 'no free name for the copy'
 }
+# --- A save never writes over a settings file it does not know ----------------------------------
+# The bytes of the settings file as this process last read or wrote it, by path. A save compares the
+# file on disk with them first. Damaged on disk (the validation of the start): the file is moved aside
+# as profiles.damaged-<time>.local.json. Valid but not what was read (edited by hand, restored by a
+# sync program, written by a test beside the window): it is moved aside as profiles.changed-<time>.
+# In both cases the settings in memory are then saved as the new file. Refusing instead would leave a
+# window that looks as usual but stores nothing from then on, an approval of a clean-up included; kept
+# aside, both versions exist and the status line names the copy. The last good copy is only ever made
+# from the file that was just written and read back as valid, never from what was found on disk.
+$script:ProfilesSeen=@{}
+function Set-CenterProfilesSeen([string]$Path,$Bytes) {$script:ProfilesSeen[[IO.Path]::GetFullPath($Path).ToLowerInvariant()]=[pscustomobject]@{Bytes=$Bytes}}
+function Move-CenterProfilesAside([string]$Kind) {
+ # Renames the settings file to profiles.<kind>-<time>.local.json beside it; a name that is taken is
+ # never written over. Returns the new path.
+ $p=(Get-CenterPaths).Profiles;$dir=[IO.Path]::GetDirectoryName($p)
+ $base=[IO.Path]::GetFileName($p) -replace '\.local\.json$','';$tail=if($p -match '\.local\.json$'){'.local.json'}else{''};$stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
+ for($i=1;;$i++){$kept=Join-Path $dir ($base+'.'+$Kind+'-'+$stamp+$(if($i -gt 1){"-$i"})+$tail);if(-not(Test-Path -LiteralPath $kept)){break}}
+ [IO.File]::Move($p,$kept)   # fails rather than overwrites when the name is taken after all
+ $kept
+}
 function Save-CenterProfiles($Data) {
- $p=(Get-CenterPaths).Profiles
+ # Returns nothing (callers use it as a statement); what it found on disk is told by Get-CenterSaveReport.
+ $p=(Get-CenterPaths).Profiles;$key=[IO.Path]::GetFullPath($p).ToLowerInvariant()
  New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($p)) -Force|Out-Null
+ $seen=$script:ProfilesSeen[$key];$what='';$kept=$null
+ if(Test-Path -LiteralPath $p -PathType Leaf){
+  $bytes=$null;$bad=try{Get-CenterProfilesProblem (Read-CenterFileText $p ([ref]$bytes))}catch{$_.Exception.Message}
+  if($bad){$what='Damaged'}
+  elseif(-not $seen -or $null -eq $seen.Bytes -or -not [Linq.Enumerable]::SequenceEqual([byte[]]$seen.Bytes,[byte[]]$bytes)){$what='Changed'}
+  if($what){
+   try{$kept=Move-CenterProfilesAside $what.ToLowerInvariant()}
+   catch{throw "The settings were not saved. The settings file $p had been $(if($bad){'damaged'}else{'changed'}) outside DevDriveBackup and could not be kept aside under another name first ($($_.Exception.Message)). Nothing was changed."}
+  }
+ }elseif($seen -and $null -ne $seen.Bytes){$what='Missing'}
  [void](Write-BackupStatus $Data $p)
+ Set-CenterProfilesSeen $p ([IO.File]::ReadAllBytes($p))
  # What was just saved, read back from disk and found valid, becomes the copy to fall back on.
  [void](Save-CenterLastGood)
+ $name=if($kept){Split-Path $kept -Leaf}else{''}
+ $script:LastSave=[pscustomobject]@{Number=$script:LastSave.Number+1;What=$what;KeptAs=$kept;Message=$(switch($what){
+  'Damaged'{"The settings file had been damaged outside DevDriveBackup; it was kept as $name and the settings were saved again."}
+  'Changed'{"The settings file had been changed outside DevDriveBackup; that version was kept as $name and the settings of this window were saved."}
+  'Missing'{'The settings file was missing from its folder; the settings were saved again.'}
+  default{''}})}
+}
+$script:LastSave=[pscustomobject]@{Number=0;What='';KeptAs=$null;Message=''}
+function Get-CenterSaveReport {
+ # What the last save found on disk: What ('' = the file this window knew, 'Damaged', 'Changed' or
+ # 'Missing'), the name the file on disk was kept under (KeptAs), and the sentence for the status line.
+ # Number counts the saves of this process, so a caller can tell a report it has shown already.
+ $script:LastSave
 }
 function Get-CenterProfile($Data,[string]$Id) {
  $hit=@($Data.Profiles|Where-Object {$_.Id -eq $Id})
@@ -319,7 +365,11 @@ function Add-CenterSource {
  # -Restored ([ref]): set to the earlier settings (copy folder, versions folder, mode of unlisted folders)
  # when this folder was a source of this drive before and its kept settings were taken up again, so the
  # caller can say that -Label and -DefaultMode were not applied. Left alone otherwise.
- param($Data,[string]$ProfileId,[string]$Path,[string]$Label,[ValidateSet('Mirror','Versioned','Both','Skip')][string]$DefaultMode='Mirror',[string]$ExistingConfigPath,[string]$MirrorFolder,[ref]$Restored)
+ # -Earlier: what to do when this folder was a source of this drive before (see Find-CenterEarlierSource).
+ # Restore (the default, for callers that do not ask) takes its kept settings up again. Fresh leaves
+ # them alone: a new job file with -DefaultMode, and a plain copy folder and versions folder with names
+ # nothing on the drive or in an earlier job has; the earlier job file and folders are not touched.
+ param($Data,[string]$ProfileId,[string]$Path,[string]$Label,[ValidateSet('Mirror','Versioned','Both','Skip')][string]$DefaultMode='Mirror',[string]$ExistingConfigPath,[string]$MirrorFolder,[ref]$Restored,[ValidateSet('Restore','Fresh')][string]$Earlier='Restore')
  $profile=Get-CenterProfile $Data $ProfileId
  $root=[IO.Path]::GetFullPath($Path).TrimEnd('\')+'\'
  if($root -notmatch '^[A-Za-z]:\\'){throw "Choose a folder on a drive of this computer (one with a drive letter). A network folder such as $($root.TrimEnd('\')) cannot be backed up from here."}
@@ -336,10 +386,7 @@ function Add-CenterSource {
  $drive=Get-CenterDrive $profile.DestinationVolumeId -Fresh
  # The folder names this drive's job files record, also those of sources removed earlier: their plain
  # copy and versions stay on the drive, so a new source must never get one, even while it is unplugged.
- $jobFiles=@(Get-ChildItem -LiteralPath (Get-CenterPaths).Jobs -Filter '*.local.json' -File -ErrorAction SilentlyContinue|ForEach-Object {
-  try{$j=Get-Content -LiteralPath $_.FullName -Raw|ConvertFrom-Json}catch{return}
-  if($j.PSObject.Properties['DestinationVolumeId'] -and $j.DestinationVolumeId -eq $profile.DestinationVolumeId){[pscustomobject]@{Path=$_.FullName;Job=$j}}
- })
+ $jobFiles=@(Get-CenterDriveJobs $profile)
  $jobNames=@($jobFiles|ForEach-Object {
   if($_.Job.PSObject.Properties['MirrorFolder'] -and $_.Job.MirrorFolder){[string]$_.Job.MirrorFolder}
   if($_.Job.PSObject.Properties['RepositoryFolder'] -and $_.Job.RepositoryFolder){[string]$_.Job.RepositoryFolder;if([string]$_.Job.RepositoryFolder -match '^(.+)-Versions$'){$Matches[1]+'-Mirror'}}
@@ -352,21 +399,11 @@ function Add-CenterSource {
  $used={param($m)@($profile.Sources|Where-Object {$_.MirrorFolder -ieq $m}).Count -gt 0}
  if($MirrorFolder -and (& $used $MirrorFolder)){throw "The plain copy folder $MirrorFolder is already used by another source of this drive"}
  $id=New-ShortId
- if(-not $ExistingConfigPath){
+ if(-not $ExistingConfigPath -and $Earlier -eq 'Restore'){
   # A source removed earlier keeps its job file (with its keys); adding the same folder again to
-  # the same drive picks it up instead of creating a second repository next to the first. A job whose
-  # versions folder a current source of this drive uses now is not picked up: two sources never share
-  # one repository, so the folder then starts with names of its own.
-  $current=@($profile.Sources|Where-Object {$_.PSObject.Properties['ConfigPath'] -and $_.ConfigPath}|ForEach-Object {[IO.Path]::GetFullPath([string]$_.ConfigPath)})
-  # Read from each current source's own job file, wherever it is kept, not only those in the jobs folder.
-  $inUse=@($current|ForEach-Object {try{$j=Get-Content -LiteralPath $_ -Raw|ConvertFrom-Json;if($j.PSObject.Properties['RepositoryFolder'] -and $j.RepositoryFolder){[string]$j.RepositoryFolder}}catch{}})
-  $old=@($jobFiles|Where-Object {
-   try{(([IO.Path]::GetFullPath([string]$_.Job.Source).TrimEnd('\')+'\') -ieq $root)}catch{$false}
-  }|Where-Object {$current -inotcontains $_.Path -and -not ($_.Job.PSObject.Properties['RepositoryFolder'] -and $inUse -icontains [string]$_.Job.RepositoryFolder)}|Sort-Object {(Get-Item -LiteralPath $_.Path).LastWriteTime} -Descending)
-  if($old.Count){
-   $ExistingConfigPath=$old[0].Path
-   if($Restored){$j=$old[0].Job;$Restored.Value=[pscustomobject]@{ConfigPath=$ExistingConfigPath;MirrorFolder=$(if($j.PSObject.Properties['MirrorFolder']){[string]$j.MirrorFolder}else{''});RepositoryFolder=$(if($j.PSObject.Properties['RepositoryFolder']){[string]$j.RepositoryFolder}else{''});DefaultMode=$(if($j.PSObject.Properties['DefaultMode']){[string]$j.DefaultMode}else{''})}}
-  }
+  # the same drive picks it up instead of creating a second repository next to the first.
+  $old=Find-CenterEarlierSource -Data $Data -ProfileId $ProfileId -Path $root -Jobs $jobFiles
+  if($old){$ExistingConfigPath=$old.ConfigPath;if($Restored){$Restored.Value=$old}}
  }
  if(-not $ExistingConfigPath){while(& $taken $safe){$safe=(Get-SafeName $Label)+'-'+(New-ShortId).Substring(0,4)}}
  if($ExistingConfigPath){
@@ -395,6 +432,41 @@ function Add-CenterSource {
  $source=[pscustomobject]@{Id=$id;Label=$Label.Trim();Path=$root;ConfigPath=$config;MirrorFolder=$MirrorFolder;Created=(Get-Date).ToString('o')}
  $profile.Sources=@($profile.Sources)+$source
  $source
+}
+function Get-CenterDriveJobs($Profile) {
+ # The job files of this drive in the jobs folder, also those of sources removed earlier: each with its
+ # path and what it holds. A file that cannot be read is left out.
+ @(Get-ChildItem -LiteralPath (Get-CenterPaths).Jobs -Filter '*.local.json' -File -ErrorAction SilentlyContinue|ForEach-Object {
+  try{$j=Get-Content -LiteralPath $_.FullName -Raw|ConvertFrom-Json}catch{return}
+  if($j.PSObject.Properties['DestinationVolumeId'] -and $j.DestinationVolumeId -eq $Profile.DestinationVolumeId){[pscustomobject]@{Path=$_.FullName;Job=$j}}
+ })
+}
+function Find-CenterEarlierSource {
+ # Was this folder a source of this drive before? Returns the kept settings of the newest such job
+ # (ConfigPath, MirrorFolder, RepositoryFolder, DefaultMode), or nothing. The window asks with it before
+ # adding the folder; it changes nothing. A job a current source uses, or whose versions folder a
+ # current source of this drive uses now, does not count: two sources never share one repository.
+ param($Data,[string]$ProfileId,[string]$Path,$Jobs)
+ $profile=Get-CenterProfile $Data $ProfileId
+ $root=try{[IO.Path]::GetFullPath($Path).TrimEnd('\')+'\'}catch{''}
+ if(-not $root){return}
+ if($null -eq $Jobs){$Jobs=@(Get-CenterDriveJobs $profile)}
+ $current=@($profile.Sources|Where-Object {$_.PSObject.Properties['ConfigPath'] -and $_.ConfigPath}|ForEach-Object {[IO.Path]::GetFullPath([string]$_.ConfigPath)})
+ # Read from each current source's own job file, wherever it is kept, not only those in the jobs folder.
+ $inUse=@($current|ForEach-Object {try{$j=Get-Content -LiteralPath $_ -Raw|ConvertFrom-Json;if($j.PSObject.Properties['RepositoryFolder'] -and $j.RepositoryFolder){[string]$j.RepositoryFolder}}catch{}})
+ $old=@(@($Jobs)|Where-Object {
+  try{(([IO.Path]::GetFullPath([string]$_.Job.Source).TrimEnd('\')+'\') -ieq $root)}catch{$false}
+ }|Where-Object {$current -inotcontains $_.Path -and -not ($_.Job.PSObject.Properties['RepositoryFolder'] -and $inUse -icontains [string]$_.Job.RepositoryFolder)}|Sort-Object {(Get-Item -LiteralPath $_.Path).LastWriteTime} -Descending)
+ if(-not $old.Count){return}
+ $j=$old[0].Job
+ [pscustomobject]@{ConfigPath=$old[0].Path;MirrorFolder=$(if($j.PSObject.Properties['MirrorFolder']){[string]$j.MirrorFolder}else{''});RepositoryFolder=$(if($j.PSObject.Properties['RepositoryFolder']){[string]$j.RepositoryFolder}else{''});DefaultMode=$(if($j.PSObject.Properties['DefaultMode']){[string]$j.DefaultMode}else{''})}
+}
+function Get-CenterWindowFit([int]$BaseWidth,[int]$BaseHeight,[int]$AreaWidth,[int]$AreaHeight,[double]$Smallest=0.8) {
+ # The inner size the window opens with: its full size where the screen has the room, otherwise the
+ # largest size in the same proportions that fits, and never below -Smallest (80%) of the full size.
+ $f=[math]::Min(1.0,[math]::Min($AreaWidth/[double]$BaseWidth,$AreaHeight/[double]$BaseHeight))
+ $f=[math]::Max($Smallest,[math]::Floor($f*1000)/1000)
+ [pscustomobject]@{Factor=$f;Width=[int][math]::Floor($BaseWidth*$f);Height=[int][math]::Floor($BaseHeight*$f)}
 }
 function Remove-CenterSource($Data,[string]$ProfileId,[string]$SourceId) {
  # Forgets the source only; its job file (with key locations) and backups are kept.
@@ -581,6 +653,8 @@ function Get-CenterOpenCheck($Entries,[string]$Kind) {
  # stopped says nothing about the backup, so the one before it counts. Put right means: a later repair
  # that succeeded, or a later plain copy that compared every file (it records CheckedFiles) and succeeded.
  # An ordinary backup does not: it copies by size and time and would leave a file that only differs inside.
+ # A source that has never run hands in nothing, which a pipeline would pass on as one empty entry.
+ $Entries=@($Entries|Where-Object {$null -ne $_})
  $checks=@($Entries|Where-Object {$_.Kind -eq $Kind+'Check' -and -not ($_.PSObject.Properties['Stopped'] -and $_.Stopped)})
  if(-not $checks.Count -or $checks[-1].Success){return $null}
  $c=$checks[-1];$at=$c.Finished.ToUniversalTime()
@@ -617,7 +691,7 @@ function Get-CenterRunWarnings($Profile,$History,[datetime]$Now=(Get-Date)) {
  $short={param($t)$s=(([string]$t -split ';\s|(?<=[.!?])\s',2)[0]).Trim().TrimEnd('.');if($s.Length -gt 110){$s=$s.Substring(0,110).TrimEnd()+'...'};$s}
  $list=foreach($s in @($Profile.Sources)){
   $kinds=try{Get-CenterSourceKinds $s}catch{[pscustomobject]@{Mirror=$true;Versioned=$true}}
-  $runs=Get-CenterSourceRuns $History $s.Id
+  $runs=@(Get-CenterSourceRuns $History $s.Id)
   foreach($k in @(@('Mirror','plain copy'),@('Versioned','versions'))){
    if(-not $kinds.($k[0])){continue}
    $last=@($runs|Where-Object {$_.Kind -eq $k[0]})|Select-Object -Last 1
@@ -635,12 +709,106 @@ function Get-CenterRunWarnings($Profile,$History,[datetime]$Now=(Get-Date)) {
 function Format-CenterRunWarnings($Warnings) {
  # One line for the overview (the first warning, how many more, where the details are), every warning
  # for the tooltip, and the Level of the worst one ('' = nothing to warn about).
+ # A suggestion (Level Advice, see Get-CenterRecoveryAdvice) may follow the warnings; alone it is the
+ # whole line, without the pointer to the runs.
  $w=@($Warnings|Where-Object {$_})
  if(-not $w.Count){return [pscustomobject]@{Level='';Text='';Full='';Count=0}}
  $where='Details: Recent runs on the Speed and load page.'
+ if($w[0].Level -eq 'Advice'){return [pscustomobject]@{Level='Advice';Count=$w.Count;Text=$w[0].Text+$(if($w.Count -gt 1){" (and $($w.Count-1) more)"})+'.';Full=(@($w|ForEach-Object {$_.Text+'.'}) -join "`n")}}
  [pscustomobject]@{Level=$w[0].Level;Count=$w.Count
   Text=$w[0].Text+$(if($w.Count -gt 1){" (and $($w.Count-1) more)"})+'. '+$where
   Full=(@($w|ForEach-Object {$_.Text+'.'})+$where) -join "`n"}
+}
+# --- Recovery folders that pile up without a keep rule ------------------------------------------
+# With "Keep deleted in" at 0 no recovery folder is ever deleted, and repairs and healed files still
+# make them. Above this many beside one plain copy, a keep rule is suggested. Nothing is deleted or set
+# by itself: setting the rule goes through the usual preview and approval.
+$script:RecoveryPile=10
+function Get-CenterRecoveryPileText([int]$Count,[string]$Label) {"$Count recovery folders have piled up beside the plain copy of $Label. Set 'Keep deleted in' to keep only the newest ones"}
+function Get-CenterRecoveryAdvice($Profile,$History) {
+ # One suggestion per source whose newest plain copy run that counted its recovery folders found more
+ # than 10, while the profile has no keep rule. Shaped like a run warning, with Level Advice.
+ if((Get-CenterKeepDeleted $Profile) -gt 0){return}
+ foreach($s in @($Profile.Sources)){
+  $last=@(Get-CenterSourceRuns $History $s.Id|Where-Object {$_.Kind -in 'Mirror','MirrorRepair' -and $_.PSObject.Properties['RecoveryFolderCount'] -and $null -ne $_.RecoveryFolderCount})|Select-Object -Last 1
+  $n=if($last){try{[int]$last.RecoveryFolderCount}catch{0}}else{0}
+  if($n -gt $script:RecoveryPile){[pscustomobject]@{Level='Advice';SourceId=$s.Id;Label=$s.Label;Kind='Mirror';When=$last.Finished;Reason='';Count=$n;Text=(Get-CenterRecoveryPileText $n $s.Label)}}
+ }
+}
+# --- A file that is in use in three backups in a row ---------------------------------------------
+# A plain copy that could not read a file because a program had it open is a failed run, every time.
+# After three such backups of one source in a row with the same file, the user is asked once whether to
+# exclude it. Only a yes changes the source's Exclude list; a no is remembered with the source
+# (LockedAsked: Path, When) and the file is offered again after three further such backups.
+function Get-CenterLockedOffer($Source,$History) {
+ # The files to ask about now (source-relative paths as the tool named them), or nothing. Counted are
+ # the last three plain copy backups of this source that ran to their end: content checks, repairs and
+ # stopped runs say nothing about it, and a backup without the file in its list breaks the row.
+ $runs=@(Get-CenterSourceRuns $History $Source.Id|Where-Object {$_.Kind -eq 'Mirror' -and -not ($_.PSObject.Properties['Stopped'] -and $_.Stopped)}|Select-Object -Last 3)
+ if($runs.Count -lt 3){return}
+ $lists=@($runs|ForEach-Object {,@(@($(if($_.PSObject.Properties['LockedFiles']){$_.LockedFiles}))|Where-Object {$_ -is [string] -and $_.Trim()})})
+ $excluded=try{@(@((Read-CenterJob $Source.ConfigPath).Exclude)|ForEach-Object {([string]$_).Replace('/','\').Trim('\')})}catch{@()}
+ $asked=@(if($Source.PSObject.Properties['LockedAsked']){@($Source.LockedAsked)|Where-Object {$_ -is [pscustomobject] -and $_.PSObject.Properties['Path']}})
+ $first=($runs|ForEach-Object {$_.Finished.ToUniversalTime()}|Sort-Object|Select-Object -First 1)
+ foreach($f in @($lists[2])){
+  if(@($lists[0]) -inotcontains $f -or @($lists[1]) -inotcontains $f){continue}
+  if($excluded -icontains $f.Replace('/','\').Trim('\')){continue}
+  $no=@($asked|Where-Object {[string]$_.Path -ieq $f})|Select-Object -Last 1
+  if($no){$t=if($no.PSObject.Properties['When']){ConvertTo-CenterTime $no.When}else{$null};if(-not $t -or $first -le $t.ToUniversalTime()){continue}}
+  $f
+ }
+}
+function Format-CenterLockedOffer([string]$Label,[string[]]$Files) {
+ # The one question: which files, and what excluding means.
+ $one=$Files.Count -eq 1
+ $lines=@("$(if($one){'A file'}else{"$($Files.Count) files"}) of '$Label' could not be copied in three backups in a row, because a program had $(if($one){'it'}else{'them'}) open:",'')
+ $lines+=@($Files|Select-Object -First 8|ForEach-Object {"  - $_"});if($Files.Count -gt 8){$lines+="  - and $($Files.Count-8) more"}
+ $lines+=@('',"As long as $(if($one){'it is'}else{'they are'}) in use, every backup of this source ends as failed.",'',"Exclude from the backup: $(if($one){'this file is'}else{'these files are'}) left out from now on, in the plain copy and in the versions. $(if($one){'It is'}else{'They are'}) then not backed up; the page ""What to back up"" lists $(if($one){'it'}else{'them'}).",'Not now: nothing changes. You are asked again after three more backups like these.')
+ $lines -join "`n"
+}
+function Set-CenterLockedAsked($Data,[string]$ProfileId,[string]$SourceId,[string[]]$Files,[datetime]$When=(Get-Date)) {
+ # "Not now": remembered per file with the source, so the same three backups do not ask again.
+ $s=@((Get-CenterProfile $Data $ProfileId).Sources)|Where-Object {$_.Id -eq $SourceId}|Select-Object -First 1;if(-not $s){throw "Source not found: $SourceId"}
+ $keep=@(if($s.PSObject.Properties['LockedAsked']){@($s.LockedAsked)|Where-Object {$_ -is [pscustomobject] -and $_.PSObject.Properties['Path'] -and $Files -inotcontains [string]$_.Path}})
+ $s|Add-Member -NotePropertyName LockedAsked -NotePropertyValue @($keep+@($Files|Where-Object {$_}|ForEach-Object {[pscustomobject]@{Path=$_;When=$When.ToString('o')}})) -Force
+ Save-CenterProfiles $Data
+}
+function Add-CenterLockedExclude($Profile,$Source,[string[]]$Files,[int]$WaitMilliseconds=3000) {
+ # "Exclude from the backup": adds the files to the source's Exclude list under the job's lock, each
+ # once whatever its letter case, and notes it in the history (Kind Setting: a change, not a backup).
+ # Returns the files that were added; nothing is noted when all were there already.
+ $state=@{Added=@()}
+ Save-CenterJob $null $Source.ConfigPath -WaitMilliseconds $WaitMilliseconds -Update {param($job)
+  $have=@(if($job.PSObject.Properties['Exclude']){@($job.Exclude)|Where-Object {$null -ne $_}|ForEach-Object {[string]$_}})
+  foreach($f in @($Files|Where-Object {$_ -and $_.Trim()})){if($have -inotcontains $f){$have+=$f;$state.Added+=$f}}
+  $job|Add-Member -NotePropertyName Exclude -NotePropertyValue @($have) -Force
+ }.GetNewClosure()
+ $added=@($state.Added)
+ if($added.Count){
+  $now=Get-Date
+  Add-CenterHistory ([pscustomobject]([ordered]@{ProfileId=$Profile.Id;SourceId=$Source.Id;Label=$Source.Label;Kind='Setting';Purpose='Exclude';Started=$now.ToString('o');Finished=$now.ToString('o');Success=$true;Stopped=$false;Error=$null
+   Note="Excluded from the backup at your request, because $(if($added.Count -eq 1){'it was'}else{'they were'}) in use in three backups in a row: $($added -join ', '). $(if($added.Count -eq 1){'It is'}else{'They are'}) not backed up."}))
+ }
+ $added
+}
+function Get-CenterPersonalExcludes($Source) {
+ # What this source leaves out beyond the rebuildable folders skipped everywhere: the entries of its
+ # Exclude list that are not in the recommended list. Shown as not backed up.
+ $job=try{Read-CenterJob $Source.ConfigPath}catch{return}
+ $usual=@($script:CacheNames)+@(if($job.PSObject.Properties['RecommendedExclude']){@($job.RecommendedExclude)|ForEach-Object {[string]$_}})
+ @(if($job.PSObject.Properties['Exclude']){@($job.Exclude)|Where-Object {$_}|ForEach-Object {[string]$_}|Where-Object {$usual -inotcontains $_}})
+}
+# --- The versions folder is gone from the backup drive -------------------------------------------
+function Get-CenterMissingRepositories($Profile,$Results) {
+ # The versioned backups of one run that stopped because their versions folder was not found
+ # (RepositoryMissing), one per source that is still in the profile: its folder and the question's text.
+ # A new, empty folder is started only after the user said so (Get-CenterSteps -NewRepositoryFor).
+ foreach($r in @($Results)){
+  if($r -isnot [pscustomobject] -or -not $r.PSObject.Properties['RepositoryMissing'] -or $r.RepositoryMissing -ne $true -or -not $r.PSObject.Properties['Kind'] -or [string]$r.Kind -ne 'Versioned'){continue}
+  $s=@($Profile.Sources)|Where-Object {[string]$_.Id -eq [string]$r.SourceId}|Select-Object -First 1;if(-not $s){continue}
+  $folder=try{[string](Read-CenterJob $s.ConfigPath).RepositoryFolder}catch{''}
+  [pscustomobject]@{SourceId=[string]$s.Id;Label=[string]$s.Label;Folder=$folder;Text="The versions of $($s.Label) were not found on the backup drive (folder $folder). It may have been renamed, moved or deleted."}
+ }
 }
 function Remove-CenterOldStepLogs([int]$Days=30,[datetime]$Now=(Get-Date)) {
  # The detailed output of each tool run (step-<date>-<time>-<id>.log, written by the window) is only
@@ -839,17 +1007,89 @@ function Get-CenterRetentionPoints([int]$Last,[int]$Months) {
 # and plain copies -PreviewRecovery (see Get-CenterSteps). A new profile, a converted one, and one
 # whose Keep versions numbers were changed start without it.
 function Test-CenterRetentionConfirmed($Profile) {[bool]($Profile.PSObject.Properties['RetentionConfirmed'] -and $Profile.RetentionConfirmed -is [bool] -and $Profile.RetentionConfirmed)}
-function Get-CenterRetentionState($Profile) {if(Test-CenterRetentionConfirmed $Profile){'Clean-up runs automatically.'}else{'The first clean-up will be shown to you for approval.'}}
+function Get-CenterRetentionState($Profile) {if(Test-CenterRetentionConfirmed $Profile){'Clean-up runs automatically.'}elseif(Get-CenterRetentionApproved $Profile){'The clean-up you approved runs with the next backup.'}else{'The first clean-up will be shown to you for approval.'}}
+# Approving the list does not hand the clean-up over to the rule at once: the next backup's own plan
+# could hold more than was shown. What was shown is stored on the profile instead,
+#   RetentionApproved = {When, Last, Months, KeepDeleted, Versions:[{SourceId, Ids}], RecoveryFolders:[{SourceId, Names}]}
+# and RetentionConfirmed stays false. The next backup deletes only what is in that list and in its own
+# plan (Get-CenterSteps); when every part of it ran and succeeded, the profile is confirmed and the list
+# removed (Complete-CenterRetentionRun), and from then on the clean-up runs by the rule.
+function Get-CenterRetentionApproved($Profile) {
+ # The approved list, or nothing: also nothing when it was approved for other Keep versions numbers or
+ # another Keep deleted number than the profile has now, or after the profile was confirmed.
+ if(-not $Profile.PSObject.Properties['RetentionApproved'] -or $Profile.RetentionApproved -isnot [pscustomobject] -or (Test-CenterRetentionConfirmed $Profile)){return}
+ $a=$Profile.RetentionApproved;$r=Get-CenterVersionRetention $Profile
+ foreach($n in 'Last','Months','KeepDeleted'){if(-not $a.PSObject.Properties[$n]){return}}
+ $same=try{[int]$a.Last -eq $r.Last -and [int]$a.Months -eq $r.Months -and [int]$a.KeepDeleted -eq (Get-CenterKeepDeleted $Profile)}catch{$false}
+ if($same){$a}
+}
+function Get-CenterRetentionApprovedItems($Approved,[string]$List,[string]$SourceId) {
+ # The approved version IDs (-List Versions) or recovery folder names (RecoveryFolders) of one source.
+ $field=if($List -eq 'Versions'){'Ids'}else{'Names'}
+ if(-not $Approved -or -not $Approved.PSObject.Properties[$List]){return}
+ foreach($g in @($Approved.$List)){
+  if($g -is [pscustomobject] -and $g.PSObject.Properties['SourceId'] -and [string]$g.SourceId -eq $SourceId -and $g.PSObject.Properties[$field]){@($g.$field)|Where-Object {$_}|ForEach-Object {[string]$_}}
+ }
+}
+function Get-CenterRetentionApprovedFile([string]$ProfileId,[string]$SourceId) {
+ # Where the approved version IDs of one source are written for the worker: one file per source in
+ # the logs folder, written again for every backup and deleted when the profile is confirmed.
+ Join-Path (Get-CenterPaths).Logs ('retention-approved-'+(Get-SafeName $ProfileId)+'-'+(Get-SafeName $SourceId)+'.txt')
+}
+function Remove-CenterRetentionApproved($Profile) {
+ # Drops the approved list (the rule changed, or it was carried out). Returns whether there was one.
+ if(-not $Profile.PSObject.Properties['RetentionApproved']){return $false}
+ $Profile.PSObject.Properties.Remove('RetentionApproved');$true
+}
+function Set-CenterRetentionApproved($Data,[string]$ProfileId,$Preview) {
+ # The user approved this list (Get-CenterRetentionPreview): exactly it is stored, with the rule it was
+ # shown for. Nothing is deleted and the profile is not confirmed.
+ $p=Get-CenterProfile $Data $ProfileId;$r=Get-CenterVersionRetention $p
+ $group={param($items,$field,$value)@(@($items)|Group-Object SourceId|ForEach-Object {[pscustomobject]@{SourceId=[string]$_.Name;$field=@($_.Group|ForEach-Object {[string]$_.$value}|Where-Object {$_})}})}
+ $p|Add-Member -NotePropertyName RetentionApproved -NotePropertyValue ([pscustomobject]@{When=(Get-Date).ToString('o');Last=$r.Last;Months=$r.Months;KeepDeleted=(Get-CenterKeepDeleted $p)
+  Versions=@(& $group $Preview.Versions 'Ids' 'Id');RecoveryFolders=@(& $group $Preview.RecoveryFolders 'Names' 'Name')}) -Force
+ $p|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $false -Force
+ Save-CenterProfiles $Data
+}
+function Set-CenterKeepDeleted($Profile,[int]$Count) {
+ # What the "Keep deleted in" box saves. Another number is another rule: a list approved for the
+ # earlier one is dropped, and a number above 0 has its first clean-up shown before anything is deleted.
+ $old=Get-CenterKeepDeleted $Profile
+ $Profile|Add-Member -NotePropertyName KeepDeleted -NotePropertyValue $Count -Force
+ $new=Get-CenterKeepDeleted $Profile
+ if($new -eq $old){return}
+ [void](Remove-CenterRetentionApproved $Profile)
+ if($new -gt 0){$Profile|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $false -Force}
+}
+function Complete-CenterRetentionRun($Data,[string]$ProfileId,$Results) {
+ # After a backup: was it the one that carried the approved lists (its entries say RetentionPhase
+ # Approved), and did every part of the profile run and succeed? Then the approved clean-up is done:
+ # 'Confirmed' (the profile is confirmed, the list and its files are removed, saved). A backup of one
+ # source only, or one with a part that failed, was stopped or did not finish its clean-up: 'Kept', the
+ # list stays for the next backup. 'None': no approved list, or not such a run.
+ $p=Get-CenterProfile $Data $ProfileId
+ if(-not (Get-CenterRetentionApproved $p)){return 'None'}
+ $run=@(@($Results)|Where-Object {$_ -is [pscustomobject]})
+ if(-not $run.Count -or @($run|Where-Object {-not $_.PSObject.Properties['RetentionPhase'] -or [string]$_.RetentionPhase -ne 'Approved'}).Count){return 'None'}
+ if(-not (Test-CenterRetentionPreviewWhole @(Get-CenterRetentionExpected $p) $run)){return 'Kept'}
+ [void](Remove-CenterRetentionApproved $p)
+ $p|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $true -Force
+ Save-CenterProfiles $Data
+ foreach($s in @($p.Sources)){try{$f=Get-CenterRetentionApprovedFile $p.Id $s.Id;if([IO.File]::Exists($f)){[IO.File]::Delete($f)}}catch{}}
+ 'Confirmed'
+}
 function Set-CenterVersionRetention($Profile,[int]$Last,[int]$Months) {
  # What the Keep versions box saves. Other numbers than before are another rule, so its first clean-up
  # is shown again; the same numbers keep an approval that was given.
  $old=Get-CenterVersionRetention $Profile
  $new=ConvertTo-CenterRetention ([pscustomobject]@{Last=$Last;Months=$Months})
  $Profile|Add-Member -NotePropertyName VersionRetention -NotePropertyValue ([pscustomobject]@{Last=$new.Last;Months=$new.Months}) -Force
+ if($old.Last -ne $new.Last -or $old.Months -ne $new.Months){[void](Remove-CenterRetentionApproved $Profile)}
  if($old.Last -ne $new.Last -or $old.Months -ne $new.Months -or -not (Test-CenterRetentionConfirmed $Profile)){$Profile|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $false -Force}
 }
 function Confirm-CenterRetention($Data,[string]$ProfileId) {
- # The user approved the list: from the next backup on, the clean-up really deletes.
+ # Marks the profile as confirmed: the clean-up runs by the rule. The window does not call this when
+ # a list is approved (see Set-CenterRetentionApproved); it stays for tools and tests.
  (Get-CenterProfile $Data $ProfileId)|Add-Member -NotePropertyName RetentionConfirmed -NotePropertyValue $true -Force
  Save-CenterProfiles $Data
 }
@@ -922,26 +1162,46 @@ function Format-CenterRetentionPreview($Preview,[int]$Last,[int]$Months) {
   $points=@(Get-CenterRetentionPoints $Last $Months)
   $lines+=@('',$points[0]);if(@($v|Where-Object {$_.Partial}).Count){$lines+=$points[1]};$lines+=$points[2]
  }
- $lines+=@('','Approve clean-up: it runs by this rule with the next backup, and by itself after every backup from then on.','Not now: nothing changes, and you are asked again after the next backup that has something to delete.')
+ $lines+=@('','Approve clean-up: the next backup deletes what is listed here and nothing else. After that backup the clean-up runs by this rule by itself.','Not now: nothing changes, and you are asked again after the next backup that has something to delete.')
  $lines -join "`n"
 }
-function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup','Verify','Repair')][string]$Purpose='Backup') {
+function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup','Verify','Repair')][string]$Purpose='Backup',[ValidateSet('','Mirror','Versioned')][string]$Kind='',[string[]]$NewRepositoryFor=@()) {
  # The ordered list of tool runs for one press of Back up / Verify / Repair. A repair is for plain
  # copies only: the files the last content check found different are moved aside and copied again.
+ # -Kind: only the steps of this kind. -NewRepositoryFor: sources whose versioned backup may start a
+ # new, empty versions folder (-CreateNewRepository); the window names a source here only after the
+ # user said so, and no other step ever gets that switch.
+ # Beside its arguments a step carries what recording it needs: KeepDeleted (plain copy), RetentionPhase
+ # ('Approved' while an approved first clean-up is being carried out), NewRepository and RepositoryFolder.
  $drive=Get-CenterDrive $Profile.DestinationVolumeId -Fresh
  if(-not $drive.Connected){throw "The drive for '$($Profile.Name)' is not connected"}
  $pwsh=(Get-Process -Id $PID).Path
  $load=Get-CenterLoad $Profile
+ # The first clean-up, approved and not carried out yet: a source gets its approved list, by name, in
+ # place of the preview switch; a source with nothing approved for it keeps the preview, so nothing
+ # that was not shown is deleted.
+ $approved=if($Purpose -eq 'Backup'){Get-CenterRetentionApproved $Profile}else{$null}
+ $phase=if($approved){'Approved'}else{''}
  foreach($s in @($Profile.Sources|Where-Object {-not $SourceIds.Count -or $_.Id -in $SourceIds})){
   $kinds=Get-CenterSourceKinds $s
+  if($Kind -eq 'Versioned'){$kinds.Mirror=$false}elseif($Kind -eq 'Mirror'){$kinds.Versioned=$false}
   if($kinds.Mirror){
    $a=@('-NoProfile','-File',(Join-Path $script:ToolRoot 'Invoke-FastMirror.ps1'),'-ConfigPath',$s.ConfigPath,'-DestinationDrive',$drive.Letter,'-Folder',$s.MirrorFolder,'-Threads',[string]$load.CopyThreads)
    if($Purpose -eq 'Verify'){$a+='-VerifyOnly'}
    elseif($Purpose -eq 'Repair'){$a+='-Repair'}
    # Until the first clean-up is approved, deleted files are still moved aside, but no old recovery
    # folder is deleted: the tool lists the ones it would delete.
-   else{$keep=Get-CenterKeepDeleted $Profile;if($keep -gt 0){$a+=@('-MoveExtras','-KeepRecovery',[string]$keep);if(-not (Test-CenterRetentionConfirmed $Profile)){$a+='-PreviewRecovery'}}}
-   [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Mirror';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$null;Priority=$load.Priority}
+   else{
+    $keep=Get-CenterKeepDeleted $Profile
+    if($keep -gt 0){
+     $a+=@('-MoveExtras','-KeepRecovery',[string]$keep)
+     # The names go in one argument, separated by commas (a tool started with -File gets them that way).
+     $names=@(Get-CenterRetentionApprovedItems $approved 'RecoveryFolders' $s.Id)
+     if($names.Count){$a+=@('-RecoveryApproved',($names -join ','))}
+     elseif(-not (Test-CenterRetentionConfirmed $Profile)){$a+='-PreviewRecovery'}
+    }
+   }
+   [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Mirror';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$null;Priority=$load.Priority;KeepDeleted=(Get-CenterKeepDeleted $Profile);RetentionPhase=$phase}
   }
   if($kinds.Versioned -and $Purpose -ne 'Repair'){
    $run=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\runs\center-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+(New-ShortId))
@@ -949,8 +1209,23 @@ function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup'
    $a+=if($Purpose -eq 'Verify'){@('-Action','Check','-ReadAllData')}else{@('-Action','Backup')}
    $keep=Get-CenterVersionRetention $Profile
    # -RetentionPreview: the worker plans the clean-up and deletes nothing (see Test-CenterRetentionConfirmed).
-   if($Purpose -eq 'Backup' -and $keep.Enabled){$a+=@('-KeepLast',[string]$keep.Last,'-KeepMonths',[string]$keep.Months);if(-not (Test-CenterRetentionConfirmed $Profile)){$a+='-RetentionPreview'}}
-   [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Versioned';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$run;Priority=$load.Priority}
+   if($Purpose -eq 'Backup' -and $keep.Enabled){
+    $a+=@('-KeepLast',[string]$keep.Last,'-KeepMonths',[string]$keep.Months)
+    $ids=@(Get-CenterRetentionApprovedItems $approved 'Versions' $s.Id)
+    if($ids.Count){
+     # One full version ID per line, UTF-8 without a mark; the worker deletes only versions that are in
+     # its own plan and in this file.
+     $file=Get-CenterRetentionApprovedFile $Profile.Id $s.Id
+     New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($file)) -Force|Out-Null
+     [IO.File]::WriteAllText($file,(($ids -join "`n")+"`n"),[Text.UTF8Encoding]::new($false))
+     $a+=@('-RetentionApprovedFile',$file)
+    }
+    elseif(-not (Test-CenterRetentionConfirmed $Profile)){$a+='-RetentionPreview'}
+   }
+   $new=$Purpose -eq 'Backup' -and [string]$s.Id -in $NewRepositoryFor
+   if($new){$a+='-CreateNewRepository'}
+   $folder=try{[string](Read-CenterJob $s.ConfigPath).RepositoryFolder}catch{''}
+   [pscustomobject]@{SourceId=$s.Id;Label=$s.Label;Kind='Versioned';Purpose=$Purpose;FilePath=$pwsh;Arguments=$a;RunDirectory=$run;Priority=$load.Priority;RetentionPhase=$phase;NewRepository=$new;RepositoryFolder=$folder}
   }
  }
 }
@@ -980,7 +1255,11 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
  # Seconds is exact; Minutes (a tenth of a minute) stays for older readers. ProcessedBytes: what a
  # versioned backup read, where CopiedBytes is only what it had to store.
  $e=[ordered]@{ProfileId=$ProfileId;SourceId=$s.SourceId;Label=$s.Label;Kind=$s.Kind;Purpose=$s.Purpose;Started=$Running.Started.ToString('o');Finished=(Get-Date).ToString('o')
-  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Seconds=[math]::Round(((Get-Date)-$Running.Started).TotalSeconds,1);Success=$false;Stopped=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;ProcessedBytes=$null;CheckedFiles=$null;Differences=$null;Details=$null;Note=$null;RetentionPreview=$null;RetentionPlanFailed=$false}
+  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Seconds=[math]::Round(((Get-Date)-$Running.Started).TotalSeconds,1);Success=$false;Stopped=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;ProcessedBytes=$null;CheckedFiles=$null;Differences=$null;Details=$null;Note=$null;RetentionPreview=$null;RetentionPlanFailed=$false
+  RetentionPhase=$null;RecoveryFolderCount=$null;LockedFiles=$null;RepositoryMissing=$false}
+ # What Get-CenterSteps noted on the step beside its arguments; a step built elsewhere has none of it.
+ $noted={param($n)if($s.PSObject.Properties[$n]){$s.$n}else{$null}}
+ if([string](& $noted 'RetentionPhase') -eq 'Approved'){$e.RetentionPhase='Approved'}
  $notes=@()
  try{
   if($s.Kind -eq 'Mirror'){
@@ -1034,6 +1313,27 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
      $notes+="$($old.Count) older recovery $(if($old.Count -eq 1){'folder'}else{'folders'}) would be deleted ($((@($old|Select-Object -First 5) -join ', ')+$(if($old.Count -gt 5){" and $($old.Count-5) more"}))). Nothing was deleted."
     }
    }
+   # Old recovery folders that were really deleted, and those of the rule's choice that were not in
+   # the approved list and stay for the next clean-up. Every field may be a list or a number.
+   $many={param($n)if(-not $r.PSObject.Properties[$n] -or $null -eq $r.$n){return ,@()};$v=$r.$n;if($v -is [string] -or $v -is [Collections.IEnumerable]){,@(@($v)|Where-Object {$_}|ForEach-Object {[string]$_})}else{$c=try{[int]$v}catch{0};,@(1..[math]::Max(1,$c)|Where-Object {$c -gt 0}|ForEach-Object {''})}}
+   $gone=& $many 'RecoveryRemoved';$later=& $many 'RecoveryDeferred'
+   if($gone.Count -or $later.Count){
+    $named=@($gone|Where-Object {$_});$list=if($named.Count){' ('+(@($named|Select-Object -First 5) -join ', ')+$(if($named.Count -gt 5){" and $($named.Count-5) more"})+')'}else{''}
+    $notes+=(@(if($gone.Count){"Deleted $($gone.Count) older recovery $(if($gone.Count -eq 1){'folder'}else{'folders'})$list."};if($later.Count){"$($later.Count) more will be cleaned up with the next backup."}) -join ' ')
+   }
+   # How many dated recovery folders stand beside the plain copy now. Without a keep rule they are
+   # never deleted (repairs and healed files make them too), so a pile of them is said.
+   if($r.PSObject.Properties['RecoveryFolderCount'] -and $null -ne $r.RecoveryFolderCount){
+    try{$e.RecoveryFolderCount=[int]$r.RecoveryFolderCount}catch{}
+    $rule=& $noted 'KeepDeleted'
+    if($null -ne $e.RecoveryFolderCount -and $null -ne $rule -and [int]$rule -eq 0 -and $e.RecoveryFolderCount -gt $script:RecoveryPile){$notes+=(Get-CenterRecoveryPileText $e.RecoveryFolderCount $s.Label)+'.'}
+   }
+   # Files that were in use (source-relative paths), kept for the offer after three such backups in a
+   # row; at most 200, so one odd run does not swell the history.
+   if($s.Purpose -eq 'Backup' -and $r.PSObject.Properties['LockedFiles'] -and $null -ne $r.LockedFiles){
+    $busy=@(@($r.LockedFiles)|Where-Object {$_ -is [string] -and $_.Trim()}|Select-Object -First 200)
+    if($busy.Count){$e.LockedFiles=$busy}
+   }
    $notes+=@(Get-CenterResultNotes $r 'Mirror')
   }else{
    $resultPath=Join-Path $s.RunDirectory 'result.json'
@@ -1055,6 +1355,9 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
     }
    }
    elseif($r.PSObject.Properties['Error'] -and $r.Error){$e.Error=[string]$r.Error}
+   # The versions folder was used before and is not on the drive: the window asks before a new one is started.
+   if($r.PSObject.Properties['RepositoryMissing'] -and $r.RepositoryMissing -eq $true){$e.RepositoryMissing=$true}
+   if($e.Success -and (& $noted 'NewRepository') -eq $true){$notes+="A new, empty versions folder was started$(if(& $noted 'RepositoryFolder'){' ('+[string](& $noted 'RepositoryFolder')+')'}), because the earlier versions were not found on the backup drive."}
    # The automatic clean-up of old versions: a note. Only a failed check of the repository after it
    # fails the backup, and the worker reports that as the run's error.
    if($r.PSObject.Properties['Retention'] -and $r.Retention){
@@ -1075,11 +1378,25 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
      }
     }else{
      $removed=& $count 'Removed';$what=& $words $removed (& $count 'PartialRemoved');$kept=if($hasKept){"; $($ret.Kept) kept"}else{''}
+     # A clean-up limited to the approved list (Approved): the versions it really deleted are named by
+     # date (Candidates), and what its plan held beyond the list waits for the next one (Deferred, a
+     # number or a list).
+     $asApproved=$ret.PSObject.Properties['Approved'] -and $ret.Approved -eq $true
+     $later=[long]0;if($ret.PSObject.Properties['Deferred'] -and $null -ne $ret.Deferred){$dv=$ret.Deferred;$later=if($dv -is [string] -or $dv -isnot [Collections.IEnumerable]){try{[long]$dv}catch{[long]0}}else{[long]@($dv).Count}}
+     $more=if($later -gt 0){" $later more will be cleaned up with the next backup."}else{''}
+     # An approved clean-up that did not finish keeps its list for the next backup.
+     if($err -and $e.RetentionPhase -eq 'Approved'){$e.RetentionPlanFailed=$true}
+     if($asApproved -and -not $err){
+      $dates=@(@($(if($ret.PSObject.Properties['Candidates']){$ret.Candidates}))|Where-Object {$_ -is [pscustomobject] -and $_.PSObject.Properties['Time']}|ForEach-Object {ConvertTo-CenterTime $_.Time}|Where-Object {$_}|ForEach-Object {$_.ToString('d MMM yyyy HH:mm',[cultureinfo]::InvariantCulture)})
+      $list=if($removed -and $dates.Count){' ('+(@($dates|Select-Object -First 5) -join ', ')+$(if($dates.Count -gt 5){" and $($dates.Count-5) more"})+')'}else{''}
+      $notes+=$(if($removed){"Deleted $what, as you approved$list$kept."}else{"Nothing was deleted: the versions you approved were no longer there$kept."})+$more
+     }else{
      # A size is said only from the number the clean-up itself reports as freed (PrunedBytes), never
      # from the sizes of the versions: deleting one frees only what no other version needs.
      $bytes=[long]0;foreach($o in $ret,$r){if(-not $bytes -and $o.PSObject.Properties['PrunedBytes'] -and $o.PrunedBytes){try{$bytes=[long]$o.PrunedBytes}catch{}}}
      $freed=if($bytes -gt 0){' The clean-up freed '+$(if($bytes -ge 1GB){($bytes/1GB).ToString('N1',[cultureinfo]::InvariantCulture)+' GB'}elseif($bytes -ge 1MB){($bytes/1MB).ToString('N0',[cultureinfo]::InvariantCulture)+' MB'}else{($bytes/1KB).ToString('N0',[cultureinfo]::InvariantCulture)+' KB'})+'.'}else{''}
-     $notes+=if($err -and $removed){"Deleted $what$kept, but the clean-up did not finish: $err"}elseif($err){"Backed up, but old versions were not cleaned up: $err"}elseif($removed){"Deleted $what$kept.$freed"}else{"No old versions to delete$kept."}
+     $notes+=$(if($err -and $removed){"Deleted $what$kept, but the clean-up did not finish: $err"}elseif($err){"Backed up, but old versions were not cleaned up: $err"}elseif($removed){"Deleted $what$kept.$freed"}else{"No old versions to delete$kept."})+$more
+     }
     }
    }
    $notes+=@(Get-CenterResultNotes $r 'Versioned')
@@ -1109,5 +1426,7 @@ Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-Cente
  New-CenterProfile,Remove-CenterProfile,Add-CenterSource,Remove-CenterSource,Read-CenterJob,Save-CenterJob,Get-CenterSourceKinds,Sync-CenterJob,
  Add-CenterHistory,Get-CenterHistory,Get-LastSuccess,Get-FreshnessState,Format-CenterAge,Get-CenterFreshness,ConvertTo-CenterTime,Format-CenterElapsed,Format-CenterRunDuration,Get-CenterRunSpeed,ConvertFrom-CenterToolJson,
  Get-CenterBusyReason,Get-CenterFreeBytes,Get-CenterVolumeQueryCount,
+ Get-CenterSaveReport,Find-CenterEarlierSource,Get-CenterWindowFit,Get-CenterRetentionApproved,Set-CenterRetentionApproved,Remove-CenterRetentionApproved,Set-CenterKeepDeleted,Complete-CenterRetentionRun,
+ Get-CenterRecoveryAdvice,Get-CenterLockedOffer,Format-CenterLockedOffer,Set-CenterLockedAsked,Add-CenterLockedExclude,Get-CenterPersonalExcludes,Get-CenterMissingRepositories,
  Save-CenterLastGood,Get-CenterSettingsRecovery,Restore-CenterLastGood,Get-CenterRunWarnings,Format-CenterRunWarnings,Get-CenterRepairState,Remove-CenterOldStepLogs,Get-CenterLoadWarning,Get-CenterDisabledReason,Resolve-CenterSource,Get-CenterResultNotes,
  Get-CenterSteps,Start-CenterStep,Complete-CenterStep,Get-CenterStaleProfiles,Get-CenterAgentActivity,Get-CenterSessionTitle
