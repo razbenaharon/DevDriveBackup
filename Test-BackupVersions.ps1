@@ -177,7 +177,7 @@ try{
   $before=@(Lock-Names);$r=Run $Action @{} $null $moved;$after=@(Lock-Names)
   $freed=$before.Count -eq 1 -and $r.State -eq 'Completed' -and $r.LockReleased -and @($r.LockReleased.Locks|ForEach-Object {$_.Id}) -ccontains $before[0] -and $before[0] -cnotin $after
   if($freed){& $Removed $r $before;return}
-  $named=@($Numbers|Where-Object {$_ -gt 0 -and $r.Error -match "$_"}).Count -gt 0
+  $named=@($Numbers|Where-Object {$_ -gt 0 -and $r.Error -match "\b$_\b"}).Count -gt 0
   $kept=$before.Count -eq 1 -and $r.State -eq 'Failed' -and $r.Error -like '*locked*Nothing is damaged*' -and $null -eq $r.LockReleased -and $before[0] -cin $after -and ($Taken -or $named)
   if(-not $kept){throw "FAIL $What (locks before: $($before -join ','); after: $($after -join ','); result: $($r|ConvertTo-Json -Depth 5 -Compress))"}
   Write-Output "PASS while Windows had given the number of the ended run to another program, $Action kept its lock, removed nothing and said so in plain words"
