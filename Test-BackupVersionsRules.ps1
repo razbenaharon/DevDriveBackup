@@ -211,6 +211,50 @@ $more=$c+@((Ver 6 '2026-06-05T12:00:00Z'))
 $r=@(Get-RetentionRemovals @((Decision 5 $false),(Decision 6 $true)) (Id 6) $more 'pc')
 Assert ($r.Count -eq 1 -and (Test-PartialSnapshot $r[0])) 'a partial version with 3 newer complete versions may be deleted'
 
+# --- The first clean-up: only what the user saw and approved ------------------------------------------
+# The list of approved versions (Get-RetentionApprovedIds) only ever narrows the plan
+# (Get-ApprovedRetentionPlan): the rule still decides, and the checks above run again on what is left.
+$letters=Id 43981   # abcd...
+$read=@(Get-RetentionApprovedIds ("`r`n  "+(Id 1)+"  `r`n`r`n`t"+$letters.ToUpperInvariant()+" `n"+(Id 1)+"`n"))
+Assert (($read -join ',') -ceq (@((Id 1),$letters) -join ',')) 'the approved list holds one full ID a line: blank lines, spaces around an ID, capital letters and a repeated ID make no difference'
+Assert ((@(Get-RetentionApprovedIds (([char]0xFEFF)+(Id 2)+"`r"+(Id 3))) -join ',') -ceq ((Ids 2,3) -join ',')) 'a byte-order mark and old line endings are read too'
+Assert-Throws {Get-RetentionApprovedIds ''} '*is empty*deleted nothing*' 'an empty approved list is refused'
+Assert-Throws {Get-RetentionApprovedIds " `r`n`t`n "} '*is empty*deleted nothing*' 'so is one with only blank lines'
+Assert-Throws {Get-RetentionApprovedIds ((Id 1)+"`n"+(Id 2).Substring(0,8))} '*not a full version ID*deleted nothing*' 'a shortened ID makes the whole list unusable: nothing is guessed'
+Assert-Throws {Get-RetentionApprovedIds ((Id 1)+' '+(Id 2))} '*not a full version ID*' 'two IDs on one line are refused'
+Assert-Throws {Get-RetentionApprovedIds "latest`n"} '*not a full version ID*' 'a name such as latest is refused'
+$six=@(1..6|ForEach-Object {Ver $_ "2026-06-0$($_)T12:00:00Z"})
+$shown=Plan @($six[0..4]) 2 0 5        # the preview: 1, 2 and 3 would go
+$approved=@(Gone $shown)
+$later=Plan $six 2 0 6                 # one backup later the plan holds one more: 4
+$narrow=@(Get-ApprovedRetentionPlan $later $approved)
+Assert ((Same $approved (Ids 1,2,3)) -and (Same (Gone $later) (Ids 1,2,3,4)) -and (Same (Gone $narrow) (Ids 1,2,3)) -and $narrow.Count -eq $later.Count) 'a plan that grew by one version since the preview is narrowed to the versions that were shown'
+Assert ((Same (Why $narrow 4) @('OutsideRules','NotApproved')) -and (Same (Why $narrow 1) @('OutsideRules')) -and (Same (Why $narrow 6) (Why $later 6)) -and (Same (Gone $later) (Ids 1,2,3,4)) -and (Same (Why $later 4) @('OutsideRules'))) 'the version that was not shown stays for now, with the reason; nothing else changes, and the plan handed in is left as it was'
+Assert (Same @(Get-RetentionRemovals $narrow (Id 6) $six 'pc'|ForEach-Object {$_.id}) (Ids 1,2,3)) 'the checks before deleting pass on the narrowed plan and hand over exactly the approved versions'
+foreach($record in @(Get-ApprovedRetentionPlan $later $approved)){$record.Keep=$false;$record.Reasons=[string[]]@('Changed')}
+Assert ((Same (Gone $later) (Ids 1,2,3,4)) -and (Same (Why $later 6) @('JustMade','NewestComplete','LastN')) -and (Same (Why $later 4) @('OutsideRules')) -and (Same (Why $later 1) @('OutsideRules'))) 'every record handed back is a copy: changing them changes nothing in the plan they were made from'
+$narrow=@(Get-ApprovedRetentionPlan $later (Ids 1,5,6,99))
+Assert ((Same (Gone $narrow) (Ids 1)) -and (Same (Why $narrow 5) (Why $later 5)) -and (Same (Why $narrow 6) (Why $later 6)) -and $narrow.Count -eq 6) 'an approved version that the plan keeps stays kept, and one that no longer exists is not added: the list never widens the plan'
+$narrow=@(Get-ApprovedRetentionPlan (Plan $shared 2 0 5) (Ids 1,21,26,31,41))
+Assert ((Same (Gone $narrow) (Ids 1)) -and $narrow.Count -eq 9 -and @($narrow|Where-Object {$_.Host -cne 'pc'}).Count -eq 0) 'another computer''s versions and another program''s on the list are never deleted: they are not in the plan'
+Assert (@(Gone (Get-ApprovedRetentionPlan $later @())).Count -eq 0 -and @(Gone (Get-ApprovedRetentionPlan $later $null)).Count -eq 0 -and @(Gone (Get-ApprovedRetentionPlan $later (Ids 98,99))).Count -eq 0) 'with nothing approved, or only versions that are not in the plan, nothing goes'
+Assert (@(Gone (Get-ApprovedRetentionPlan $later @((Id 1).Substring(0,8),(' '+(Id 2)),(Id 3).Replace('0','O')))).Count -eq 0) 'the plan is matched by exact full ID only (reading the list is what trims it and lowers its letters)'
+# A partial version that was waiting for its mark is previewed under the ID it had; the mark gives it a new one.
+$waitingShown=Plan (@((Ver 50 '2026-05-01T12:00:00Z' -Partial))+$six[0..4]) 10 0 5
+$markedNow=Plan (@((Ver 51 '2026-05-01T12:00:00Z' -Partial))+$six) 10 0 6
+$narrow=@(Get-ApprovedRetentionPlan $markedNow @(Gone $waitingShown))
+Assert ((Same (Gone $waitingShown) (Ids 50)) -and (Same (Gone $markedNow) (Ids 51)) -and @(Gone $narrow).Count -eq 0 -and (Same (Why $narrow 51) @('PartialAfter3Complete','NotApproved'))) 'a partial version that was marked after the preview has a new ID: it was not approved under it, so it stays for the next clean-up'
+$random=[Random]::new(20261115)
+foreach($round in 1..25){
+ $at=$newest;$history=@(1..40|ForEach-Object {$v=Ver $_ $at.UtcDateTime.ToString('o') -Partial:($random.Next(0,6) -eq 0 -and $_ -gt 1);$at=$at.AddHours(-$random.Next(1,24*45));$v})   # 1 is the newest
+ $p=Plan $history $random.Next(1,6) $random.Next(0,5) 1
+ $pick=@(1..45|Where-Object {$random.Next(0,2)}|ForEach-Object {Id $_})
+ $n=@(Get-ApprovedRetentionPlan $p $pick)
+ $want=@(Gone $p|Where-Object {$_ -cin $pick})
+ if(-not (Same (Gone $n) $want) -or -not (Same @(Get-RetentionRemovals $n (Id 1) $history 'pc'|ForEach-Object {$_.id}) $want) -or @(Kept $p|Where-Object {$_ -cnotin (Kept $n)}).Count){throw "FAIL random approved list $round"}
+}
+Assert $true '25 random histories and lists: what goes is exactly what is both in the plan and on the list, the checks agree, and nothing the plan keeps is ever deleted'
+
 # --- Deleting many versions at once -----------------------------------------------------------------
 $ids=@(1..520|ForEach-Object {[guid]::NewGuid().ToString('N')*2})
 $batches=@(Split-SnapshotIdBatches $ids)

@@ -220,6 +220,47 @@ function Get-RetentionRemovals($Plan,[string]$NewSnapshot,$Snapshots,[string]$Ho
  }
  @(Get-HistoryDeletionPlan $Snapshots $remove)
 }
+# The first clean-up deletes only what the user saw. Until the user approves, backups only list what the
+# clean-up would delete (a preview). The preview is itself a backup, so by the time of the first real
+# clean-up the plan can hold more than was shown. That run is therefore given the list of the versions
+# that were shown and approved, and deletes only the versions that are both in its own plan and on the
+# list. The list only ever narrows the plan: the rule still decides what may go, and every check of
+# Get-RetentionRemovals runs again on what is left. Whatever else the plan would delete stays for the
+# next clean-up, which follows the rule alone.
+function Get-RetentionApprovedIds([string]$Text) {
+ # Reads the list of approved versions: text with one full version ID a line. Blank lines, spaces
+ # around an ID, capital letters (an ID is hexadecimal) and a repeated ID make no difference. Anything
+ # else on a line (a shortened ID, a name such as latest, two IDs) makes the whole list unusable, and so
+ # does a list without any ID: nothing is guessed and nothing is deleted. Returns the IDs as restic
+ # writes them (small letters), each once.
+ $ids=[Collections.Generic.List[string]]::new()
+ foreach($line in @(([string]$Text) -split "`r`n|`r|`n")){
+  $id=$line.Trim().Trim([char]0xFEFF).Trim().ToLowerInvariant()
+  if(-not $id){continue}
+  if($id -cnotmatch '^[0-9a-f]{64}$'){throw 'The list of approved versions holds a line that is not a full version ID, so the clean-up deleted nothing.'}
+  if(-not $ids.Contains($id)){$ids.Add($id)}
+ }
+ if(-not $ids.Count){throw 'The list of approved versions is empty, so the clean-up deleted nothing.'}
+ $ids.ToArray()
+}
+function Get-ApprovedRetentionPlan($Plan,[string[]]$ApprovedIds) {
+ # A clean-up plan (Get-VersionRetentionPlan) narrowed to the approved versions: a version the plan
+ # deletes stays to be deleted only when its exact full ID is on the list; any other one is kept for now
+ # (reason NotApproved, after the reason the rule gave). A version the plan keeps stays kept whatever the
+ # list says, and an ID on the list that is not in the plan (it no longer exists, it belongs to another
+ # computer, or it is the earlier ID of a partial version that was marked since) changes nothing.
+ # Returns new records; the plan handed in is left as it was.
+ $approved=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+ foreach($id in @($ApprovedIds|Where-Object {$_})){[void]$approved.Add([string]$id)}
+ foreach($decision in @($Plan|Where-Object {$_})){
+  $copy=$decision.PSObject.Copy()
+  if(-not $copy.Keep -and -not $approved.Contains([string]$copy.Id)){
+   $copy.Keep=$true
+   if($copy.PSObject.Properties['Reasons']){$copy.Reasons=[string[]](@($copy.Reasons)+'NotApproved')}
+  }
+  $copy
+ }
+}
 function Get-LockReleaseDecision($Locks,[string]$ComputerName) {
  # Which locks in the repository may be removed without asking: only when EVERY lock present was made on
  # this computer by a process that has ended. A run that was stopped, crashed or was ended by the memory
@@ -260,4 +301,4 @@ function Get-LockReleaseDecision($Locks,[string]$ComputerName) {
  $blocking=@($judged|Where-Object {$_.State -ne 'Ended'})
  [pscustomobject]@{Release=[bool]($judged.Count -and -not $blocking.Count);Reason=$(if($blocking.Count){$blocking[0].Why}else{''});Locks=$judged}
 }
-Export-ModuleMember -Function Assert-SnapshotId,Assert-SnapshotPath,ConvertTo-ResticLiteralPattern,ConvertTo-HistoryDate,Test-PartialSnapshot,Get-PartialMarkArguments,Get-PartialTags,Split-SnapshotIdBatches,Get-RestoreParentWarnings,Get-HistoryDeletionPlan,Get-VersionRetentionPlan,Get-RetentionRemovals,Get-LockReleaseDecision
+Export-ModuleMember -Function Assert-SnapshotId,Assert-SnapshotPath,ConvertTo-ResticLiteralPattern,ConvertTo-HistoryDate,Test-PartialSnapshot,Get-PartialMarkArguments,Get-PartialTags,Split-SnapshotIdBatches,Get-RestoreParentWarnings,Get-HistoryDeletionPlan,Get-VersionRetentionPlan,Get-RetentionRemovals,Get-RetentionApprovedIds,Get-ApprovedRetentionPlan,Get-LockReleaseDecision

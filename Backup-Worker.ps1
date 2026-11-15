@@ -16,6 +16,18 @@ param(
  [ValidateRange(0,240)][int]$KeepMonths=0,
  # Backup only: work the clean-up out as usual and report it, but delete nothing and free no space.
  [switch]$RetentionPreview,
+ # Backup only, the first clean-up after the user approved a preview: a UTF-8 text file with one full
+ # version ID a line (blank lines ignored; spaces around an ID and capital letters make no difference).
+ # The clean-up is planned as usual and then deletes only the versions that are both in its plan and in
+ # this file; whatever else the plan would delete stays for the next clean-up (Retention.Deferred). The
+ # file only narrows: a listed version that the rule keeps, or that no longer exists, is not deleted. A
+ # file that is missing, unreadable, empty or holds anything but full IDs deletes nothing
+ # (Retention.Error), never the whole plan. With -RetentionPreview the preview wins and the file is not used.
+ [string]$RetentionApprovedFile,
+ # Backup only: the versions folder is gone although this source was backed up before (see
+ # RepositoryMissing below), and the user chose to start a new, empty one. Without it such a backup
+ # stops and changes nothing. Not needed for a first-ever backup; ignored while the repository exists.
+ [switch]$CreateNewRepository,
  # The earlier rule (one version a day / a week). Still accepted only so that a run started by an older
  # window fails with a plain message instead of applying another rule than the one that was chosen.
  [int]$KeepDays=0,
@@ -40,8 +52,13 @@ New-Item -ItemType Directory -Path $RunDirectory -Force | Out-Null
 # BackupSummary: restic's own summary of the backup step (Progress ends up holding the summary of the
 # check that follows). Partial: the backup saved a version but could not read every file. LockReleased:
 # nothing, or the locks of an earlier run that this run removed before trying a step again (Run-Engine).
+# RepositoryMissing: the run stopped because the versions folder holds no repository although this source
+# was backed up before (its protected password file exists): the folder was renamed, moved, deleted or
+# emptied. Nothing is created then; only a Backup with -CreateNewRepository starts a new one.
+# RepositoryCreated: this run created the repository (a first-ever backup, or -CreateNewRepository; Note
+# then says that the earlier versions are not in it).
 $script:lockExamined=$false
-$script:status=[ordered]@{State='Starting';Action=$Action;WorkerPid=$PID;StartedUtc=[DateTime]::UtcNow.ToString('o');UpdatedUtc='';Progress=$null;MemoryMiB=0;PeakMemoryMiB=0;CpuPercent=0;Error=$null;Snapshot=$null;RunDirectory=$RunDirectory;BackupSummary=$null;Partial=$false;LockReleased=$null}
+$script:status=[ordered]@{State='Starting';Action=$Action;WorkerPid=$PID;StartedUtc=[DateTime]::UtcNow.ToString('o');UpdatedUtc='';Progress=$null;MemoryMiB=0;PeakMemoryMiB=0;CpuPercent=0;Error=$null;Snapshot=$null;RunDirectory=$RunDirectory;BackupSummary=$null;Partial=$false;LockReleased=$null;RepositoryMissing=$false;RepositoryCreated=$false;Note=$null}
 function Save-Status {
  $script:status.UpdatedUtc=[DateTime]::UtcNow.ToString('o')
  [void](Write-BackupStatus $script:status (Join-Path $RunDirectory 'status.json') -BestEffort)
@@ -319,7 +336,7 @@ try {
   })
   $script:status.Sources=$sources;$script:status.SelectionExcludes=$selectionExcludes
  }
- $script:cache=if($TestRoot){Join-Path $TestRoot 'engine-cache'}else{Join-Path $env:LOCALAPPDATA 'DevDriveMirror\restic-cache'};New-Item -ItemType Directory -Path $script:cache -Force|Out-Null
+ $script:cache=if($TestRoot){Join-Path $TestRoot 'engine-cache'}else{Join-Path $env:LOCALAPPDATA 'DevDriveMirror\restic-cache'}
  $keyPath=[IO.Path]::GetFullPath($script:config.PasswordDpapiPath);$exists=Test-Path -LiteralPath (Join-Path $script:repository 'config')
  $recoveryPath=[IO.Path]::GetFullPath($script:config.RecoveryKeyPath)
  if($keyPath -ieq $recoveryPath){throw 'Protected password and portable recovery key must be different files'}
@@ -327,7 +344,22 @@ try {
  New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($keyPath)) -Force|Out-Null
  $script:runLock=[IO.File]::Open($keyPath+'.run.lock',[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
  if((Test-Path -LiteralPath ($keyPath+'.rotation.local.json')) -and $Action -ne 'ResumePasswordChange'){throw 'An interrupted password change must be resumed from Password and recovery before using this repository.'}
- if(Test-Path -LiteralPath $keyPath){$secure=(Get-Content -LiteralPath $keyPath -Raw).Trim()|ConvertTo-SecureString;$script:password=[Net.NetworkCredential]::new('',$secure).Password}
+ $missing=$false
+ if(Test-Path -LiteralPath $keyPath){
+  $secure=(Get-Content -LiteralPath $keyPath -Raw).Trim()|ConvertTo-SecureString;$script:password=[Net.NetworkCredential]::new('',$secure).Password
+  # The protected password file says that this source was backed up before. When the versions folder
+  # then holds no repository, it was renamed, moved, deleted or emptied. Starting a new, empty one here
+  # would look like a healthy backup with every earlier version gone, so the run stops before anything
+  # is created (no folder, no recovery-key file, no engine cache) and the user decides: bring the folder
+  # back, or run a Backup with -CreateNewRepository.
+  if(-not $exists){
+   $missing=$true;$script:status.RepositoryMissing=$true
+   if($Action -ne 'Backup' -or -not $CreateNewRepository){
+    if(Test-Path -LiteralPath $script:repository){throw "The versions folder $folder on the backup drive is empty or incomplete: the saved versions are not in it. They may have been moved or deleted. Nothing was changed."}
+    throw "The versions folder $folder was not found on the backup drive. It may have been renamed, moved or deleted. Nothing was changed."
+   }
+  }
+ }
  elseif($exists){throw 'Repository already exists but its protected password file is missing'}
  else {
   if($Action -ne 'Backup'){throw 'Repository is not initialized; the first Backup creates it'}
@@ -339,6 +371,7 @@ try {
   New-PrivateTextFile $keyPath ($script:password|ConvertTo-SecureString -AsPlainText -Force|ConvertFrom-SecureString)
   New-PrivateTextFile $recovery (Get-RecoveryKeyText $script:repository $script:password)
  }
+ New-Item -ItemType Directory -Path $script:cache -Force|Out-Null
  if(-not $exists -and -not(Test-Path -LiteralPath $recoveryPath)){
   New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($recoveryPath)) -Force|Out-Null
   New-PrivateTextFile $recoveryPath (Get-RecoveryKeyText $script:repository $script:password)
@@ -350,6 +383,9 @@ try {
   # empty one (a wiped or renamed backup folder would otherwise look like a healthy empty history).
   if($Action -ne 'Backup'){throw "No backup repository was found at $($script:repository). Check that the right drive is connected and that the folder was not renamed or deleted."}
   Run-Engine @('init') 'Initializing'
+  $script:status.RepositoryCreated=$true
+  # Created on the user's choice in place of one that is gone: it opens with the password already stored.
+  if($missing){$script:status.RepositoryMissing=$false;$script:status.Note="A new, empty versions folder $folder was created, as chosen, because the earlier one was not found. The versions saved before are not in it."}
  }
  $base=@('backup','--read-concurrency',[string]$script:config.ReadConcurrency,'--tag','devdrive')
  if($ForceRead){$base+='--force'}
@@ -357,6 +393,20 @@ try {
  switch($Action){
   {$_ -in @('ExportKey','ChangePassword','ResumePasswordChange')} {Invoke-KeyManagement}
   'Backup' {
+   # The first clean-up after an approved preview is limited to the list of approved versions. The list
+   # is read now, as it was when the run started; one that cannot be used is reported with the clean-up
+   # (Retention.Error) and deletes nothing. A preview wins: the list is then not used at all.
+   $approving=$PSBoundParameters.ContainsKey('RetentionApprovedFile') -and -not $RetentionPreview
+   $approvedIds=@();$approvedProblem=$null
+   if($approving){
+    try{
+     if(-not ([string]$RetentionApprovedFile).Trim()){throw 'No list of approved versions was named, so the clean-up deleted nothing.'}
+     $approvedPath=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RetentionApprovedFile)
+     if(-not(Test-Path -LiteralPath $approvedPath -PathType Leaf)){throw "The list of approved versions was not found ($approvedPath), so the clean-up deleted nothing."}
+     try{$approvedText=[IO.File]::ReadAllText($approvedPath)}catch{throw "The list of approved versions could not be read ($approvedPath), so the clean-up deleted nothing. $($_.Exception.GetBaseException().Message)"}
+     $approvedIds=@(Get-RetentionApprovedIds $approvedText)
+    }catch{$approvedProblem=$_.Exception.Message;$approvedIds=@()}
+   }
    try{Run-Engine ($base+@('--')+$sources) 'BackingUp'}
    catch{
     # Exit code 3: restic saved a version although some files could not be read. Mark it (the tag
@@ -374,7 +424,7 @@ try {
    }
    try{Run-Engine @('check') 'CheckingStructure'}
    catch{if($_.Exception.Data['ExitCode'] -eq 11){throw ('The new version was saved, but it could not be checked. '+$_.Exception.Message)};throw}
-   if($KeepLast -gt 0 -or $KeepMonths -gt 0 -or $RetentionPreview){
+   if($KeepLast -gt 0 -or $KeepMonths -gt 0 -or $RetentionPreview -or $approving){
     # Keep versions. The backup itself has succeeded and been checked: a clean-up that fails is reported
     # (Retention.Error), not a failed backup. The plan is worked out from the list of versions
     # (Get-VersionRetentionPlan), checked (Get-RetentionRemovals) and saved with the run before anything
@@ -386,10 +436,16 @@ try {
     # versions a preview would delete now, or the ones this run really deleted (Removed of them,
     # PartialRemoved of those partial). No size is given: deleting a version frees only the data that no
     # remaining version needs, and restic 0.19 does not report that amount in a form that can be read.
+    # With a list of approved versions (-RetentionApprovedFile, the first clean-up after a preview) the
+    # plan is narrowed to that list before anything is deleted: Approved = the list was read and the plan
+    # was narrowed to it; Deferred = the versions the rule would delete now that were not on the list,
+    # which stay for the next clean-up (they count in Kept while they are complete and still there).
     $new=$script:status.Snapshot
-    $retention=[ordered]@{Preview=[bool]$RetentionPreview;Last=$KeepLast;Months=$KeepMonths;Kept=$null;Removed=0;PartialRemoved=0;Candidates=@();Error=$null}
+    $retention=[ordered]@{Preview=[bool]$RetentionPreview;Approved=$false;Last=$KeepLast;Months=$KeepMonths;Kept=$null;Removed=0;PartialRemoved=0;Deferred=0;Candidates=@();Error=$null}
     $remove=@();$gone=@();$deleting=$false
     try{
+     # Before anything else: without a usable list nothing is marked, planned or deleted.
+     if($approving -and ($approvedProblem -or -not $approvedIds.Count)){throw $(if($approvedProblem){$approvedProblem}else{'The list of approved versions is empty, so the clean-up deleted nothing.'})}
      # A partial version that is still waiting for its mark would pass for a complete one. It is marked
      # first (the mark changes its ID). A preview changes no version: it only plans such a version as
      # the partial one it is, under the ID it still has.
@@ -409,6 +465,15 @@ try {
      $computer=[string]$made[0].hostname
      $plan=@(Get-VersionRetentionPlan $available $KeepLast $KeepMonths $computer $new)
      $remove=@(Get-RetentionRemovals $plan $new $available $computer)
+     if($approving){
+      # Only what was shown and approved: the plan is narrowed to the list, and the checks run again on
+      # what is left. A version goes only when the rule, the checks and the list all agree.
+      $wanted=@($remove|ForEach-Object {[string]$_.id})
+      $plan=@(Get-ApprovedRetentionPlan $plan $approvedIds)
+      $remove=@(Get-RetentionRemovals $plan $new $available $computer)
+      if(@($remove|Where-Object {[string]$_.id -cnotin $approvedIds -or [string]$_.id -cnotin $wanted}).Count){throw 'The clean-up would delete a version that was not approved. Nothing was deleted.'}
+      $retention.Approved=$true;$retention.Deferred=$wanted.Count-$remove.Count
+     }
      [IO.File]::WriteAllText((Join-Path $RunDirectory 'clean-up-plan.json'),(ConvertTo-Json @($plan|ForEach-Object {[ordered]@{Id=$_.Id;Time=$_.Time.UtcDateTime.ToString('o');Month=$_.Month;Host=$_.Host;Paths=$_.Paths;Partial=$_.Partial;Keep=$_.Keep;Reasons=$_.Reasons}}) -Depth 6))
      $retention.Kept=@($plan|Where-Object {$_.Keep -and -not $_.Partial}).Count
      if($RetentionPreview){$gone=$remove}

@@ -6,8 +6,8 @@
 # the last N and one a month) beside partial versions and another computer's versions, a preview of
 # that clean-up, deleting versions, a restore below protected folders, saving
 # the recovery key, a pending password change after the repository moved, a lock left in the repository
-# (by a run that was killed: removed; by a backup that is still running: left alone), and plaintext
-# passwords in files.
+# (by a run that was killed: removed; by a backup that is still running: left alone), a versions folder
+# that is gone (the backup stops; -CreateNewRepository starts a new one), and plaintext passwords in files.
 # Skips when restic is not installed (Install-BackupEngine.ps1).
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Backup.Status.psm1') -Force
@@ -219,6 +219,45 @@ try{
  $after=@(Snapshots|ForEach-Object {$_.id});$listed=@($previewed.Retention.Candidates|ForEach-Object {$_.Id})
  Assert ($previewed.State -eq 'Completed' -and $previewed.Retention.Preview -eq $true -and $previewed.Retention.Removed -eq 0 -and $null -eq $previewed.Retention.Error -and ((@($after|Sort-Object) -join ',') -ceq (@($before+$previewed.Snapshot|Sort-Object) -join ','))) 'a backup with a preview of the clean-up deletes nothing: every version is still there, and the new one'
  Assert ($listed.Count -ge 4 -and $final.Snapshot -in $listed -and $ids['old-10-months'] -in $listed -and $previewed.Snapshot -notin $listed -and $partialNow[0].id -notin $listed -and @($listed|Where-Object {$_ -notin $after}).Count -eq 0 -and -not(Test-Path -LiteralPath (Join-Path $previewed.RunDirectory 'DeletingOldVersions.jsonl')) -and -not(Test-Path -LiteralPath (Join-Path $previewed.RunDirectory 'FreeingSpace.jsonl'))) 'it lists what last 1 and months 0 would delete: every complete version but the newest, and not the partial version that 2 complete versions follow'
+
+ # --- The versions folder is gone: the backup stops and lets the user decide -------------------------
+ # (Before, a backup that found no repository where one had been quietly started a new, empty one.)
+ Assert ($partialRun.RepositoryMissing -eq $false -and $partialRun.RepositoryCreated -eq $true -and $completeRun.RepositoryMissing -eq $false -and $completeRun.RepositoryCreated -eq $false -and $null -eq $completeRun.Note) 'the first-ever backup created the versions folder without being asked to; later backups create nothing'
+ $name=[string]$config.RepositoryFolder;$aside=$repo+'-renamed';$versionsBefore=@(Snapshots|ForEach-Object {$_.id});$passwordBefore=Read-Password
+ Rename-Item -LiteralPath $repo -NewName ($name+'-renamed')
+ # Everything on the stand-in for the backup drive: every folder and file, with each file's size and date.
+ $onDrive={@(Get-ChildItem -LiteralPath $moved -Recurse -Force|ForEach-Object {$_.FullName+$(if(-not $_.PSIsContainer){'*'+$_.Length+'*'+$_.LastWriteTimeUtc.Ticks})}|Sort-Object) -join '|'};$driveBefore=& $onDrive
+ $gone=Run 'Backup' @{} $null $moved
+ Assert ($gone.State -eq 'Failed' -and $gone.RepositoryMissing -eq $true -and $gone.Error -ceq "The versions folder $name was not found on the backup drive. It may have been renamed, moved or deleted. Nothing was changed.") 'a backup whose versions folder was renamed fails, says so in plain words and reports RepositoryMissing'
+ Assert (-not(Test-Path -LiteralPath $repo) -and (& $onDrive) -ceq $driveBefore -and $gone.RepositoryCreated -eq $false -and @('Initializing','BackingUp'|Where-Object {Test-Path -LiteralPath (Join-Path $gone.RunDirectory ($_+'.jsonl'))}).Count -eq 0) 'it creates and changes nothing: no folder of that name, no new or changed file on the backup drive, no repository'
+ $others=@(
+  @('Snapshots',@{},$null),@('Check',@{},$null),@('Preview',@{CreateNewRepository=$true},$null),
+  @('Restore',@{Snapshot=$versionsBefore[0];RestoreTarget=(Join-Path $base 'restored-from-nothing')},$null),
+  @('Forget',@{},@{SnapshotIds=@($versionsBefore[0]);Confirmation='DELETE SELECTED HISTORY';ReclaimSpace=$false}),
+  @('ExportKey',@{},@{RecoveryKeyPath=(Join-Path $private 'recovery-from-nothing.txt')}))
+ foreach($other in $others){
+  $r=Run $other[0] $other[1] $other[2] $moved
+  if($r.State -ne 'Failed' -or $r.RepositoryMissing -ne $true -or $r.RepositoryCreated -ne $false -or $r.Error -notlike "The versions folder $name was not found on the backup drive*Nothing was changed." -or (Test-Path -LiteralPath $repo) -or (& $onDrive) -cne $driveBefore){throw "FAIL $($other[0]) without its versions folder: $($r|ConvertTo-Json -Depth 4 -Compress)"}
+ }
+ Assert (-not(Test-Path -LiteralPath (Join-Path $private 'recovery-from-nothing.txt')) -and -not(Test-Path -LiteralPath (Join-Path $base 'restored-from-nothing'))) 'listing, checking, restoring, deleting versions and saving the recovery key report the missing folder the same way and create nothing; the switch counts for a backup only'
+ $fresh=Run 'Backup' @{CreateNewRepository=$true} $null $moved
+ $new=@(Snapshots)
+ Assert ($fresh.State -eq 'Completed' -and $fresh.RepositoryMissing -eq $false -and $fresh.RepositoryCreated -eq $true -and $fresh.Note -like "A new, empty versions folder $name was created*" -and (Test-Path -LiteralPath (Join-Path $fresh.RunDirectory 'Initializing.jsonl'))) 'with -CreateNewRepository the backup starts a new versions folder where none is, completes and says that it did'
+ Assert ($new.Count -eq 1 -and $new[0].id -ceq $fresh.Snapshot -and (Read-Password) -ceq $passwordBefore -and (Restic @('check')).Code -eq 0) 'the new repository holds one version and opens with the password that was already stored'
+ Rename-Item -LiteralPath $repo -NewName ($name+'-new')
+ New-Item -ItemType Directory -Path $repo|Out-Null
+ $hollow=Run 'Backup' @{} $null $moved
+ Assert ($hollow.State -eq 'Failed' -and $hollow.RepositoryMissing -eq $true -and $hollow.RepositoryCreated -eq $false -and $hollow.Error -like "The versions folder $name on the backup drive is empty or incomplete*Nothing was changed." -and @(Get-ChildItem -LiteralPath $repo -Force).Count -eq 0) 'an empty folder of that name is not taken for a new start either, and stays empty'
+ $filled=Run 'Backup' @{CreateNewRepository=$true} $null $moved
+ $new=@(Snapshots)
+ Assert ($filled.State -eq 'Completed' -and $filled.RepositoryMissing -eq $false -and $filled.RepositoryCreated -eq $true -and $filled.Note -like "A new, empty versions folder $name was created*" -and $new.Count -eq 1 -and $new[0].id -ceq $filled.Snapshot) 'with the switch, an empty folder of that name gets a new repository with one version'
+ Rename-Item -LiteralPath $repo -NewName ($name+'-new-2');Rename-Item -LiteralPath $aside -NewName $name
+ $back=Run 'Backup' @{} $null $moved
+ Assert ($back.State -eq 'Completed' -and $back.RepositoryMissing -eq $false -and $back.RepositoryCreated -eq $false -and $null -eq $back.Note -and (@(Snapshots|ForEach-Object {$_.id}|Sort-Object) -join ',') -ceq (@($versionsBefore+$back.Snapshot|Sort-Object) -join ',')) 'once the folder has its name back a normal backup works again, and every earlier version is still there'
+ $again=Run 'Backup' @{CreateNewRepository=$true} $null $moved
+ Assert ($again.State -eq 'Completed' -and $again.RepositoryCreated -eq $false -and $null -eq $again.Note -and -not(Test-Path -LiteralPath (Join-Path $again.RunDirectory 'Initializing.jsonl')) -and (@(Snapshots|ForEach-Object {$_.id}|Sort-Object) -join ',') -ceq (@($versionsBefore+$back.Snapshot+$again.Snapshot|Sort-Object) -join ',')) 'while the versions folder is there the switch changes nothing: no repository is ever created over an existing one'
+ $reported=@($partialRun,$completeRun,$gone,$r,$fresh,$hollow,$filled,$back,$again)
+ Assert (@($reported|Where-Object {$result=$_;@('RepositoryMissing','RepositoryCreated','Note'|Where-Object {-not $result.PSObject.Properties[$_]}).Count -or $result.RepositoryMissing -isnot [bool] -or $result.RepositoryCreated -isnot [bool]}).Count -eq 0) 'every result, failed or completed, carries RepositoryMissing, RepositoryCreated and Note'
 
  # --- No plaintext password in anything written -------------------------------------------------------
  $leaks=@()

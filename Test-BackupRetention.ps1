@@ -3,8 +3,10 @@
 # disposable repository under the temporary directory, holding versions dated back over eight months for
 # two sets of folders of this computer, another computer and another program. Covers a preview (nothing
 # deleted, the list equals what the next backup deletes), the clean-up itself, partial versions, the
-# clean-up switched off, the newest complete version of every set, and the earlier settings (days and
-# weeks), which are refused. The rule itself is tested without restic in Test-BackupVersionsRules.ps1.
+# clean-up switched off, the newest complete version of every set, the earlier settings (days and
+# weeks), which are refused, and the first clean-up after a preview, which deletes only the versions
+# that were shown and approved (-RetentionApprovedFile). The rule itself is tested without restic in
+# Test-BackupVersionsRules.ps1.
 # Needs no backup drive. Skips when restic is not installed (Install-BackupEngine.ps1).
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Backup.Status.psm1') -Force
@@ -40,11 +42,12 @@ function Saved {@(Snapshots|ForEach-Object {$_.id})}
 function Stored {@(Get-ChildItem -LiteralPath (Join-Path $repo 'data'),(Join-Path $repo 'index'),(Join-Path $repo 'snapshots') -Recurse -File|ForEach-Object {$_.FullName})}
 function Content([string]$text){[IO.File]::WriteAllText((Join-Path $source 'file.txt'),$text)}
 function Named($result){@($result.Retention.Candidates|ForEach-Object {$_.Id})}
-$shape='Preview,Last,Months,Kept,Removed,PartialRemoved,Candidates,Error'
+$shape='Preview,Approved,Last,Months,Kept,Removed,PartialRemoved,Deferred,Candidates,Error'
 try{
  Content 'the first version'
  $s0=Run
  Assert ($s0.State -eq 'Completed' -and -not $s0.PSObject.Properties['Retention']) 'a backup without Keep versions completes and reports no clean-up'
+ Assert ($s0.RepositoryMissing -eq $false -and $s0.RepositoryCreated -eq $true -and $null -eq $s0.Note -and (Test-Path -LiteralPath (Join-Path $repo 'config'))) 'a first-ever backup creates its versions folder without being asked to, and says that it did'
  $first=@(Snapshots|Where-Object {$_.id -ceq $s0.Snapshot})[0];$computer=[string]$first.hostname;$folder=[string]@($first.paths)[0]
  Assert ($computer -and @($first.paths).Count -eq 1) 'the worker''s version names this computer and one source folder'
 
@@ -93,8 +96,8 @@ try{
  $preview=Run @{KeepLast=3;KeepMonths=5;RetentionPreview=$true}
  $after=@(Saved)
  Assert ($preview.State -eq 'Completed' -and $preview.Snapshot -and $preview.BackupSummary.snapshot_id -eq $preview.Snapshot) 'a backup with a preview of the clean-up backs up as usual'
- Assert ((@($preview.Retention.PSObject.Properties.Name) -join ',') -ceq $shape) 'the result describes the clean-up with exactly these fields: Preview, Last, Months, Kept, Removed, PartialRemoved, Candidates, Error'
- Assert ($preview.Retention.Preview -eq $true -and $preview.Retention.Last -eq 3 -and $preview.Retention.Months -eq 5 -and $preview.Retention.Removed -eq 0 -and $preview.Retention.PartialRemoved -eq 0 -and $null -eq $preview.Retention.Error) 'a preview reports its settings and that nothing was deleted'
+ Assert ((@($preview.Retention.PSObject.Properties.Name) -join ',') -ceq $shape) 'the result describes the clean-up with exactly these fields: Preview, Approved, Last, Months, Kept, Removed, PartialRemoved, Deferred, Candidates, Error'
+ Assert ($preview.Retention.Preview -eq $true -and $preview.Retention.Last -eq 3 -and $preview.Retention.Months -eq 5 -and $preview.Retention.Removed -eq 0 -and $preview.Retention.PartialRemoved -eq 0 -and $preview.Retention.Approved -eq $false -and $preview.Retention.Deferred -eq 0 -and $null -eq $preview.Retention.Error) 'a preview reports its settings and that nothing was deleted'
  Assert (Same $after ($before+$preview.Snapshot)) 'after a preview every version is still there: the same IDs as before, and the new one'
  Assert (@($filesBefore|Where-Object {-not(Test-Path -LiteralPath $_)}).Count -eq 0 -and @('DeletingOldVersions','FreeingSpace','CheckingAfterCleanUp'|Where-Object {Test-Path -LiteralPath (Join-Path $preview.RunDirectory ($_+'.jsonl'))}).Count -eq 0) 'a preview with 16 versions to delete removes no file of the repository (no pack, index or version file) and runs no deleting, freeing or checking step'
  Assert (Same (Named $preview) $expected) 'the preview lists what would be deleted now: 16 versions of this computer''s two sets of folders'
@@ -113,7 +116,7 @@ try{
  $before=@(Saved)
  $real=Run @{KeepLast=3;KeepMonths=5}
  $left=@(Saved)
- Assert ($real.State -eq 'Completed' -and (@($real.Retention.PSObject.Properties.Name) -join ',') -ceq $shape -and $real.Retention.Preview -eq $false -and $null -eq $real.Retention.Error) 'the next backup, without the preview, cleans up without an error'
+ Assert ($real.State -eq 'Completed' -and (@($real.Retention.PSObject.Properties.Name) -join ',') -ceq $shape -and $real.Retention.Preview -eq $false -and $real.Retention.Approved -eq $false -and $real.Retention.Deferred -eq 0 -and $real.RepositoryCreated -eq $false -and $null -eq $real.Retention.Error) 'the next backup, without the preview, cleans up without an error'
  Assert ((Same (Named $real) (Named $preview)) -and (Same (Named $real) $expected)) 'it deletes exactly the versions the preview listed'
  Assert ($real.Retention.Removed -eq 16 -and $real.Retention.PartialRemoved -eq 2 -and $real.Retention.Kept -eq 10) 'the result counts 16 deleted versions, 2 of them partial, and 10 complete versions kept'
  # The real clean-up marks the waiting partial version first: the mark changes its ID.
@@ -159,6 +162,75 @@ try{
  $before=@(Saved)
  $earlier=Run @{KeepDays=7;KeepWeeks=4;KeepMonths=3}
  Assert ($earlier.State -eq 'Failed' -and $earlier.Error -like '*earlier Keep versions settings*' -and -not $earlier.PSObject.Properties['Retention'] -and (Same @(Saved) $before)) 'a run started with the earlier settings (days and weeks) fails with a plain message: nothing is backed up and nothing is deleted'
+
+ # === The first clean-up after a preview: only what was shown and approved =============================
+ # The preview is itself a backup, so the plan of the next run can hold more than was shown. That run gets
+ # the list of the versions that were shown and approved and deletes only those; the rest waits for the
+ # next clean-up. A repository of its own, so that every count is exact. Keep versions here: the last 2.
+ $config.RepositoryFolder='Test-Approved';$config.PasswordDpapiPath=Join-Path $private 'approved-key.dpapi';$config.RecoveryKeyPath=Join-Path $private 'approved-recovery.txt'
+ $configPath=Join-Path $private 'approved-settings.json';$config|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $configPath
+ $repo=Join-Path $drive $config.RepositoryFolder;$pendingPath=$config.PasswordDpapiPath+'.partial-pending.local.json';$two=@{KeepLast=2;KeepMonths=0}
+ Content 'approved: the first version'
+ $a0=Run
+ foreach($back in 8,7,6,5,4,3){Seed "P-$back" (On $back 10)}
+ Seed 'P-other-old' (On 8 12) $folder 'other-computer';Seed 'P-other' (On 7 12) $folder 'other-computer'
+ $old=@(8,7,6,5,4,3|ForEach-Object {$ids["P-$_"]})
+ Content 'approved: the preview''s version'
+ $shown=Run ($two+@{RetentionPreview=$true})
+ Assert ($a0.State -eq 'Completed' -and $shown.State -eq 'Completed' -and (Same (Named $shown) $old) -and $shown.Retention.Kept -eq 2 -and $shown.Retention.Approved -eq $false -and $shown.Retention.Deferred -eq 0) 'in a second repository the preview shows 6 versions: all but the last 2'
+ # The list as a careless writer might leave it: a byte-order mark, blank lines, spaces and capital letters
+ # around the IDs. It also names a version that the rule keeps (the preview's own), an older version of
+ # another computer and a version that does not exist: none of them may go.
+ $listPath=Join-Path $private 'approved-versions.txt';$i=0
+ $lines=@('')+@(Named $shown|ForEach-Object {$i++;if($i % 2){"  $($_.ToUpperInvariant())`t"}else{$_}})+@('   ',$shown.Snapshot,$ids['P-other-old'],('f'*64),'')
+ [IO.File]::WriteAllLines($listPath,[string[]]$lines,[Text.UTF8Encoding]::new($true))
+ Content 'approved: the version of the first clean-up'
+ $before=@(Saved)
+ $ok=Run ($two+@{RetentionApprovedFile=$listPath})
+ $left=@(Saved)
+ Assert ($ok.State -eq 'Completed' -and (@($ok.Retention.PSObject.Properties.Name) -join ',') -ceq $shape -and $ok.Retention.Preview -eq $false -and $ok.Retention.Approved -eq $true -and $null -eq $ok.Retention.Error) 'the first clean-up, given the list of approved versions, runs without an error and says that the list was used'
+ Assert ((Same (Named $ok) $old) -and $ok.Retention.Removed -eq 6 -and $ok.Retention.PartialRemoved -eq 0) 'it deletes exactly the 6 versions that were shown, also those listed in capital letters or with spaces around them'
+ Assert ($ok.Retention.Deferred -eq 1 -and $a0.Snapshot -in $left -and $ok.Retention.Kept -eq 3) 'the version that this backup pushed out of the last 2 was never shown: it is counted as deferred and is still there'
+ Assert (Same $left (@($before|Where-Object {$_ -cnotin $old})+$ok.Snapshot)) 'nothing else is gone: the listed version that the rule keeps and the listed version of another computer are still there'
+ $planned=@(Get-Content -LiteralPath (Join-Path $ok.RunDirectory 'clean-up-plan.json') -Raw|ConvertFrom-Json);$waits=@($planned|Where-Object {$_.Id -ceq $a0.Snapshot})[0]
+ Assert ($waits.Keep -eq $true -and (@($waits.Reasons) -join ',') -ceq 'OutsideRules,NotApproved' -and @($planned|Where-Object {-not $_.Keep}).Count -eq 6) 'the plan saved with the run says why that version stayed'
+ Assert ((Test-Path -LiteralPath (Join-Path $ok.RunDirectory 'FreeingSpace.jsonl')) -and (Test-Path -LiteralPath (Join-Path $ok.RunDirectory 'CheckingAfterCleanUp.jsonl')) -and (Restic @('check')).Code -eq 0) 'space was freed and the repository checks clean afterwards'
+ $n1=Run $two
+ Assert ($n1.State -eq 'Completed' -and $null -eq $n1.Retention.Error -and $n1.Retention.Approved -eq $false -and $n1.Retention.Deferred -eq 0 -and (Same (Named $n1) @($a0.Snapshot,$shown.Snapshot)) -and $a0.Snapshot -notin @(Saved)) 'the next backup, without a list, follows the rule alone: it deletes the deferred version, and the one it pushed out itself'
+
+ # --- A list that cannot be used: nothing is deleted, and the run says so ---------------------------
+ # A partial version that still waits for its mark is in the repository meanwhile; it must be left as it is.
+ Seed 'W-pending' (On 5 10)
+ [void](Write-BackupStatus @($ids['W-pending']) $pendingPath)
+ $missingList=Join-Path $private 'approved-missing.txt';$emptyList=Join-Path $private 'approved-empty.txt';[IO.File]::WriteAllText($emptyList," `r`n`r`n`t`r`n")
+ $unused=@()
+ foreach($case in @(,@($missingList,'*was not found*'))+@(,@($emptyList,'*is empty*'))){
+  $before=@(Saved);$filesBefore=@(Stored)
+  $bad=Run ($two+@{RetentionApprovedFile=$case[0]})
+  $unused+=$bad.Snapshot
+  if($bad.State -ne 'Completed' -or (@($bad.Retention.PSObject.Properties.Name) -join ',') -cne $shape -or $bad.Retention.Approved -ne $false -or $bad.Retention.Error -notlike $case[1] -or $bad.Retention.Error -notlike '*deleted nothing*' -or $bad.Retention.Removed -ne 0 -or $bad.Retention.PartialRemoved -ne 0 -or $bad.Retention.Deferred -ne 0 -or $bad.Retention.Candidates -isnot [array] -or @($bad.Retention.Candidates).Count -ne 0 -or -not (Same @(Saved) ($before+$bad.Snapshot)) -or @($filesBefore|Where-Object {-not(Test-Path -LiteralPath $_)}).Count -or @('MarkingPartial','DeletingOldVersions','FreeingSpace'|Where-Object {Test-Path -LiteralPath (Join-Path $bad.RunDirectory ($_+'.jsonl'))}).Count -or -not(Test-Path -LiteralPath $pendingPath)){throw "FAIL an approved list that cannot be used ($($case[1])): $($bad|ConvertTo-Json -Depth 6 -Compress)"}
+ }
+ Assert ($unused.Count -eq 2) 'a list of approved versions that is missing or empty never falls back to the whole plan: the backup completes, the clean-up says why it deleted nothing, and no version is deleted or marked although versions are outside the rule'
+ $before=@(Saved)
+ $shown2=Run ($two+@{RetentionPreview=$true;RetentionApprovedFile=$missingList})
+ Assert ($shown2.State -eq 'Completed' -and $shown2.Retention.Preview -eq $true -and $shown2.Retention.Approved -eq $false -and $null -eq $shown2.Retention.Error -and $shown2.Retention.Removed -eq 0 -and $shown2.Retention.Deferred -eq 0 -and (Same @(Saved) ($before+$shown2.Snapshot))) 'together with a preview the list is not used at all: the preview wins and nothing is deleted'
+ $waitingShown=@($shown2.Retention.Candidates|Where-Object {$_.Id -ceq $ids['W-pending']})
+ Assert ((Same (Named $shown2) @($ok.Snapshot,$n1.Snapshot,$unused[0],$ids['W-pending'])) -and $waitingShown[0].Partial -eq $true) 'this preview shows 4 versions, one of them the partial version that waits for its mark, under the ID it still has'
+
+ # --- A partial version that is marked after the preview has a new ID: deferred, not deleted ---------
+ [IO.File]::WriteAllLines($listPath,[string[]]@(Named $shown2))
+ $before=@(Saved)
+ $ok2=Run ($two+@{RetentionApprovedFile=$listPath})
+ $left=@(Saved);$marked=@(Snapshots|Where-Object {(Test-PartialSnapshot $_) -and $_.id -cnotin $before})
+ Assert ($ok2.State -eq 'Completed' -and $null -eq $ok2.Retention.Error -and $ok2.Retention.Approved -eq $true -and (Same (Named $ok2) @($ok.Snapshot,$n1.Snapshot,$unused[0])) -and $ok2.Retention.Removed -eq 3 -and $ok2.Retention.PartialRemoved -eq 0) 'the clean-up with the new list deletes the 3 complete versions that were shown'
+ Assert ($marked.Count -eq 1 -and $ids['W-pending'] -notin $left -and -not(Test-Path -LiteralPath $pendingPath) -and $marked[0].id -in $left -and $ok2.Retention.Deferred -eq 2 -and $unused[1] -in $left -and $ok2.Retention.Kept -eq 3) 'the waiting partial version was marked first and so has a new ID, which nobody approved: it is deferred like the version this backup pushed out, and both are still there'
+ Assert (Same $left (@($before|Where-Object {$_ -cnotin (Named $ok2) -and $_ -cne $ids['W-pending']})+$ok2.Snapshot+$marked[0].id)) 'the repository holds every other version, and the new one'
+ $n2=Run $two
+ Assert ($n2.State -eq 'Completed' -and $null -eq $n2.Retention.Error -and $n2.Retention.Approved -eq $false -and (Same (Named $n2) @($unused[1],$shown2.Snapshot,$marked[0].id)) -and $n2.Retention.Removed -eq 3 -and $n2.Retention.PartialRemoved -eq 1 -and $n2.Retention.Deferred -eq 0) 'the next backup without a list deletes both deferred versions, the partial one among them, and the one it pushed out itself'
+ $before=@(Saved)
+ $offListed=Run @{RetentionApprovedFile=$listPath}
+ Assert ($offListed.State -eq 'Completed' -and $offListed.Retention.Approved -eq $true -and $null -eq $offListed.Retention.Error -and $offListed.Retention.Removed -eq 0 -and $offListed.Retention.Deferred -eq 0 -and @($offListed.Retention.Candidates).Count -eq 0 -and (Same @(Saved) ($before+$offListed.Snapshot))) 'with the clean-up switched off a list changes nothing: the rule keeps every version, so none is deleted'
+ Assert ((Same @(Saved) @($ok2.Snapshot,$n2.Snapshot,$offListed.Snapshot,$ids['P-other-old'],$ids['P-other'])) -and (Restic @('check')).Code -eq 0) 'in the end the repository holds this computer''s last versions and both versions of the other computer, and checks clean'
 }finally{
  if(Test-Path -LiteralPath $base){Get-ChildItem -LiteralPath $base -Recurse -Force -File|ForEach-Object {$_.IsReadOnly=$false};Remove-Item -LiteralPath $base -Recurse -Force}
 }
