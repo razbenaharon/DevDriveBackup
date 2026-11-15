@@ -26,6 +26,11 @@ jobs:
       - name: Verify the privacy check itself
         shell: pwsh
         run: pwsh -NoProfile -File ./Test-PrivacyGuardRules.ps1
+      - name: Check that no built-in variable is assigned to
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+          pwsh -NoProfile -File ./Test-BackupStyle.ps1
       - name: Parse all PowerShell sources
         shell: pwsh
         run: |
