@@ -180,7 +180,7 @@ try{
  $r=Open-Window $data @('-AutoCloseSeconds','2','-TestState',$st);$s=Read-State $st
  Check 'a drive that keeps every version says so on the overview' {$r.Code -eq 0 -and $s.KeepVersions -eq 'every version'}
  $before=[IO.File]::ReadAllText($keepFile)
- foreach($q in 'KeepVersions','RetentionPreview'){
+ foreach($q in 'KeepVersions','RetentionPreview','RetentionList'){
   $png=Join-Path $root "question-$q.png"
   $r=Open-Window $keep @('-RenderPreview',$png,'-PreviewDialog',$q)
   Check "the box of '$q' is drawn, and drawing it changes nothing" {$r.Code -eq 0 -and (Test-Path -LiteralPath $png) -and (Get-Item -LiteralPath $png).Length -gt 5000 -and [IO.File]::ReadAllText($keepFile) -ceq $before}
@@ -189,6 +189,11 @@ try{
  Check 'the question before the first clean-up, unanswered: nothing is approved' {$r.Code -eq 0 -and $s.Log.Retention.Count -eq 4 -and -not $s.Log.Retention.Approved -and (& $read).RetentionConfirmed -eq $false}
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Not now','-TestState',$st);$s=Read-State $st
  Check 'answered with Not now: the settings stay exactly as they were' {$r.Code -eq 0 -and -not $s.Log.Retention.Approved -and [IO.File]::ReadAllText($keepFile) -ceq $before}
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Show the full list','-TestState',$st);$s=Read-State $st
+ Check 'Show the full list opens every item and comes back to the question; asking only for the list approves nothing' {$r.Code -eq 0 -and @($s.Log.ListShown).Count -ge 1 -and @($s.Log.ListShown)[0] -ceq $s.Log.Retention.FullList -and $s.Log.Retention.FullList -like '*(4 items)*1a2b3c4d*5e6f7a8b*' -and -not $s.Log.Retention.Approved -and [IO.File]::ReadAllText($keepFile) -ceq $before}
+ $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Show the full list>Approve','-TestState',$st);$s=Read-State $st
+ Check 'after the full list, Approve clean-up stores that same list' {$q=& $read;$r.Code -eq 0 -and @($s.Log.ListShown).Count -eq 1 -and $s.Log.Retention.Approved -and (@($q.RetentionApproved.Versions[0].Ids) -join ',') -eq '1a2b3c4d,5e6f7a8b' -and @($q.RetentionApproved.RecoveryFolders[0].Names).Count -eq 2}
+ [IO.File]::WriteAllText($keepFile,$before)
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','RetentionPreview','-Answer','Approve','-TestState',$st);$s=Read-State $st
  Check 'answered with Approve clean-up: exactly the list that was shown is saved, the profile is not handed over to the rule yet, and the window says what the next backup does' {$q=& $read;$r.Code -eq 0 -and $s.Log.Retention.Approved -and $q.RetentionConfirmed -eq $false -and @($q.RetentionApproved.Versions[0].Ids).Count -eq 2 -and @($q.RetentionApproved.RecoveryFolders[0].Names).Count -eq 2 -and $q.RetentionApproved.Last -eq 10 -and $q.RetentionApproved.KeepDeleted -eq 4 -and $s.Status -like '*Nothing was deleted now*next backup deletes what was listed and nothing else*' -and $q.VersionRetention.Last -eq 10}
  $r=Open-Window $keep @('-AutoCloseSeconds','2','-PreviewDialog','KeepVersions','-Answer','Save','-TestState',$st);$s=Read-State $st

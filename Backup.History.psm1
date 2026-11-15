@@ -97,6 +97,20 @@ function Get-HistoryDeletionPlan($Snapshots,[string[]]$Ids) {
    if($null -ne $latestComplete -and $ticks -eq $latestComplete -and -not (Test-PartialSnapshot $snapshot)){throw 'The newest complete snapshot for each computer/source set is protected: the newer ones are partial. Select older versions.'}
   }
  }
+ # Also the newest complete version this tool made of each computer and set of folders, told apart as
+ # the clean-up tells them apart (Get-SnapshotGroupKey: this tool's versions only, capital letters kept
+ # apart). The grouping above counts other programs' versions and ignores case, so a newer version of
+ # another program, or the same folder written with other capital letters, would leave it unprotected.
+ $newestOwn=[Collections.Generic.Dictionary[string,long]]::new([StringComparer]::Ordinal)
+ foreach($s in $all){
+  if(-not (Test-OwnSnapshot $s) -or (Test-PartialSnapshot $s)){continue}
+  $key=Get-SnapshotGroupKey $s;$ticks=(ConvertTo-HistoryDate $s.time).UtcTicks
+  if(-not $newestOwn.ContainsKey($key) -or $ticks -gt $newestOwn[$key]){$newestOwn[$key]=$ticks}
+ }
+ foreach($s in @($all|Where-Object {$_.id -cin $selected})){
+  if(-not (Test-OwnSnapshot $s) -or (Test-PartialSnapshot $s)){continue}
+  if((ConvertTo-HistoryDate $s.time).UtcTicks -eq $newestOwn[(Get-SnapshotGroupKey $s)]){throw 'The newest complete snapshot for each computer/source set is protected. Select older versions.'}
+ }
  @($all|Where-Object {$_.id -cin $selected})
 }
 function Get-VersionRetentionPlan($Snapshots,[int]$Last,[int]$Months,[string]$HostName,[string]$NewSnapshot,[TimeZoneInfo]$TimeZone=[TimeZoneInfo]::Local) {

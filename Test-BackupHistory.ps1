@@ -25,3 +25,16 @@ try{
  Assert (@(Get-HistoryDeletionPlan $typed @($old.id)).Count -eq 1) 'JSON dates work with non-English Windows culture'
  Refuses {Get-HistoryDeletionPlan $typed @($new.id)} '*protected*' 'newest protection survives JSON date conversion'
 }finally{[Globalization.CultureInfo]::CurrentCulture=$previousCulture}
+# Deletion by hand protects the newest complete version this tool made of each computer and set of
+# folders, told apart exactly as the clean-up tells them apart (Get-SnapshotGroupKey). Grouping all
+# versions without regard to case let a newer version of another program, or the same folder written
+# with other capital letters, take that protection away.
+$mine=[pscustomobject]@{id=('e'*64);time='2026-10-16T10:00:00Z';hostname='test';paths=@('X:\work');tags=@('devdrive')}
+$minePartial=[pscustomobject]@{id=('f'*64);time='2026-10-17T10:00:00Z';hostname='test';paths=@('X:\work');tags=@('devdrive-partial')}
+$foreign=[pscustomobject]@{id=('1'*64);time='2026-10-18T10:00:00Z';hostname='test';paths=@('X:\work')}
+Refuses {Get-HistoryDeletionPlan @($mine,$minePartial,$foreign) @($mine.id)} '*protected*' 'the newest complete version this tool made stays protected when another program saved a newer version of the same folders'
+$mineOlder=[pscustomobject]@{id=('2'*64);time='2026-10-15T10:00:00Z';hostname='test';paths=@('X:\work');tags=@('devdrive')}
+Assert (@(Get-HistoryDeletionPlan @($mineOlder,$mine,$minePartial,$foreign) @($mineOlder.id)).Count -eq 1) 'an older complete version of the same folders can still be deleted'
+$upper=[pscustomobject]@{id=('3'*64);time='2026-10-16T10:00:00Z';hostname='test';paths=@('X:\Work');tags=@('devdrive')}
+$lower=[pscustomobject]@{id=('4'*64);time='2026-10-17T10:00:00Z';hostname='test';paths=@('X:\work');tags=@('devdrive')}
+Refuses {Get-HistoryDeletionPlan @($upper,$lower) @($upper.id)} '*protected*' 'the newest version of a set written with other capital letters is protected, as the clean-up keeps it'

@@ -9,10 +9,10 @@ param(
  [string]$PreviewTheme,      # tests: show this theme without saving it
  [int]$PreviewWidth=0,       # tests: open the window at this inner size (zoomed)
  [int]$PreviewHeight=0,
- [ValidateSet('','KeepVersions','RetentionPreview','Verify','Repair','Settings')][string]$PreviewDialog='',  # tests: open this dialog at start. With -RenderPreview the picture is of the box itself and nothing is saved; with -Answer it is answered without being shown
+ [ValidateSet('','KeepVersions','RetentionPreview','RetentionList','Verify','Repair','Settings')][string]$PreviewDialog='',  # tests: open this dialog at start. With -RenderPreview the picture is of the box itself and nothing is saved; with -Answer it is answered without being shown
  [int]$AutoCloseSeconds=0,   # tests: run normally, then close after this many seconds
  [switch]$Quiet,             # tests: open off the screen, without taking the keyboard or a taskbar button
- [string]$Answer,            # tests: the answer given to a question (the start of its button text) instead of showing it; for Keep versions 'Save' or 'Save <newest> <months>'
+ [string]$Answer,            # tests: the answer given to a question (the start of its button text) instead of showing it; for Keep versions 'Save' or 'Save <newest> <months>'. Several questions in a row: answers joined by '>' (the last one is given to every further question)
  [ValidateSet('','Refresh','Links','AfterRun','AddFolder','SaveAfter')][string]$TestAction='',  # tests: once the window is shown, do what a user would (see "Test hooks")
  [string]$TestPath,          # tests: what -TestAction works on. AfterRun: a JSON file with the entries of a finished run. AddFolder: the folder to add. SaveAfter: a file that is copied over the settings file before a save
  [string]$TestArea,          # tests: the room of the screen as WIDTHxHEIGHT, for the size the window opens with
@@ -273,6 +273,35 @@ function Set-Grid($g){
 }
 function New-Surface($Parent,[int]$X,[int]$Y,[int]$W,[int]$H){$p=New-Control Panel $Parent $X $Y $W $H;$p.BackColor=$ui.Surface;$p}
 $script:dialogShot=if($RenderPreview -and $PreviewDialog){$RenderPreview}else{$null}
+$script:testAnswers=[Collections.Generic.Queue[string]]::new([string[]]@(if($Answer){$Answer -split '>'|ForEach-Object {$_.Trim()}}))
+function Get-TestAnswer {
+ # The answer of tests to the next question: the next of the answers joined by '>', the last one for good.
+ if($script:testAnswers.Count -gt 1){$script:testAnswers.Dequeue()}elseif($script:testAnswers.Count){$script:testAnswers.Peek()}else{''}
+}
+function Show-ListText([string]$Title,[string]$Text) {
+ # A long list to read before deciding: a window with the text, scrolled, that can be selected and copied.
+ # Tests never get the window: the text goes to the test log (ListShown), or into the picture of -RenderPreview.
+ $script:testLog.ListShown=@($script:testLog.ListShown|Where-Object {$_})+$Text
+ if(-not $script:dialogShot -and ($Answer -or $script:testMode)){return}
+ $f=if($Quiet){[DevDriveBackupQuietForm]::new()}else{[Windows.Forms.Form]::new()}
+ $f.Text=$Title;$f.Font=$dialogFont;$f.FormBorderStyle='Sizable';$f.MinimizeBox=$false;$f.ClientSize=[Drawing.Size]::new(760,560);$f.MinimumSize=[Drawing.Size]::new(480,320)
+ $owner=if($form.Visible -and -not $script:dialogShot){$form}else{$null}
+ $f.StartPosition=if($owner){'CenterParent'}else{'CenterScreen'};$f.ShowInTaskbar=-not $owner -and -not $Quiet
+ if($form.Icon){$f.Icon=$form.Icon}
+ try{
+  $box=New-Control TextBox $f 16 16 728 480
+  $box.Multiline=$true;$box.ReadOnly=$true;$box.ScrollBars='Both';$box.WordWrap=$false;$box.Anchor='Top,Bottom,Left,Right';$box.BackColor=$ui.Surface;$box.ForeColor=$ui.Ink
+  $box.Text=$Text.Replace("`r`n","`n").Replace("`n","`r`n")
+  $close=New-Control Button $f (760-16-110) 512 110 32 'Close';$close.Anchor='Bottom,Right';$close.DialogResult='Cancel';$f.CancelButton=$close;$f.AcceptButton=$close
+  if($script:dialogShot){
+   $f.StartPosition='Manual';$f.Location=[Drawing.Point]::new(-30000,-30000);$f.Show();[Windows.Forms.Application]::DoEvents()
+   $bitmap=[Drawing.Bitmap]::new($f.Width,$f.Height);try{$f.DrawToBitmap($bitmap,[Drawing.Rectangle]::new(0,0,$f.Width,$f.Height));$bitmap.Save($script:dialogShot)}finally{$bitmap.Dispose()}
+   $f.Close();return
+  }
+  $box.SelectionLength=0;$f.ActiveControl=$close
+  [void]$f.ShowDialog($owner)
+ }finally{$f.Dispose()}
+}
 function Show-Choice([string]$Title,[string]$Text,[string[]]$Choices,[switch]$Careful,[string]$CancelText='Cancel') {
  # One question with every answer named on its own button, instead of Yes / No / Cancel whose meaning
  # has to be worked out from the text. Returns the number of the chosen answer (0 = the first), or -1
@@ -281,7 +310,7 @@ function Show-Choice([string]$Title,[string]$Text,[string[]]$Choices,[switch]$Ca
  # Tests never get a box to click: -Answer chooses by the start of a button's text, a preview of the
  # question is drawn into the picture, and any other test run gets Cancel.
  if(-not $script:dialogShot){
-  if($Answer){for($i=0;$i -lt $Choices.Count;$i++){if($Choices[$i] -like "$Answer*"){return $i}};return -1}
+  if($Answer){$a=Get-TestAnswer;for($i=0;$i -lt $Choices.Count;$i++){if($Choices[$i] -like "$a*"){return $i}};return -1}
   if($script:testMode){return -1}
  }
  $w=620;$inner=$w-32
@@ -1345,9 +1374,18 @@ function Request-RetentionApproval($Profile,$Preview){
  # (old versions, old recovery folders of plain copies). True = approved. Approving deletes nothing by
  # itself: the list is stored, the next backup deletes what is in it and nothing else, and only after
  # that backup the clean-up runs by the rule (see Set-CenterRetentionApproved).
+ # Show the full list opens every item of it and comes back to the question: the list shown in full and
+ # the list that approving stores are the same $Preview.
  if(-not $Preview -or -not $Preview.Count){return $false}
  $r=Get-CenterVersionRetention $Profile
- if((Show-Choice 'Clean-up of old backups' (Format-CenterRetentionPreview $Preview $r.Last $r.Months) @('Approve clean-up') -Careful -CancelText 'Not now') -ne 0){return $false}
+ for($asked=0;;$asked++){
+  # Tests that keep asking for the list stop here instead of going round for ever.
+  if($asked -ge 20){return $false}
+  $i=Show-Choice 'Clean-up of old backups' (Format-CenterRetentionPreview $Preview $r.Last $r.Months) @('Approve clean-up',"Show the full list ($($Preview.Count) items)") -Careful -CancelText 'Not now'
+  if($i -eq 1){Show-ListText 'Clean-up of old backups: the full list' (Format-CenterRetentionList $Preview);continue}
+  if($i -ne 0){return $false}
+  break
+ }
  Set-CenterRetentionApproved $script:data $Profile.Id $Preview;Show-SaveNote
  $done='Approved. Nothing was deleted now: the next backup deletes what was listed and nothing else. After it the clean-up runs by itself after every backup.'
  $runStatus.Text=$done
@@ -1668,6 +1706,7 @@ $form.Add_Shown({
   if($s -and $PreviewDialog -eq 'Repair'){$st=Get-CenterRepairState $script:history $s.Id;if(-not $st.Needed){$st=[pscustomobject]@{Needed=$true;Differences=3;When=(Get-Date).AddHours(-2);Details=''}};[void](Request-Repair $s $st)}
   if($p -and $PreviewDialog -eq 'KeepVersions'){[void](Show-VersionRetentionDialog $p)}
   if($p -and $PreviewDialog -eq 'RetentionPreview'){[void](Request-RetentionApproval $p (Get-SampleRetentionPreview $p))}
+  if($p -and $PreviewDialog -eq 'RetentionList'){Show-ListText 'Clean-up of old backups: the full list' (Format-CenterRetentionList (Get-SampleRetentionPreview $p))}
   $form.Close();return
  }
  if($TestAction -eq 'Refresh'){
@@ -1703,7 +1742,7 @@ $form.Add_Shown({
  }
  # Answered by -Answer in a test run (see Show-VersionRetentionDialog and Show-Choice); what follows is what the link and the end of a run do.
  if($PreviewDialog -eq 'KeepVersions'){if($script:testMode){Edit-VersionRetention}else{[void]$form.BeginInvoke([Action]{try{Edit-VersionRetention}catch{Show-Error $_}})}}
- if($PreviewDialog -eq 'RetentionPreview'){$p=Get-SelectedProfile;if($p){$pv=Get-SampleRetentionPreview $p;$script:testLog.Retention=[ordered]@{Count=$pv.Count;Approved=[bool](Request-RetentionApproval $p $pv)}}}
+ if($PreviewDialog -eq 'RetentionPreview'){$p=Get-SelectedProfile;if($p){$pv=Get-SampleRetentionPreview $p;$script:testLog.Retention=[ordered]@{Count=$pv.Count;Approved=[bool](Request-RetentionApproval $p $pv);FullList=Format-CenterRetentionList $pv}}}
  if($RenderPreview){
   if($PreviewWidth -gt 0){$form.ClientSize=[Drawing.Size]::new($PreviewWidth,$PreviewHeight);[Windows.Forms.Application]::DoEvents();Set-Zoom}
   Show-Page $PreviewTab;[Windows.Forms.Application]::DoEvents()

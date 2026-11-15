@@ -1140,9 +1140,35 @@ function Get-CenterRetentionPreview($Results) {
  $versions=@($versions|Sort-Object @{Expression={if($_.Time){$_.Time}else{[datetime]::MinValue}}})
  [pscustomobject]@{Versions=$versions;RecoveryFolders=$folders;Count=$versions.Count+$folders.Count}
 }
+function Format-CenterRetentionVersionLine($c,[bool]$Hosts) {
+ # One version of a clean-up list: source, date, partial, computer (when the list has several), folders
+ # and the version's ID as the history shows it (its first 8 characters).
+ $when=if($c.Time){$c.Time.ToString('d MMM yyyy, HH:mm',[cultureinfo]::InvariantCulture)}else{'unknown date'}
+ $id=[string]$c.Id;$short=if($id.Length -gt 8){$id.Substring(0,8)}else{$id}
+ "  - $($c.Label): $when$(if($c.Partial){', partial'})$(if($Hosts -and $c.Host){", computer $($c.Host)"})$(if($c.Paths.Count){' - '+($c.Paths -join ', ')})$(if($short){" ($short)"})"
+}
+function Format-CenterRetentionFolderLine($c) {
+ # One recovery folder of a clean-up list. A folder named by the time of the backup that made it
+ # (yyyyMMdd-HHmmss) is shown with that date as well.
+ $t=[datetime]::MinValue;$dated=[datetime]::TryParseExact($c.Name,'yyyyMMdd-HHmmss',[cultureinfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$t)
+ "  - $($c.Label): $(if($dated){$t.ToString('d MMM yyyy, HH:mm',[cultureinfo]::InvariantCulture)+" ($($c.Name))"}else{$c.Name})"
+}
+function Format-CenterRetentionList($Preview) {
+ # Every item of a clean-up list, none left out ('' = nothing): what "Show the full list" opens from the
+ # question before the first clean-up. It is the same list that approving stores.
+ if(-not $Preview -or -not $Preview.Count){return ''}
+ $v=@($Preview.Versions);$f=@($Preview.RecoveryFolders)
+ $lines=@("Everything the clean-up would delete on the backup drive ($($Preview.Count) items). Nothing has been deleted yet.")
+ if($v.Count){
+  $hosts=@($v|ForEach-Object {$_.Host}|Where-Object {$_}|Sort-Object -Unique).Count -gt 1
+  $lines+=@('',"Old versions ($($v.Count)), oldest first:");foreach($c in $v){$lines+=Format-CenterRetentionVersionLine $c $hosts}
+ }
+ if($f.Count){$lines+=@('',"Recovery folders with files deleted from the plain copy ($($f.Count)):");foreach($c in $f){$lines+=Format-CenterRetentionFolderLine $c}}
+ $lines -join "`n"
+}
 function Format-CenterRetentionPreview($Preview,[int]$Last,[int]$Months) {
  # The text of the one question asked before the first clean-up ('' = nothing to ask). Long lists are
- # shortened so the box stays on the screen; the full list is in the run's details.
+ # shortened so the box stays on the screen; Show the full list opens every item (Format-CenterRetentionList).
  if(-not $Preview -or -not $Preview.Count){return ''}
  $lines=@('This is what the clean-up would delete on the backup drive. Nothing has been deleted yet.')
  $v=@($Preview.Versions);$f=@($Preview.RecoveryFolders)
@@ -1150,26 +1176,21 @@ function Format-CenterRetentionPreview($Preview,[int]$Last,[int]$Months) {
   # The computer is named only when the list holds versions of more than one.
   $hosts=@($v|ForEach-Object {$_.Host}|Where-Object {$_}|Sort-Object -Unique).Count -gt 1
   $lines+=@('',"Old versions ($($v.Count)):")
-  foreach($c in @($v|Select-Object -First 10)){
-   $when=if($c.Time){$c.Time.ToString('d MMM yyyy, HH:mm',[cultureinfo]::InvariantCulture)}else{'unknown date'}
-   $lines+="  - $($c.Label): $when$(if($c.Partial){', partial'})$(if($hosts -and $c.Host){", computer $($c.Host)"})$(if($c.Paths.Count){' - '+($c.Paths -join ', ')})"
-  }
+  foreach($c in @($v|Select-Object -First 10)){$lines+=Format-CenterRetentionVersionLine $c $hosts}
   if($v.Count -gt 10){$lines+="  - and $($v.Count-10) more versions"}
  }
  if($f.Count){
   # A recovery folder is named by the time of the backup that made it (yyyyMMdd-HHmmss); shown as a date.
   $lines+=@('',"Recovery folders with files deleted from the plain copy ($($f.Count)):")
-  foreach($c in @($f|Select-Object -First 6)){
-   $t=[datetime]::MinValue;$dated=[datetime]::TryParseExact($c.Name,'yyyyMMdd-HHmmss',[cultureinfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$t)
-   $lines+="  - $($c.Label): $(if($dated){$t.ToString('d MMM yyyy, HH:mm',[cultureinfo]::InvariantCulture)+" ($($c.Name))"}else{$c.Name})"
-  }
+  foreach($c in @($f|Select-Object -First 6)){$lines+=Format-CenterRetentionFolderLine $c}
   if($f.Count -gt 6){$lines+="  - and $($f.Count-6) more"}
  }
+ if($v.Count -gt 10 -or $f.Count -gt 6){$lines+=@('',"Show the full list opens all $($Preview.Count) items before you decide.")}
  if($v.Count){
   $points=@(Get-CenterRetentionPoints $Last $Months)
   $lines+=@('',$points[0]);if(@($v|Where-Object {$_.Partial}).Count){$lines+=$points[1]};$lines+=$points[2]
  }
- $lines+=@('','Approve clean-up: the next backup deletes what is listed here and nothing else. After that backup the clean-up runs by this rule by itself.','Not now: nothing changes, and you are asked again after the next backup that has something to delete.')
+ $lines+=@('','Approve clean-up: the next backup deletes what is in this list and nothing else. After that backup the clean-up runs by this rule by itself.','Not now: nothing changes, and you are asked again after the next backup that has something to delete.')
  $lines -join "`n"
 }
 function Get-CenterSteps($Profile,[string[]]$SourceIds=@(),[ValidateSet('Backup','Verify','Repair')][string]$Purpose='Backup',[ValidateSet('','Mirror','Versioned')][string]$Kind='',[string[]]$NewRepositoryFor=@()) {
@@ -1429,7 +1450,7 @@ function Get-CenterStaleProfiles([datetime]$Now=(Get-Date)) {
   if($f.State -in @('Stale','Never')){[pscustomobject]@{Profile=$p;Freshness=$f}}
  }
 }
-Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterVersionRetention,Format-CenterVersionRetention,Set-CenterVersionRetention,Get-CenterRetentionPoints,Test-CenterRetentionConfirmed,Get-CenterRetentionState,Confirm-CenterRetention,Get-CenterRetentionPreview,Get-CenterRetentionExpected,Test-CenterRetentionPreviewWhole,Format-CenterRetentionPreview,Get-CenterDrive,Get-CenterCandidateDrives,
+Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterVersionRetention,Format-CenterVersionRetention,Set-CenterVersionRetention,Get-CenterRetentionPoints,Test-CenterRetentionConfirmed,Get-CenterRetentionState,Confirm-CenterRetention,Get-CenterRetentionPreview,Get-CenterRetentionExpected,Test-CenterRetentionPreviewWhole,Format-CenterRetentionPreview,Format-CenterRetentionList,Get-CenterDrive,Get-CenterCandidateDrives,
  New-CenterProfile,Remove-CenterProfile,Add-CenterSource,Remove-CenterSource,Read-CenterJob,Save-CenterJob,Get-CenterSourceKinds,Sync-CenterJob,
  Add-CenterHistory,Get-CenterHistory,Get-LastSuccess,Get-FreshnessState,Format-CenterAge,Get-CenterFreshness,ConvertTo-CenterTime,Format-CenterElapsed,Format-CenterRunDuration,Get-CenterRunSpeed,ConvertFrom-CenterToolJson,
  Get-CenterBusyReason,Get-CenterFreeBytes,Get-CenterVolumeQueryCount,

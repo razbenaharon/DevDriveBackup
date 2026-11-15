@@ -445,6 +445,13 @@ try{
  Check 'without a partial version in the list, the sentence about partial versions is left out' {$text -notlike '*A partial version is deleted*' -and $text -like '*Deleting a version frees only*'}
  $many=Get-CenterRetentionPreview @([pscustomobject]@{Label='L';SourceId='s';RetentionPreview=[pscustomobject]@{Versions=@(1..30|ForEach-Object {[pscustomobject]@{Id="v$_";Time=([datetime]'2026-01-01').AddDays($_).ToString('o');Partial=$false;Host='PC';Paths=@('E:\P')}});RecoveryFolders=@(1..30|ForEach-Object {"2025-01-{0:d2}" -f $_})}})
  Check 'a long list is shortened and says how many more there are' {$t=Format-CenterRetentionPreview $many 10 6;$many.Count -eq 60 -and $t -like '*and 20 more versions*' -and $t -like '*and 24 more*' -and @($t -split "`n").Count -lt 45}
+ Check 'the shortened question says where the full list is' {(Format-CenterRetentionPreview $many 10 6) -like '*Show the full list*all 60 items*'}
+ $listText=Format-CenterRetentionList $many
+ $fullLines=@($listText -split "`n")
+ Check 'the full list names every item the clean-up would delete, each once, with its ID or folder name' {@(1..30|Where-Object {$n=$_;@($fullLines|Where-Object {$_ -match "\(v$n\)$"}).Count -ne 1}).Count -eq 0 -and @(1..30|Where-Object {$n='2025-01-{0:d2}' -f $_;@($fullLines|Where-Object {$_.EndsWith($n)}).Count -ne 1}).Count -eq 0}
+ Check 'it says how many there are and that nothing is deleted yet, and has no "more" line' {$listText -like '*Old versions (30)*Recovery folders*(30)*' -and $listText -like '*Nothing has been deleted yet*' -and $listText -notlike '*more versions*' -and $listText -notlike '*and 24 more*'}
+ Check 'the full list of a short preview holds what the question shows' {$t=Format-CenterRetentionList $pv;$t -like '*1 Feb 2026, 09:30, partial*E:\Projects, E:\Docs*' -and $t -like '*2026-01-02_101500*2026-01-09_101500*' -and -not (Format-CenterRetentionList $none)}
+ Check 'a long version ID is shown by its first 8 characters, as the history shows it' {(Format-CenterRetentionList (Get-CenterRetentionPreview @([pscustomobject]@{Label='L';SourceId='s';RetentionPreview=[pscustomobject]@{Versions=@([pscustomobject]@{Id=('ab12'*16);Time='2026-01-05T10:00:00';Partial=$false;Host='PC';Paths=@('E:\P')});RecoveryFolders=@()}}))) -like '*(ab12ab12)*'}
  $h=@(Get-CenterHistory)
  Check 'every run above is in the history, readable, stopped ones marked' {$h.Count -eq 43 -and @($h|Where-Object {$_.PSObject.Properties['Stopped'] -and $_.Stopped}).Count -eq 3 -and @($h|Where-Object {$_.Finished -isnot [datetime]}).Count -eq 0}
 
