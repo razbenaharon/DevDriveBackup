@@ -167,16 +167,20 @@ try{
  # noted before the kill and waited for until Windows no longer knows them. Now and then Windows gives
  # the number of a process that ended to a new program straight away (busy computers do); the lock then
  # looks like one of a running program and is rightly kept, by restic and by the worker alike. That is
- # the case tested further down ("lock kept by restic"). Here such a run still runs the next step
- # ($Action, which changes nothing) and checks that its outcome is one of the two right ones: the lock
- # was removed by itself because the number became free meanwhile, or it was kept and the run says so
- # in plain words. Then the removal itself is named as skipped, the lock is removed from this disposable
- # repository by hand, and the test goes on.
- function Skip-TakenNumber([string]$What,[string]$Action){
+ # the case tested further down ("lock kept by restic"). It can happen before the wait above ends (the
+ # number is still taken) or just after it (the number is given out again before the next run looks).
+ # So the next run ($Action) decides, and only two outcomes are right: the lock is removed by itself
+ # ($Removed checks the details), or it is kept, nothing is removed, and the run says so in plain words,
+ # naming the number that is in use. Then the removal itself is named as skipped, the lock is removed
+ # from this disposable repository by hand, and the test goes on. Anything else fails with the result.
+ function Test-KilledLock([string]$What,[string]$Action,[int[]]$Numbers,[int]$Taken,[scriptblock]$Removed){
   $before=@(Lock-Names);$r=Run $Action @{} $null $moved;$after=@(Lock-Names)
-  $freed=$r.State -eq 'Completed' -and $r.LockReleased -and @($r.LockReleased.Locks|ForEach-Object {$_.Id}) -ccontains $before[0] -and $before[0] -cnotin $after
-  $kept=$r.State -eq 'Failed' -and $r.Error -like '*locked*Nothing is damaged*' -and $null -eq $r.LockReleased -and $before[0] -cin $after
-  Assert ($before.Count -eq 1 -and ($freed -or $kept)) "while the number of the ended run is still in use, $Action either removes its lock once the number is free or keeps it and says so in plain words; never a wrong success"
+  $freed=$before.Count -eq 1 -and $r.State -eq 'Completed' -and $r.LockReleased -and @($r.LockReleased.Locks|ForEach-Object {$_.Id}) -ccontains $before[0] -and $before[0] -cnotin $after
+  if($freed){& $Removed $r $before;return}
+  $named=@($Numbers|Where-Object {$_ -gt 0 -and $r.Error -match "$_"}).Count -gt 0
+  $kept=$before.Count -eq 1 -and $r.State -eq 'Failed' -and $r.Error -like '*locked*Nothing is damaged*' -and $null -eq $r.LockReleased -and $before[0] -cin $after -and ($Taken -or $named)
+  if(-not $kept){throw "FAIL $What (locks before: $($before -join ','); after: $($after -join ','); result: $($r|ConvertTo-Json -Depth 5 -Compress))"}
+  Write-Output "PASS while Windows had given the number of the ended run to another program, $Action kept its lock, removed nothing and said so in plain words"
   Write-Output "SKIP $What (Windows gave the number of the ended process to another program, so its lock was rightly kept)";foreach($n in @(Lock-Names)){Remove-Item -LiteralPath (Join-Path $repo "locks\$n") -Force}
  }
  Add-Type -Namespace BackupTest -Name Native -MemberDefinition '[DllImport("kernel32.dll",SetLastError=true)] public static extern System.IntPtr OpenProcess(uint access,bool inherit,int id);[DllImport("kernel32.dll")] public static extern bool CloseHandle(System.IntPtr handle);'
@@ -197,18 +201,17 @@ try{
  try{Wait-Lock}finally{$engines=Get-EngineIds;$worker.Kill($true);$worker.WaitForExit();$worker.Dispose();$taken=Wait-EngineGone $engines}
  $left=@(Lock-Names)
  Assert ($left.Count -eq 1 -and (Read-BackupStatus (Join-Path $killedRun 'status.json')).State -eq 'BackingUp' -and -not(Test-Path -LiteralPath (Join-Path $killedRun 'result.json'))) 'a backup whose worker is killed part way leaves its lock in the repository'
- if($taken){Skip-TakenNumber 'the next backup removes the lock of the killed run by itself' 'Check'}else{
- $healed=Run 'Backup' @{} $null $moved
- Assert ($healed.State -eq 'Completed' -and $healed.LockReleased.Stage -eq 'CheckingStructure' -and @($healed.LockReleased.Locks).Count -eq 1 -and $healed.LockReleased.Locks[0].Id -ceq $left[0] -and $healed.LockReleased.Locks[0].Pid -gt 0 -and $healed.LockReleased.Locks[0].Exclusive -eq $false -and $healed.LockReleased.Locks[0].CreatedUtc) 'the next backup removes the lock of the killed run by itself, completes, and records which lock it removed'
- Assert (@(Lock-Names).Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory 'CheckingStructure.locked.errors.log')) -like '*already locked*' -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory 'CheckingStructure.errors.log')) -notlike '*already locked*') 'the step that met the lock was tried once more and passed; what its first try reported is kept beside it'
+ # While the number is known to be taken, a check (which changes nothing) meets the lock instead of a backup.
+ $healAction=if($taken){'Check'}else{'Backup'};$healStage=if($taken){'Verifying'}else{'CheckingStructure'}
+ Test-KilledLock 'the next backup removes the lock of the killed run by itself' $healAction $engines $taken {param($healed,$left)
+  Assert ($healed.State -eq 'Completed' -and $healed.LockReleased.Stage -eq $healStage -and @($healed.LockReleased.Locks).Count -eq 1 -and $healed.LockReleased.Locks[0].Id -ceq $left[0] -and $healed.LockReleased.Locks[0].Pid -gt 0 -and $healed.LockReleased.Locks[0].Exclusive -eq $false -and $healed.LockReleased.Locks[0].CreatedUtc) 'the next run removes the lock of the killed backup by itself, completes, and records which lock it removed'
+  Assert (@(Lock-Names).Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory ($healStage+'.locked.errors.log'))) -like '*already locked*' -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory ($healStage+'.errors.log'))) -notlike '*already locked*') 'the step that met the lock was tried once more and passed; what its first try reported is kept beside it'
  }
  # A check that was killed leaves a lock of the other kind (exclusive), which stops even listing the versions.
  $check=Start-Engine @('--limit-download','20','check','--read-data')
  try{Wait-Lock}finally{$engines=@(Get-EngineIds)+@($check.Id);$check.Kill($true);$check.WaitForExit();$check.Dispose();$taken=Wait-EngineGone $engines}
- $left=@(Lock-Names)
- if($taken){Skip-TakenNumber 'the lock of a killed check is removed the same way when the versions are listed' 'Snapshots'}else{
- $listed=Run 'Snapshots' @{} $null $moved
- Assert ($left.Count -eq 1 -and $listed.State -eq 'Completed' -and $listed.LockReleased.Stage -eq 'ListingSnapshots' -and $listed.LockReleased.Locks[0].Id -ceq $left[0] -and $listed.LockReleased.Locks[0].Exclusive -eq $true -and @(Lock-Names).Count -eq 0) 'the lock of a killed check is removed the same way when the versions are listed'
+ Test-KilledLock 'the lock of a killed check is removed the same way when the versions are listed' 'Snapshots' $engines $taken {param($listed,$left)
+  Assert ($left.Count -eq 1 -and $listed.State -eq 'Completed' -and $listed.LockReleased.Stage -eq 'ListingSnapshots' -and $listed.LockReleased.Locks[0].Id -ceq $left[0] -and $listed.LockReleased.Locks[0].Exclusive -eq $true -and @(Lock-Names).Count -eq 0) 'the lock of a killed check is removed the same way when the versions are listed'
  }
 
  # --- A lock of a backup that is still running is never removed; a partial version that cannot be marked meanwhile ---
