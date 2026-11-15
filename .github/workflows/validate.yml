@@ -94,6 +94,16 @@ jobs:
       - name: Verify the window's data and run results
         shell: pwsh
         run: pwsh -NoProfile -File ./Test-BackupData.ps1
+      # Windows cuts a window down to the screen it is on, and the runner's screen (1024 x 768) is smaller
+      # than the window at full size, so the test would measure the runner instead of the window.
+      - name: Give the window tests a screen with room for the window
+        shell: powershell
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
+          Add-Type -AssemblyName System.Windows.Forms
+          $largest = [Windows.Forms.SystemInformation]::MaxWindowTrackSize
+          "Largest window Windows allows now: $($largest.Width) x $($largest.Height)"
+          if ($largest.Width -lt 1216 -or $largest.Height -lt 839) { throw 'The screen is still too small for the window at full size.' }
       - name: Verify the window opens on every page
         shell: pwsh
         run: pwsh -NoProfile -File ./Test-BackupWindow.ps1

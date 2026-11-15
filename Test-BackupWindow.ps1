@@ -7,6 +7,12 @@
 # is an identity no volume has, so the window shows it as not connected and can start nothing on it.
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'DevDriveBackup.Data.psm1') -Force
+# Windows cuts every window down to the largest size the screen allows. On a screen smaller than the
+# window at full size the sizes measured below would be the screen's, not the window's, so say that
+# instead of reporting misleading failures.
+Add-Type -AssemblyName System.Windows.Forms
+$largest=[Windows.Forms.SystemInformation]::MaxWindowTrackSize
+if($largest.Width -lt 1216 -or $largest.Height -lt 839){throw "The window tests need a screen that allows a window of 1216 x 839; this one allows $($largest.Width) x $($largest.Height). Use a larger screen resolution."}
 $script:failed=0
 function Check([string]$Message,[scriptblock]$Test){
  $ok=$false;$why=''
