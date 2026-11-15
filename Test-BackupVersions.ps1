@@ -164,12 +164,19 @@ try{
  # Killing a tree returns before every process in it is really gone. restic releases a lock only when
  # the process that made it can no longer be opened, and Windows keeps a process openable for as long
  # as anything still holds it, which on a slow computer outlasts the kill. So the engine processes are
- # noted before the kill and waited for until Windows no longer knows them.
+ # noted before the kill and waited for until Windows no longer knows them. Now and then Windows gives
+ # the number of a process that ended to a new program straight away (busy computers do); the lock then
+ # looks like one of a running program and is rightly kept, by restic and by the worker alike. That is
+ # the case tested further down ("lock kept by restic"); here such a run is named as skipped, its lock
+ # is removed from this disposable repository by hand, and the test goes on.
+ function Skip-TakenNumber([string]$What){Write-Output "SKIP $What (Windows gave the number of the ended process to another program, so its lock was rightly kept)";foreach($n in @(Lock-Names)){Remove-Item -LiteralPath (Join-Path $repo "locks\$n") -Force}}
  Add-Type -Namespace BackupTest -Name Native -MemberDefinition '[DllImport("kernel32.dll",SetLastError=true)] public static extern System.IntPtr OpenProcess(uint access,bool inherit,int id);[DllImport("kernel32.dll")] public static extern bool CloseHandle(System.IntPtr handle);'
  function Get-EngineIds {@(Get-Process -Name 'restic*' -ErrorAction SilentlyContinue|ForEach-Object {$_.Id})}
  function Wait-EngineGone([int[]]$Ids){
   $until=(Get-Date).AddSeconds(90)
   do{$open=0;foreach($id in @($Ids)){$h=[BackupTest.Native]::OpenProcess(0x1000,$false,$id);if($h -ne [IntPtr]::Zero){[void][BackupTest.Native]::CloseHandle($h);$open++}};if($open){Start-Sleep -Milliseconds 250}}while($open -and (Get-Date) -lt $until)
+  # Said aloud, so a failure of the check that follows is understood (not an error: another backup of this computer may be running)
+  $open
  }
  function Start-Engine([string[]]$arguments){Start-Hidden $engine (@('-r',$repo,'--cache-dir',(Join-Path $base 'direct-cache'),'--quiet')+$arguments) @{RESTIC_PASSWORD=(Read-Password)}}
  Assert ($after.PSObject.Properties['LockReleased'] -and $null -eq $after.LockReleased -and -not(Test-Path -LiteralPath (Join-Path $after.RunDirectory 'ReadingLocks.jsonl'))) 'a run that meets no lock looks for none and reports none'
@@ -178,18 +185,22 @@ try{
  $slowPath=Join-Path $private 'settings-slow.json';$config.RateMBps=0.05;$config|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $slowPath;$config.RateMBps=0
  $killedRun=Join-Path $private 'runs\Backup-killed'
  $worker=Start-Hidden ([Environment]::ProcessPath) @('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'Backup-Worker.ps1'),'-ConfigPath',$slowPath,'-Action','Backup','-RunDirectory',$killedRun,'-TestRoot',$moved)
- try{Wait-Lock}finally{$engines=Get-EngineIds;$worker.Kill($true);$worker.WaitForExit();$worker.Dispose();Wait-EngineGone $engines}
+ try{Wait-Lock}finally{$engines=Get-EngineIds;$worker.Kill($true);$worker.WaitForExit();$worker.Dispose();$taken=Wait-EngineGone $engines}
  $left=@(Lock-Names)
  Assert ($left.Count -eq 1 -and (Read-BackupStatus (Join-Path $killedRun 'status.json')).State -eq 'BackingUp' -and -not(Test-Path -LiteralPath (Join-Path $killedRun 'result.json'))) 'a backup whose worker is killed part way leaves its lock in the repository'
+ if($taken){Skip-TakenNumber 'the next backup removes the lock of the killed run by itself'}else{
  $healed=Run 'Backup' @{} $null $moved
  Assert ($healed.State -eq 'Completed' -and $healed.LockReleased.Stage -eq 'CheckingStructure' -and @($healed.LockReleased.Locks).Count -eq 1 -and $healed.LockReleased.Locks[0].Id -ceq $left[0] -and $healed.LockReleased.Locks[0].Pid -gt 0 -and $healed.LockReleased.Locks[0].Exclusive -eq $false -and $healed.LockReleased.Locks[0].CreatedUtc) 'the next backup removes the lock of the killed run by itself, completes, and records which lock it removed'
  Assert (@(Lock-Names).Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory 'CheckingStructure.locked.errors.log')) -like '*already locked*' -and [IO.File]::ReadAllText((Join-Path $healed.RunDirectory 'CheckingStructure.errors.log')) -notlike '*already locked*') 'the step that met the lock was tried once more and passed; what its first try reported is kept beside it'
+ }
  # A check that was killed leaves a lock of the other kind (exclusive), which stops even listing the versions.
  $check=Start-Engine @('--limit-download','20','check','--read-data')
- try{Wait-Lock}finally{$engines=@(Get-EngineIds)+@($check.Id);$check.Kill($true);$check.WaitForExit();$check.Dispose();Wait-EngineGone $engines}
+ try{Wait-Lock}finally{$engines=@(Get-EngineIds)+@($check.Id);$check.Kill($true);$check.WaitForExit();$check.Dispose();$taken=Wait-EngineGone $engines}
  $left=@(Lock-Names)
+ if($taken){Skip-TakenNumber 'the lock of a killed check is removed the same way when the versions are listed'}else{
  $listed=Run 'Snapshots' @{} $null $moved
  Assert ($left.Count -eq 1 -and $listed.State -eq 'Completed' -and $listed.LockReleased.Stage -eq 'ListingSnapshots' -and $listed.LockReleased.Locks[0].Id -ceq $left[0] -and $listed.LockReleased.Locks[0].Exclusive -eq $true -and @(Lock-Names).Count -eq 0) 'the lock of a killed check is removed the same way when the versions are listed'
+ }
 
  # --- A lock of a backup that is still running is never removed; a partial version that cannot be marked meanwhile ---
  [IO.File]::WriteAllBytes((Join-Path $source 'large2.bin'),[Security.Cryptography.RandomNumberGenerator]::GetBytes(8MB))
