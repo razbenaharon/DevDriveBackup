@@ -83,6 +83,38 @@ try{
  Assert ((@(Get-RoboExtraPaths $glued 'E:\Src\' @('G:\Mirror','')|Sort-Object) -join '|') -eq 'E:\Src\q\w\|E:\Src\swap\x\new.txt|E:\Src\swap2\y') 'and so is the source path'
  Assert ((@(Get-RoboExtraPaths @("`t  *EXTRA File `t`t 1`tG:\x\a.txtE:\y\b.txt") 'G:\' 'E:\') -join '|') -eq 'G:\x\a.txt') 'also when both sides are drive roots'
 
+ # --- Files robocopy could not copy because they were in use ------------------------------------
+ # Error records as robocopy writes them (two per file: the first try and the one retry), with the
+ # lines around them. The record names the source file, also when the copy's side refused.
+ $log=@(
+  "`t    New File  `t`t       8`tE:\Src\a\db.bin",
+  '2026/11/15 00:54:44 ERROR 32 (0x00000020) Copying File E:\Src\a\db.bin',
+  'The process cannot access the file because it is being used by another process.',
+  "`t    New File  `t`t      13`tE:\Src\a\sub\two.txtWaiting 1 seconds...",
+  "`t    New File  `t`t       8`tE:\Src\a\db.bin Retrying...",
+  '2026/11/15 00:54:46 ERROR 32 (0x00000020) Copying File E:\Src\a\db.bin',
+  'ERROR: RETRY LIMIT EXCEEDED.',
+  '2026/11/15 00:54:44 ERROR 5 (0x00000005) Copying File E:\Src\b\denied.txt',
+  'Access is denied.',
+  "2026/11/15 00:54:44 ERROR 33 (0x00000021) Copying File e:\src\c d\spa ce.pst`t    New File  `t`t       9`tE:\Src\a\one.txt",
+  '2026/11/15 00:54:44 ERROR 5 (0x00000005) Scanning Source Directory E:\Src\closed\',
+  '2026/11/15 00:54:44 ERROR 5 (0x00000005) Changing File Attributes G:\Mirror\x\y.txt',
+  '2026/11/15 00:54:44 ERROR 112 (0x00000070) Copying File E:\Src\big.iso',
+  '2026/11/15 00:54:44 ERROR 32 (0x00000021) Copying File E:\Src\not-a-record.txt',
+  '2026/11/06 17:34:00 FEHLER 32 (0x00000020) Datei wird kopiert E:\Src\de\gesperrt.txt',
+  "`t    New File  `t`t      32`tE:\Src\name 32 (0x00000020) in it.txt",
+  '')
+ $found=@(Get-RoboLockedFiles $log 'E:\Src\')
+ Assert ((@($found|ForEach-Object {"$($_.Path)=$($_.Code)"}) -join '|') -eq 'a\db.bin=32|b\denied.txt=5|c d\spa ce.pst=33|de\gesperrt.txt=32') 'files robocopy could not copy because they were in use, locked or refused are read from its error records, once each, also in another Windows language'
+ Assert (-not @($found|Where-Object {$_.Path -match 'closed|big\.iso|not-a-record|in it|two\.txt|y\.txt'}).Count) 'folders, other errors, paths on the backup drive and ordinary lines are not'
+ Assert (@(Get-RoboLockedFiles $log 'E:\Src' @(32)).Count -eq 2 -and @(Get-RoboLockedFiles @() 'E:\Src\').Count -eq 0) 'the error codes that count can be given, and no lines are no files'
+ # With /MT several records can share one line, after a tab or with nothing between them.
+ $shared=@("2026/11/15 00:54:44 ERROR 112 (0x00000070) Copying File E:\Src\big.iso`t2026/11/15 00:54:44 ERROR 32 (0x00000020) Copying File E:\Src\x\one.db2026/11/15 00:54:45 ERROR 33 (0x00000021) Copying File E:\Src\x\two.db")
+ Assert ((@(Get-RoboLockedFiles $shared 'E:\Src\'|ForEach-Object {"$($_.Path)=$($_.Code)"}) -join '|') -eq 'x\one.db=32|x\two.db=33') 'every error record on a line is read, also after a record that does not count'
+ # One try of a file refused, the next found it in use: in use is what is kept.
+ $both=@('2026/11/15 00:54:44 ERROR 5 (0x00000005) Copying File E:\Src\x\busy.db','2026/11/15 00:54:46 ERROR 32 (0x00000020) Copying File E:\Src\x\busy.db','2026/11/15 00:54:47 ERROR 5 (0x00000005) Copying File E:\Src\x\busy.db')
+ Assert ((@(Get-RoboLockedFiles $both 'E:\Src\'|ForEach-Object {"$($_.Path)=$($_.Code)"}) -join '|') -eq 'x\busy.db=32') 'a file refused at one try and in use at another is kept as in use'
+
  # --- Drive identity -----------------------------------------------------------------------
  $letter=$src.Substring(0,1)
  $other=@(Get-Volume|Where-Object {$_.DriveLetter -and [string]$_.DriveLetter -ne $letter -and $_.FileSystem}|Select-Object -First 1)

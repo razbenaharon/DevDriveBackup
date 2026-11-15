@@ -451,6 +451,154 @@ try{
   Assert ((Test-Path -LiteralPath (Join-Path $c.Recovery '20200101-000000\earlier.txt')) -and @($r.RecoveryRemoved).Count -eq 0) 'a run that could move nothing aside deletes no earlier recovery folder'
   Assert ($r.ExtrasMoved -eq 0 -and @(Get-ChildItem -LiteralPath $c.Recovery -Directory).Count -eq 1) 'and leaves no empty recovery folder behind'
  }
+
+ Section 'the clean-up deletes only the recovery folders that were approved' {
+  $c=New-Case 'prune-approved' @{'a\one.txt'='1';'a\two.txt'='2';'a\three.txt'='3';'a\four.txt'='4';'a\five.txt'='5';'a\six.txt'='6'} @{DefaultMode='Mirror';Choices=@()}
+  $r=Mirror $c @{SkipVerify=$true}
+  Assert ($r.RecoveryFolderCount -eq 0 -and @($r.RecoveryDeferred).Count -eq 0) 'a copy without recovery folders counts none, and nothing is put off'
+  foreach($old in '20200101-000000','20200202-000000','20200303-000000','20200404-000000'){Put (Join-Path $c.Recovery "$old\old.txt") 'old'}
+  Put (Join-Path $c.Recovery 'my-notes\n.txt') 'not ours'
+  $dated={(@(Get-ChildItem -LiteralPath $c.Recovery -Directory|Where-Object Name -match '^\d{8}-\d{6}$'|ForEach-Object {$_.Name}|Sort-Object) -join '|')}
+  # The names this run's own folder can get are on the list too: being listed never deletes it.
+  $soon=@(0..300|ForEach-Object {(Get-Date).AddSeconds($_).ToString('yyyyMMdd-HHmmss')})
+  [IO.File]::Delete((Join-Path $c.Source 'a\one.txt'))
+  $r=Mirror $c @{MoveExtras=$true;KeepRecovery=2;RecoveryApproved=@('20200101-000000','20200404-000000','20190101-000000')+$soon};$m1=[IO.Path]::GetFileName($r.RecoveryFolder)
+  Assert ((@($r.RecoveryRemoved) -join '|') -eq '20200101-000000' -and -not(Test-Path -LiteralPath (Join-Path $c.Recovery '20200101-000000'))) 'a folder is deleted only when the rule chooses it now and it is on the approved list'
+  Assert ((@($r.RecoveryDeferred|Sort-Object) -join '|') -eq '20200202-000000|20200303-000000' -and @($r.RecoveryWouldRemove).Count -eq 0) 'the others the rule would delete are left and named'
+  Assert ((& $dated) -eq "20200202-000000|20200303-000000|20200404-000000|$m1" -and $m1 -in $soon) 'a listed folder the rule no longer chooses, one that does not exist, and the folder of this run are not deleted'
+  Assert ($r.RecoveryFolderCount -eq 4 -and (Test-Path -LiteralPath (Join-Path $c.Recovery 'my-notes\n.txt'))) 'the summary counts the dated recovery folders left when the run ends, and no other folder'
+  [IO.File]::Delete((Join-Path $c.Source 'a\two.txt'))
+  $r=Mirror $c @{MoveExtras=$true;KeepRecovery=2;RecoveryApproved=@()};$m2=[IO.Path]::GetFileName($r.RecoveryFolder)
+  Assert (@($r.RecoveryRemoved).Count -eq 0 -and (@($r.RecoveryDeferred|Sort-Object) -join '|') -eq '20200202-000000|20200303-000000|20200404-000000' -and $r.RecoveryFolderCount -eq 5) 'an approved list that is empty deletes nothing'
+  [IO.File]::Delete((Join-Path $c.Source 'a\three.txt'))
+  $r=Mirror $c @{MoveExtras=$true;KeepRecovery=2;PreviewRecovery=$true;RecoveryApproved=@('20200202-000000')};$m3=[IO.Path]::GetFileName($r.RecoveryFolder)
+  Assert (@($r.RecoveryRemoved).Count -eq 0 -and @($r.RecoveryDeferred).Count -eq 0 -and (@($r.RecoveryWouldRemove|Sort-Object) -join '|') -eq "20200202-000000|20200303-000000|20200404-000000|$m1" -and $r.RecoveryFolderCount -eq 6) 'the preview wins over an approved list: nothing is deleted, and the choice of the rule is only named'
+  # The way the window runs the tool: the names as one argument, with commas between; an empty argument approves nothing.
+  $run={param($approved)
+   $psi=[Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+   foreach($a in @('-NoProfile','-File',$tool,'-ConfigPath',$c.Job,'-DestinationDrive','Z','-Folder','Copy','-TestRoot',$c.Root,'-CopyThreads','2','-MoveExtras','-KeepRecovery','2','-RecoveryApproved',$approved)){[void]$psi.ArgumentList.Add($a)}
+   $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
+   $p=[Diagnostics.Process]::Start($psi);$err=$p.StandardError.ReadToEndAsync();$out=$p.StandardOutput.ReadToEnd();$p.WaitForExit()
+   if($p.ExitCode){throw "The tool ended with exit code $($p.ExitCode): $($err.Result)"}
+   $out|ConvertFrom-Json
+  }
+  [IO.File]::Delete((Join-Path $c.Source 'a\four.txt'))
+  $r=& $run '';$m4=[IO.Path]::GetFileName($r.RecoveryFolder)
+  Assert (@($r.RecoveryRemoved).Count -eq 0 -and @($r.RecoveryDeferred).Count -eq 5 -and $r.RecoveryFolderCount -eq 7) 'an empty argument, as the window passes it, approves nothing'
+  [IO.File]::Delete((Join-Path $c.Source 'a\five.txt'))
+  $r=& $run "20200202-000000, 20200303-000000,$m1";$m5=[IO.Path]::GetFileName($r.RecoveryFolder)
+  Assert ((@($r.RecoveryRemoved|Sort-Object) -join '|') -eq "20200202-000000|20200303-000000|$m1" -and (@($r.RecoveryDeferred|Sort-Object) -join '|') -eq (@('20200404-000000',$m2,$m3|Sort-Object) -join '|') -and $r.RecoveryFolderCount -eq 5) 'the approved names can come as one argument with commas between'
+  [IO.File]::Delete((Join-Path $c.Source 'a\six.txt'))
+  $r=Mirror $c @{MoveExtras=$true;KeepRecovery=2}
+  Assert (@($r.RecoveryRemoved).Count -eq 4 -and @($r.RecoveryDeferred).Count -eq 0 -and $r.RecoveryFolderCount -eq 2 -and (& $dated) -eq (@($m5,[IO.Path]::GetFileName($r.RecoveryFolder)|Sort-Object) -join '|')) 'without an approved list the rule deletes what it chooses, as before'
+  $r=Mirror $c @{VerifyOnly=$true}
+  Assert ($r.RecoveryFolderCount -eq 2 -and @($r.RecoveryDeferred).Count -eq 0) 'a content check counts the recovery folders too, and deletes none'
+ }
+
+ Section 'a file that stays in use' {
+  $c=New-Case 'locked' @{'keep\a.txt'='a';'keep\b.txt'='b';'data\db.bin'='held open by another program';'gone\old.txt'='deleted from the source later'} @{DefaultMode='Mirror';Choices=@()}
+  $marker=Join-Path $c.Root 'state\first-check-test-Copy.json'
+  $open={[IO.File]::Open((Join-Path $c.Source 'data\db.bin'),'Open','ReadWrite','None')}
+  $hold=& $open
+  try{$r=Mirror $c}finally{$hold.Dispose()}
+  Assert ((@($r.LockedFiles) -join '|') -eq 'data\db.bin' -and $r.LockedFilesCount -eq 1 -and [IO.File]::ReadAllText((Join-Path $r.RunFolder 'locked-files.txt')).Trim() -eq "data\db.bin`t32") 'a file another program holds open is named, by its path below the source'
+  Assert ($r.CopyErrors -ge 1 -and -not(Test-Path -LiteralPath $c.Success) -and -not(InCopy $c 'data\db.bin') -and (InCopy $c 'keep\a.txt')) 'the run is still a failed one: the file counts as a copy error and the copy is not recorded as complete'
+  $lines=@([IO.File]::ReadAllLines((Join-Path $r.RunFolder 'verify-differences.txt')))
+  Assert ($r.Verify.Differences -eq 1 -and $r.Verify.LockedDifferences -eq 1 -and $r.Verify.FilesMatched -eq 3 -and $lines.Count -eq 1 -and $lines[0] -match '^(ERROR|MISSING-IN-MIRROR)\tdata\\db\.bin(\t|$)') 'the full check shows the file in use as a difference, never as matched'
+  Assert ($r.FirstCheckDone -eq $true -and (Test-Path -LiteralPath $marker)) 'the check passed for every file that was copied, and that is remembered apart from a complete backup'
+  [IO.File]::Delete((Join-Path $c.Source 'gone\old.txt'))
+  $hold=& $open
+  try{$r=Mirror $c @{MoveExtras=$true}}finally{$hold.Dispose()}
+  Assert (-not $r.PSObject.Properties['Verify'] -and $r.FirstCheckDone -eq $true) 'the next run does not repeat the full check, although no run was complete yet'
+  Assert ($r.CopyErrors -ge 1 -and (@($r.LockedFiles) -join '|') -eq 'data\db.bin' -and -not(Test-Path -LiteralPath $c.Success)) 'it is a failed run again, and names the file again'
+  Assert ($r.ExtrasFound -eq 1 -and -not $r.PSObject.Properties['ExtrasMoved'] -and $r.ExtrasNotMovedReason -and (InCopy $c 'gone\old.txt') -and -not(Test-Path -LiteralPath $c.Recovery)) 'files gone from the source are still not moved aside after a run with copy errors'
+  $hold=& $open
+  try{$r=Mirror $c @{Verify=$true}}finally{$hold.Dispose()}
+  Assert ($r.Verify.Differences -eq 1 -and $r.Verify.LockedDifferences -eq 1 -and $r.Verify.FilesMatched -eq 2 -and $r.FirstCheckDone -eq $true) 'a content check that is asked for still runs, and still shows the file in use'
+  $hold=& $open
+  try{$r=Mirror $c @{VerifyOnly=$true}}finally{$hold.Dispose()}
+  Assert ($r.Verify.Differences -eq 1 -and $r.Verify.FilesMatched -eq 2 -and @($r.LockedFiles).Count -eq 0 -and (Test-Path -LiteralPath $marker)) 'so does a content check alone, which copies nothing and so names no file in use'
+  $r=Mirror $c @{MoveExtras=$true}
+  Assert ($r.CopyErrors -eq 0 -and @($r.LockedFiles).Count -eq 0 -and $r.LockedFilesCount -eq 0 -and -not $r.PSObject.Properties['Verify'] -and (Test-Path -LiteralPath $c.Success) -and (InCopy $c 'data\db.bin') -and $r.ExtrasMoved -eq 1) 'once the file is free, the run is an ordinary complete backup, and deleted files are moved aside again'
+  # A content check alone that passes is remembered the same way; a copy folder that is new is checked again.
+  $c=New-Case 'first-check' @{'keep\a.txt'='a'} @{DefaultMode='Mirror';Choices=@()}
+  $marker=Join-Path $c.Root 'state\first-check-test-Copy.json'
+  $r=Mirror $c @{SkipVerify=$true}
+  Assert ($r.FirstCheckDone -eq $false -and -not(Test-Path -LiteralPath $marker)) 'a run without a content check does not record one'
+  [IO.File]::Delete($c.Success)
+  $r=Mirror $c @{VerifyOnly=$true}
+  Assert ($r.Verify.Differences -eq 0 -and $r.FirstCheckDone -eq $true -and (Test-Path -LiteralPath $marker)) 'a content check alone that finds no difference is remembered as the first check'
+  $r=Mirror $c
+  Assert (-not $r.PSObject.Properties['Verify'] -and (Test-Path -LiteralPath $c.Success)) 'and the next backup does not check again'
+  [IO.File]::Delete($c.Success);[IO.Directory]::Delete($c.Copy,$true)
+  $r=Mirror $c
+  Assert ($r.PSObject.Properties['Verify'] -and $r.Verify.FilesMatched -eq 1) 'a copy folder that is new is checked in full again, whatever was remembered'
+  [IO.File]::Delete($c.Success);Put (Join-Path $c.Root 'other\a.txt') 'another source'
+  $other=[pscustomobject]@{Root=$c.Root;Source=(Join-Path $c.Root 'other');Copy=$c.Copy;Job=$c.Job;Config=$c.Config}
+  $r=Mirror $other
+  Assert ($r.PSObject.Properties['Verify']) 'and so is a copy whose source is another folder now'
+ }
+
+ Section 'a file in use, and a real difference beside it' {
+  # The copy holds a file of the same size and time as the source, with other content: robocopy
+  # leaves it alone, and only the content check finds it.
+  $c=New-Case 'locked-diff' @{'keep\a.txt'='a';'keep\same.txt'='right';'data\db.bin'='held open by another program'} @{DefaultMode='Mirror';Choices=@()}
+  $marker=Join-Path $c.Root 'state\first-check-test-Copy.json'
+  Put (Join-Path $c.Copy 'keep\same.txt') 'WRONG'
+  [IO.File]::SetLastWriteTimeUtc((Join-Path $c.Copy 'keep\same.txt'),[IO.File]::GetLastWriteTimeUtc((Join-Path $c.Source 'keep\same.txt')))
+  $open={[IO.File]::Open((Join-Path $c.Source 'data\db.bin'),'Open','ReadWrite','None')}
+  $hold=& $open
+  try{$r=Mirror $c}finally{$hold.Dispose()}
+  Assert ($r.Verify.Differences -eq 2 -and $r.Verify.LockedDifferences -eq 1 -and $r.FirstCheckDone -eq $false -and -not(Test-Path -LiteralPath $marker)) 'a difference in a file that was not in use is not excused by the file in use: the first check is not done'
+  $hold=& $open
+  try{$r=Mirror $c}finally{$hold.Dispose()}
+  Assert ($r.PSObject.Properties['Verify'] -and $r.Verify.Differences -eq 2) 'so the next run checks in full again'
+  # A check that passed earlier does not outlive a backup whose check finds such a difference.
+  [IO.File]::WriteAllText((Join-Path $c.Copy 'keep\same.txt'),'right')
+  [IO.File]::SetLastWriteTimeUtc((Join-Path $c.Copy 'keep\same.txt'),[IO.File]::GetLastWriteTimeUtc((Join-Path $c.Source 'keep\same.txt')))
+  $hold=& $open
+  try{$r=Mirror $c}finally{$hold.Dispose()}
+  Assert ($r.Verify.Differences -eq 1 -and $r.FirstCheckDone -eq $true -and (Test-Path -LiteralPath $marker)) 'once only the file in use differs, the first check is done'
+  [IO.File]::WriteAllText((Join-Path $c.Copy 'keep\same.txt'),'WRONG')
+  [IO.File]::SetLastWriteTimeUtc((Join-Path $c.Copy 'keep\same.txt'),[IO.File]::GetLastWriteTimeUtc((Join-Path $c.Source 'keep\same.txt')))
+  $hold=& $open
+  try{$r=Mirror $c @{Verify=$true}}finally{$hold.Dispose()}
+  Assert ($r.Verify.Differences -eq 2 -and $r.FirstCheckDone -eq $false -and -not(Test-Path -LiteralPath $marker)) 'a later backup whose content check finds a real difference forgets the check that passed'
+  # The same after a content check on its own: a real difference it found must not stay hidden
+  # because the next backup trusts an earlier check.
+  [IO.File]::WriteAllText((Join-Path $c.Copy 'keep\same.txt'),'right')
+  [IO.File]::SetLastWriteTimeUtc((Join-Path $c.Copy 'keep\same.txt'),[IO.File]::GetLastWriteTimeUtc((Join-Path $c.Source 'keep\same.txt')))
+  $hold=& $open
+  try{$r=Mirror $c}finally{$hold.Dispose()}
+  Assert ($r.FirstCheckDone -eq $true -and (Test-Path -LiteralPath $marker)) 'the first check is done again once the difference is gone'
+  [IO.File]::WriteAllText((Join-Path $c.Copy 'keep\same.txt'),'WRONG')
+  [IO.File]::SetLastWriteTimeUtc((Join-Path $c.Copy 'keep\same.txt'),[IO.File]::GetLastWriteTimeUtc((Join-Path $c.Source 'keep\same.txt')))
+  $r=Mirror $c @{VerifyOnly=$true}
+  Assert ($r.Verify.Differences -ge 1 -and $r.FirstCheckDone -eq $false -and -not(Test-Path -LiteralPath $marker)) 'a content check on its own that finds a real difference forgets the check that passed too'
+  $hold=& $open
+  try{$r=Mirror $c}finally{$hold.Dispose()}
+  Assert ($r.PSObject.Properties['Verify'] -and $r.Verify.Differences -ge 1) 'so the next backup checks the content in full again'
+ }
+
+ Section 'a file that may not be read' {
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $c=New-Case 'denied' @{'keep\a.txt'='a';'keep\denied.txt'='this account may not read it'} @{DefaultMode='Mirror';Choices=@()}
+  $file=Join-Path $c.Source 'keep\denied.txt'
+  & icacls.exe $file /deny "*${sid}:(RD)" /Q 2>&1|Out-Null
+  $made=$LASTEXITCODE -eq 0 -and -not $(try{[IO.File]::OpenRead($file).Dispose();$true}catch{$false})
+  if($made){
+   try{$r=Mirror $c @{SkipVerify=$true}}finally{& icacls.exe $file /remove:d "*${sid}" /Q 2>&1|Out-Null}
+   Assert ($r.CopyErrors -ge 1 -and (@($r.LockedFiles) -join '|') -eq 'keep\denied.txt' -and $r.LockedFilesCount -eq 1 -and [IO.File]::ReadAllText((Join-Path $r.RunFolder 'locked-files.txt')).Trim() -eq "keep\denied.txt`t5" -and -not(Test-Path -LiteralPath $c.Success)) 'a source file this account may not read is named like a file in use, and the run fails'
+   $r=Mirror $c @{SkipVerify=$true}
+   Assert ($r.CopyErrors -eq 0 -and $r.LockedFilesCount -eq 0 -and (InCopy $c 'keep\denied.txt')) 'once it may be read it is copied'
+   # The same error from the side of the backup drive is a problem of that drive, not a file in use.
+   [IO.File]::WriteAllText((Join-Path $c.Source 'keep\a.txt'),'a, changed and longer')
+   $copy=Join-Path $c.Copy 'keep\a.txt'
+   & icacls.exe $copy /deny "*${sid}:(WD,AD,WA,WEA,DE)" /Q 2>&1|Out-Null
+   try{$r=Mirror $c @{SkipVerify=$true}}finally{& icacls.exe $copy /remove:d "*${sid}" /Q 2>&1|Out-Null}
+   Assert ($r.CopyErrors -ge 1 -and @($r.LockedFiles).Count -eq 0 -and $r.LockedFilesCount -eq 0) 'a file the backup drive refuses to take is a copy error, but not a file in use'
+  }else{Write-Output 'SKIP a file that may not be read: this account can read the file whatever its permissions say'}
+ }
 }finally{
  # Tidying up must not turn a passed run into a failed one. The junctions the tests made go first,
  # each by itself (never through them), since deleting a whole tree that holds one fails on some systems.

@@ -134,6 +134,42 @@ function Get-RoboExtraPaths([string[]]$Lines,[string]$Root,[string[]]$OtherRoots
  }
 }
 
+function Get-RoboLockedFiles([string[]]$Lines,[string]$SourceRoot,[int[]]$Codes=@(32,33,5)) {
+ # The source files a robocopy log names in an error record with one of Codes: 32 (another program
+ # is using the file), 33 (another program locked a part of it), 5 (access is denied). Each file
+ # once, as Path (below SourceRoot) and Code, in the order of the log; robocopy writes one record per
+ # try. A record reads "<date> <time> ERROR 32 (0x00000020) Copying File <full path>". The number
+ # with its hexadecimal twin is the same in every Windows language, so the record is known by that
+ # and not by the words. robocopy names the source file there even when it was the copy's side that
+ # refused, so the caller decides what an access-denied record means. Records about a folder (the
+ # path ends in a backslash) and about a path outside SourceRoot are left out. With /MT several
+ # records can share a line: every one is read, and a path ends at a tab, at the date and time that
+ # start the next record, or where the next full path starts. A file refused at one try (5) and in
+ # use at another (32, 33) is kept as in use.
+ $prefix=$SourceRoot.TrimEnd('\')+'\'
+ $record=[regex]::new('(?:^|\s)(\d{1,9}) \(0x([0-9A-Fa-f]{8})\) ')
+ $found=[ordered]@{}
+ foreach($line in $Lines){
+  if(-not $line){continue}
+  $all=@($record.Matches($line))
+  for($i=0;$i -lt $all.Count;$i++){
+   $m=$all[$i];$code=[int]$m.Groups[1].Value
+   if($code -ne [Convert]::ToInt64($m.Groups[2].Value,16) -or $code -notin $Codes){continue}
+   $from=$m.Index+$m.Length;$to=if($i+1 -lt $all.Count){$all[$i+1].Index}else{$line.Length}
+   $rest=($line.Substring($from,$to-$from) -split "`t")[0] -replace '\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\s+\S*$',''
+   $at=$rest.IndexOf($prefix,[StringComparison]::OrdinalIgnoreCase);if($at -lt 0){continue}
+   $path=$rest.Substring($at+$prefix.Length)
+   $next=$path.IndexOf($prefix,[StringComparison]::OrdinalIgnoreCase);if($next -ge 0){$path=$path.Substring(0,$next)}
+   $path=$path.TrimEnd(' ')
+   if(-not $path -or $path.EndsWith('\')){continue}
+   # The table of names ignores letter case, as Windows does; the first spelling is kept.
+   $key=$path.ToUpperInvariant()
+   if(-not $found.Contains($key)){$found[$key]=[pscustomobject]@{Path=$path;Code=$code}}elseif($found[$key].Code -eq 5 -and $code -ne 5){$found[$key].Code=$code}
+  }
+ }
+ $found.Values
+}
+
 function Get-RoboTotals([string]$Log) {
  # The summary rows (directories, files, bytes) each hold six numbers: total, copied, skipped,
  # mismatch, failed, extras. Reading the numbers rather than the labels also works on Windows
@@ -279,4 +315,4 @@ function Resolve-BackupExcludePath([string]$Root,[string]$Pattern) {
  $found
 }
 
-Export-ModuleMember -Function Get-BackupModeNames,Test-BackupModeIncludes,ConvertTo-SelectionPath,Get-BackupSelection,Get-BackupMode,Get-BackupRegions,Get-RoboExtraPaths,Test-BackupPathInside,Get-RoboTotals,Get-RoboRunResult,Get-MirrorLogName,Get-RecoveryFoldersToRemove,Move-BackupTypeSwap,Test-BackupLinkOnPath,Get-BackupSameDiskReason,Get-BackupSkippedName,Resolve-BackupExcludePath
+Export-ModuleMember -Function Get-BackupModeNames,Test-BackupModeIncludes,ConvertTo-SelectionPath,Get-BackupSelection,Get-BackupMode,Get-BackupRegions,Get-RoboExtraPaths,Get-RoboLockedFiles,Test-BackupPathInside,Get-RoboTotals,Get-RoboRunResult,Get-MirrorLogName,Get-RecoveryFoldersToRemove,Move-BackupTypeSwap,Test-BackupLinkOnPath,Get-BackupSameDiskReason,Get-BackupSkippedName,Resolve-BackupExcludePath

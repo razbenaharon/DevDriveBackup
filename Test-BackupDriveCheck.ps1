@@ -81,6 +81,30 @@ $m=@(Get-DriveEventFindings $moved 2 'E' $true $conn)
 Assert ($m.Count -eq 2 -and (@($m.Line) -join ' ') -match 'damaged area while using the drive, once' -and (@($m.Line) -join ' ') -match 'hardware error, once') 'entries from another drive under the same number are left out; this drive''s earlier connection counts'
 Assert (-not (@($m.Line) -join ' ').Contains('file system')) 'a letter entry from before this drive arrived is left out'
 Assert ((Get-DriveConnectionKey '' 'Model X' 500) -eq (Get-DriveConnectionKey 'NULL' 'Model X' 500)) 'a drive without a serial number is known by model and size'
+# Entries older than the oldest arrival Windows still records for this disk number: nobody can say
+# which drive they were about. They are counted in a note of their own and change no verdict.
+Assert (-not @($m|Where-Object {$_.Line -match 'could not be matched'}).Count) 'entries that can all be matched to a drive leave no note'
+$older=@(
+ [pscustomobject]@{ProviderName='disk';Id=7;TimeCreated=$now.AddDays(-25);Message='\Device\Harddisk2\DR1 bad block'}
+ [pscustomobject]@{ProviderName='disk';Id=153;TimeCreated=$now.AddDays(-28);Message='The IO operation was retried. \Device\Harddisk2\DR1'}
+ [pscustomobject]@{ProviderName='disk';Id=7;TimeCreated=$now.AddDays(-27);Message='\Device\Harddisk5\DR1 bad block'}
+ [pscustomobject]@{ProviderName='Ntfs';Id=55;TimeCreated=$now.AddDays(-26);Message='corruption on volume E:'}
+)
+$u=@(Get-DriveEventFindings (@($moved)+$older) 2 'E' $true $conn)
+$note=@($u|Where-Object {$_.Line -match 'could not be matched'})
+Assert ($note.Count -eq 1 -and $note[0].Group -eq 'Connection' -and $note[0].Line -match '^Windows log: 2 older disk entries could not be matched to a drive' -and $note[0].Line -match 'not counted for or against this drive') 'disk entries older than every arrival Windows still records for that number are counted in one note; another disk number and a letter are not'
+Assert ((@($u|Where-Object {$_.Line -notmatch 'could not be matched'}|ForEach-Object {$_.Line}|Sort-Object) -join '|') -eq (@($m|ForEach-Object {$_.Line}|Sort-Object) -join '|')) 'the entries that are matched count exactly as before'
+$one=@(Get-DriveEventFindings @($older[0]) 2 'E' $true $conn)
+Assert ($one.Count -eq 1 -and $one[0].Line -match '^Windows log: 1 older disk entry could not be matched to a drive' -and $one[0].Line -match 'it is not counted') 'a single such entry reads as one'
+Assert (@(Get-DriveEventFindings $older 2 'E' $true|Where-Object {$_.Line -match 'could not be matched'}).Count -eq 0) 'without any arrival record only the disk number is compared, as before, and there is no note'
+foreach($status in 'OK','Warning','Unavailable','NotRun'){
+ $g=Merge-DriveEvents (New-DriveGroup $status 'own line') $one 'Connection'
+ Assert ($g.Status -eq $status -and (@($g.Lines) -join '|') -eq ('own line|'+$one[0].Line)) "the note changes no verdict (a connection group that is $status stays $status) and stands after the group's own lines"
+}
+$g=Merge-DriveEvents (New-DriveGroup 'OK' 'own line') $u 'Connection'
+Assert ($g.Status -eq 'OK' -and $g.Lines[-1] -eq $note[0].Line -and $g.Lines.Count -eq 2) 'beside matched entries of other groups it still changes nothing'
+$view=Get-DriveCheckView ([pscustomobject]@{Finished=$now.ToString('o');Sample=$sample;Events=$one;Health=(New-DriveGroup 'OK' 'x');Connection=(Merge-DriveEvents (New-DriveGroup 'OK' 'y') $one 'Connection');FileSystem=(New-DriveGroup 'OK' 'z')}) $null
+Assert ($view.Overall -eq 'OK' -and $view.Summary -eq 'no problems' -and @($view.Groups.Values|Where-Object {$_.Status -ne 'OK'}).Count -eq 0) 'and no group of the view is worse for it'
 $view=Get-DriveCheckView ([pscustomobject]@{Finished=$now.ToString('o');Sample=$sample;Events=$found;Health=(New-DriveGroup 'OK' 'x');Connection=(New-DriveGroup 'OK' 'y');FileSystem=(New-DriveGroup 'OK' 'z')}) $null
 Assert ($view.Groups.Surface.Status -eq 'Problem' -and $view.Overall -eq 'Problem') 'a log entry can make a group and the whole check worse'
 Assert ((Get-DriveCheckView $null $null).Overall -eq 'NotRun') 'a drive never checked has no verdict'
@@ -197,6 +221,80 @@ try{
  [BackupDriveScanner]::Fault=$null
  $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
  Assert ($r.Stopped -and $r.Bytes -eq 0) 'a stop request made before the first read stops at once'
+
+ # --- A drive that stops answering in the middle of the scan -----------------------------------------
+ # 1117 (I/O device error) and 31 (device not functioning) come from a damaged place and from a drive
+ # that was disconnected alike. What tells them apart: a disconnected drive answers nowhere any more.
+ Remove-Item -LiteralPath $stop
+ $script:dead=$false
+ # The drive goes away while the second chunk is read: from then on every read fails.
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB){$script:dead=$true};if($script:dead){1117}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert ($r.Disconnected -and $r.DisconnectCode -eq 1117 -and -not $r.Stopped) 'a whole chunk that fails with an I/O device error, on a drive that answers nowhere any more, ends the scan as disconnected'
+ Assert ($r.BadCount -eq 0 -and @($r.Bad).Count -eq 0 -and $r.RecoveredCount -eq 0) 'and nothing of that chunk is recorded as a bad area'
+ Assert ($r.Bytes -eq 4MB) 'the position stays at the chunk that could not be read, so the scan continues there'
+ $script:dead=$false
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB){$script:dead=$true};if($script:dead){31}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert ($r.Disconnected -and $r.DisconnectCode -eq 31 -and $r.BadCount -eq 0 -and $r.Bytes -eq 4MB) 'the same for the error that says the device is not functioning'
+ # The first pieces fail with an I/O device error, then Windows says outright that the drive is gone.
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -lt 4MB){0}elseif($pos -lt 4MB+128KB -or $n -eq 4MB){1117}else{21}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert ($r.Disconnected -and $r.DisconnectCode -eq 21 -and $r.BadCount -eq 0 -and $r.Bytes -eq 4MB) 'a drive that turns out to be gone after nothing but such errors in the chunk ends the scan the same way'
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB){21}else{0}}
+ $gone=try{[void][BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old);''}catch{$_.Exception.GetBaseException().Message}
+ Assert ($gone -match 'stopped answering \(21\)') 'a drive that Windows reports as gone at once still ends the check with that error, as before'
+ # The drive goes away in the middle of a chunk: its first piece still reads, the rest fail, and
+ # the drive answers nowhere afterwards. Nothing of that chunk is a bad area either.
+ $script:dead=$false
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($script:dead){return 1117};if($pos -eq 4MB -and $n -eq 4MB){return 23};if($pos -ge 4MB+64KB){$script:dead=$true;return 1117};0}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert ($r.Disconnected -and $r.DisconnectCode -eq 1117 -and $r.BadCount -eq 0 -and $r.Bytes -eq 4MB) 'a drive that goes away in the middle of a chunk ends the scan as disconnected too, with nothing recorded as bad'
+ # Only some pieces fail: that is a place on the disk, not the connection.
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB -and $pos -lt 8MB -and ($n -eq 4MB -or $pos -lt 4MB+192KB)){1117}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert (-not $r.Disconnected -and $r.BadCount -eq 3 -and $r.Bad[0].Offset -eq 4MB -and $r.Bad[0].Code -eq 1117 -and $r.Bytes -eq 12MB) 'a chunk where only some pieces fail with an I/O device error is recorded as bad areas, as before'
+ # Every piece fails with an ordinary read error.
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB -and $pos -lt 8MB){23}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert (-not $r.Disconnected -and $r.BadCount -eq 64 -and $r.Bad[0].Code -eq 23 -and $r.Bytes -eq 12MB) 'a whole chunk that fails with an ordinary read error is recorded as bad areas, as before'
+ # Every piece fails with an I/O device error, twice, while the rest of the drive still reads: a
+ # damaged stretch. Ending the scan there would end it there every time it is continued.
+ $script:reads=0
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB -and $pos -lt 8MB){$script:reads++;1117}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert (-not $r.Disconnected -and $r.BadCount -eq 64 -and $r.Bad[0].Code -eq 1117 -and $r.Bytes -eq 12MB) 'a whole chunk that fails with an I/O device error while the drive still answers elsewhere is a damaged stretch: recorded, and the scan goes on'
+ Assert ($script:reads -eq 129) 'after it was read a second time, to be sure'
+ # The same on the first chunk of a scan that is continued: the drive is asked at its start and further on.
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB -and $pos -lt 8MB){1117}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,4MB,8MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert (-not $r.Disconnected -and $r.BadCount -eq 64 -and $r.Bytes -eq 8MB) 'also when the scan starts at that stretch'
+ # A short break in the connection: the chunk fails once whole and reads at the second look.
+ $script:reads=0
+ [BackupDriveScanner]::Fault=[Func[long,int,int]]{param($pos,$n) if($pos -ge 4MB -and $pos -lt 8MB -and $script:reads -lt 65){$script:reads++;1117}else{0}}
+ $r=[BackupDriveScanner]::Read($disk,0,12MB,512,1000,$stop,$old)|ConvertFrom-Json
+ Assert (-not $r.Disconnected -and $r.BadCount -eq 0 -and $r.RecoveredCount -eq 1 -and $r.Recovered[0].Offset -eq 4MB -and $r.Bytes -eq 12MB) 'a chunk that failed whole during a short break and reads afterwards is a place that needed a second try, not a bad area'
+ [BackupDriveScanner]::Fault=$null
+
+ # What the scan record and the view make of it.
+ $cut=New-DriveScanState 'SER|1' 12MB $null
+ Update-DriveScanState $cut ([pscustomobject]@{Bytes=4MB;Stopped=$false;Seconds=1.5;BadCount=0;Bad=@();RecoveredCount=0;Recovered=@();SlowCount=0;VerySlowCount=0;Slow=@();Disconnected=$true;DisconnectCode=1117}) 0
+ $cut=$cut|ConvertTo-Json -Depth 8|ConvertFrom-Json
+ Assert ($cut.Disconnected -and $cut.DisconnectOffset -eq 4MB -and $cut.DisconnectCode -eq 1117 -and $cut.NextOffset -eq 4MB -and -not $cut.Complete -and $cut.BadCount -eq 0) 'the scan record says how the scan ended and keeps the place to continue from'
+ $s=Get-DriveSurfaceFindings $sample $cut
+ Assert ($s.Status -eq 'NotRun' -and ($s.Lines -join ' ') -match 'not completed' -and ($s.Lines -join ' ') -match 'may have been disconnected \(cable, USB box, power\)' -and ($s.Lines -join ' ') -notmatch 'could not be read') 'a scan that ended that way is neither fine nor damaged: reading the disk counts as not checked, and the line says the drive may have been disconnected'
+ $view=Get-DriveCheckView ([pscustomobject]@{Finished=$now.ToString('o');Sample=$sample;Events=@();Health=(New-DriveGroup 'OK' 'x');Connection=(New-DriveGroup 'OK' 'y');FileSystem=(New-DriveGroup 'OK' 'z')}) $cut
+ Assert ($view.Groups.Surface.Status -eq 'NotRun' -and $view.Summary -match 'not checked: reading the disk' -and $view.Summary -ne 'no problems') 'and the one-line summary does not call the drive fine'
+ $before=[pscustomobject]@{Size=12MB;NextOffset=12MB;Complete=$true;Finished=$now.AddDays(-9).ToString('o');BadCount=2;VerySlowCount=0;SlowCount=0;RecoveredCount=0;Bad=@([pscustomobject]@{Offset=5MB;Length=64KB;Code=23})}
+ $cut2=New-DriveScanState 'SER|1' 12MB $before
+ Update-DriveScanState $cut2 ([pscustomobject]@{Bytes=4MB;Stopped=$false;Seconds=1;BadCount=0;Bad=@();RecoveredCount=0;Recovered=@();SlowCount=0;VerySlowCount=0;Slow=@();Disconnected=$true;DisconnectCode=31}) 0
+ $s=Get-DriveSurfaceFindings $sample $cut2
+ Assert ($s.Status -eq 'Problem' -and ($s.Lines -join ' ') -match 'Earlier full scan: 2 areas could not be read' -and ($s.Lines -join ' ') -match 'may have been disconnected') 'what an earlier finished scan found still counts beside it'
+ # The scan goes on: a stretch that reads clears the note; bad areas found before it are kept.
+ Update-DriveScanState $cut2 ([pscustomobject]@{Bytes=4MB;Stopped=$false;Seconds=1;BadCount=1;Bad=@([pscustomobject]@{Offset=6MB;Length=64KB;Code=23});RecoveredCount=0;Recovered=@();SlowCount=0;VerySlowCount=0;Slow=@()}) 4MB
+ Assert (-not $cut2.Disconnected -and $null -eq $cut2.DisconnectOffset -and $cut2.NextOffset -eq 8MB -and $cut2.BadCount -eq 1 -and @($cut2.Bad).Count -eq 1 -and $cut2.Seconds -eq 2) 'once the scan continues and reads, the record no longer says disconnected; a stretch read by the version before, without that field, counts as read'
+ $part=[pscustomobject]@{Size=1TB;NextOffset=0.37TB;Complete=$false;Finished=$null;BadCount=0;VerySlowCount=0;SlowCount=0;Bad=@()}
+ Assert ((Get-DriveSurfaceFindings $sample $part).Status -eq 'OK' -and ((Get-DriveSurfaceFindings $sample $part).Lines -join ' ') -notmatch 'disconnected') 'a scan record of the version before, stopped by the user, reads as before'
 
  # --- The health tool that runs as administrator ----------------------------------------------------
  $fake=Join-Path $work 'smartctl.exe';Set-Content -LiteralPath $fake -Value 'not smartctl'

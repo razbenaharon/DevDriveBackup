@@ -154,6 +154,7 @@ function Get-DriveSurfaceFindings($Sample,$Scan) {
   if($again){$warn.Add("Sample reads: $again places could be read only at the second try. That is often an early sign of damage, or of a loose cable.")}
  }
  $known=Test-DriveScanRecord $Scan
+ $cut=$known -and -not $Scan.Complete -and [bool](Get-Field $Scan 'Disconnected')
  if($known){
   $pct=if($Scan.Size){[math]::Floor(100*[double]$Scan.NextOffset/[double]$Scan.Size)}else{0}
   $found=Get-DriveScanLines $Scan 'Full scan' ''
@@ -161,7 +162,10 @@ function Get-DriveSurfaceFindings($Sample,$Scan) {
   if($Scan.Complete){
    if(-not $found.Bad.Count){$info.Add("Full scan: finished $(Format-DriveAge (Get-Field $Scan 'Finished')), every part could be read.")}
   }else{
-   $info.Add("Full scan: stopped at $pct%. Continue it any time; it goes on from there.")
+   # A scan that ended because the drive stopped answering says neither that the drive is fine nor
+   # that it is damaged: nothing was recorded at that place, and reading the disk is not checked (below).
+   if($cut){$info.Add("Full scan: not completed. The drive stopped answering at $pct% ($(Format-DriveOffset ([long](Get-Field $Scan 'DisconnectOffset')))); it may have been disconnected (cable, USB box, power). Nothing was recorded as damaged there. Check the connection, then continue the scan; it goes on from that place.")}
+   else{$info.Add("Full scan: stopped at $pct%. Continue it any time; it goes on from there.")}
    # A scan that has not finished says nothing about the parts it has not reached, so what the last
    # finished scan found still counts until this one is through.
    $before=Get-Field $Scan 'Previous'
@@ -171,7 +175,9 @@ function Get-DriveSurfaceFindings($Sample,$Scan) {
    }
   }
  }else{$info.Add('Full scan: not run yet. It reads the whole drive and takes hours.')}
- $status=if($bad.Count){'Problem'}elseif($warn.Count){'Warning'}elseif($regions.Count -or ($known -and $Scan.Complete)){'OK'}else{'NotRun'}
+ # What was really found (here, in the samples, or by the last finished scan) counts as always. Without
+ # such a finding, a scan the drive dropped out of is not a verdict, whatever the samples read.
+ $status=if($bad.Count){'Problem'}elseif($warn.Count){'Warning'}elseif($cut){'NotRun'}elseif($regions.Count -or ($known -and $Scan.Complete)){'OK'}else{'NotRun'}
  New-DriveGroup $status @(@($bad)+@($warn)+@($info))
 }
 function Test-DriveScanRecord($Scan) {
@@ -230,7 +236,7 @@ function Get-DriveEventFindings($Events,[int]$DiskNumber,[string]$Letter,[bool]$
  $byNumber=@{};foreach($c in @($Connections|Where-Object {$_}|Sort-Object {[datetime]$_.Time})){$n=[int]$c.DiskNumber;if(-not $byNumber.ContainsKey($n)){$byNumber[$n]=[Collections.Generic.List[object]]::new()};$byNumber[$n].Add($c)}
  $own=if($byNumber.ContainsKey($DiskNumber)){$byNumber[$DiskNumber][$byNumber[$DiskNumber].Count-1]}else{$null}
  $since=if($own){[datetime]$own.Time}else{[datetime]::MinValue}
- $found=@{}
+ $found=@{};$unmatched=0
  foreach($e in @($Events)){
   if(-not $e){continue}
   $text=[string]$e.Message;$when=[datetime]$e.TimeCreated
@@ -241,7 +247,10 @@ function Get-DriveEventFindings($Events,[int]$DiskNumber,[string]$Letter,[bool]$
     if($n -ne $DiskNumber){continue}
     if($own -and $when -lt $since){
      $then=$null;foreach($c in $byNumber[$n]){if([datetime]$c.Time -le $when){$then=$c}else{break}}
-     if(-not $then -or $then.Key -ne $own.Key){continue}
+     # Older than every arrival Windows still records for this number: it cannot be said which drive
+     # the entry was about. It is left out of every verdict, and counted for a note of its own.
+     if(-not $then){$unmatched++;continue}
+     if($then.Key -ne $own.Key){continue}
     }
    }elseif($Letter -and $when -ge $since -and $text -match "(^|[^A-Za-z])$([regex]::Escape($Letter.ToUpperInvariant())):"){}
    else{continue}
@@ -255,6 +264,12 @@ function Get-DriveEventFindings($Events,[int]$DiskNumber,[string]$Letter,[bool]$
  foreach($f in $found.Values){
   $times=if($f.Count -eq 1){'once'}else{"$($f.Count) times"}
   [pscustomobject]@{Group=$f.Group;Status=$f.Status;Line=[string]::Format([Globalization.CultureInfo]::GetCultureInfo('en-GB'),'Windows log: {0}, {1} in the last 30 days (last on {2:d MMM HH:mm}).',($f.Text.Substring(0,1).ToUpper()+$f.Text.Substring(1)),$times,$f.Last)}
+ }
+ # A note, not a finding (Info): Merge-DriveEvents shows it after the group's own lines and never
+ # lets it change a verdict.
+ if($unmatched){
+  $what=if($unmatched -eq 1){'1 older disk entry could not be matched to a drive (Windows no longer has a record of which drive had that disk number then); it is not counted for or against this drive.'}else{"$unmatched older disk entries could not be matched to a drive (Windows no longer has a record of which drive had that disk number then); they are not counted for or against this drive."}
+  [pscustomobject]@{Group='Connection';Status='NotRun';Info=$true;Line='Windows log: '+$what}
  }
 }
 
@@ -298,10 +313,14 @@ function Get-DriveFileSystemFindings([string]$Letter,[string]$FileSystem,[string
 
 function Merge-DriveEvents($Group,$Events,[string]$Name) {
  # Adds the log lines that belong to this group; a log entry can only make the verdict worse.
+ # A note (Info, see Get-DriveEventFindings) is no entry about this drive: it stands after the
+ # group's own lines and has no say in the verdict.
  $mine=@($Events|Where-Object {$_ -and $_.Group -eq $Name})
  if(-not $mine.Count){return $Group}
- $status=Get-WorstStatus (@($Group.Status)+@($mine.Status))
- New-DriveGroup $status (@($mine.Line)+@($Group.Lines))
+ $notes=@($mine|Where-Object {$_.PSObject.Properties['Info'] -and $_.Info})
+ $entries=@($mine|Where-Object {-not($_.PSObject.Properties['Info'] -and $_.Info)})
+ $status=Get-WorstStatus (@($Group.Status)+@($entries|ForEach-Object {$_.Status}))
+ New-DriveGroup $status (@($entries|ForEach-Object {$_.Line})+@($Group.Lines)+@($notes|ForEach-Object {$_.Line}))
 }
 
 function Get-DriveCheckView($Report,$Scan) {
@@ -328,7 +347,22 @@ function Get-DriveCheckView($Report,$Scan) {
 
 function New-DriveScanState([string]$Identity,[long]$Size,$Previous=$null) {
  # Previous: what the last scan of this drive found (Read-DriveScanState), kept until this one finishes.
- [pscustomobject]@{Identity=$Identity;Size=$Size;NextOffset=[long]0;Complete=$false;Started=(Get-Date).ToString('o');Finished=$null;Seconds=0.0;BadCount=0;VerySlowCount=0;SlowCount=0;RecoveredCount=0;Bad=@();Slow=@();Recovered=@();Previous=$Previous}
+ # Disconnected: the last stretch ended because the drive stopped answering (see the reader), at DisconnectOffset.
+ [pscustomobject]@{Identity=$Identity;Size=$Size;NextOffset=[long]0;Complete=$false;Started=(Get-Date).ToString('o');Finished=$null;Seconds=0.0;BadCount=0;VerySlowCount=0;SlowCount=0;RecoveredCount=0;Bad=@();Slow=@();Recovered=@();Previous=$Previous;Disconnected=$false;DisconnectOffset=$null;DisconnectCode=$null}
+}
+function Update-DriveScanState($State,$Result,[long]$Position) {
+ # Adds what the reader found in one stretch of the full scan, read from Position, to the scan record.
+ # A stretch cut short (a stop request, or a drive that stopped answering) ends at its last whole
+ # chunk, and the scan goes on from there. How the stretch ended is kept: after a drive that stopped
+ # answering the record says so, with the place, until a later stretch reads again.
+ foreach($p in 'Disconnected','DisconnectOffset','DisconnectCode'){if(-not $State.PSObject.Properties[$p]){$State|Add-Member -NotePropertyName $p -NotePropertyValue $null}}
+ $State.BadCount+=$Result.BadCount;$State.SlowCount+=$Result.SlowCount;$State.VerySlowCount+=$Result.VerySlowCount;$State.RecoveredCount+=$Result.RecoveredCount;$State.Seconds=[double]$State.Seconds+[double]$Result.Seconds
+ $State.Bad=@(@($State.Bad)+@($Result.Bad)|Where-Object {$_}|Select-Object -First 200)
+ $State.Slow=@(@($State.Slow)+@($Result.Slow)|Where-Object {$_}|Select-Object -First 200)
+ $State.Recovered=@(@($State.Recovered)+@($Result.Recovered)|Where-Object {$_}|Select-Object -First 200)
+ $State.NextOffset=$Position+[long]$Result.Bytes
+ $cut=[bool](Get-Field $Result 'Disconnected')
+ $State.Disconnected=$cut;$State.DisconnectOffset=if($cut){[long]$State.NextOffset}else{$null};$State.DisconnectCode=if($cut){Get-Field $Result 'DisconnectCode'}else{$null}
 }
 function Read-DriveScanState([string]$Path,[string]$Identity) {
  # Reads surface.json before a scan starts or continues. State: the unfinished scan of this very
@@ -373,8 +407,16 @@ public static class BackupDriveScanner {
  [DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint flags);
  // These mean the drive is gone (unplugged, asleep, box reset), not that an area is bad.
  static readonly int[] Gone={2,3,6,21,55,433,1167};
+ // These two come from a place the drive cannot read and from a drive that stopped answering (a loose
+ // cable, a USB box that reset, power) alike: 31, a device is not functioning; 1117, I/O device error.
+ static readonly int[] Unclear={31,1117};
  // For tests only: the error one read (position, length) should end with instead of being read; 0 reads it.
  public static Func<long,int,int> Fault;
+ // Whether the drive still answers: one piece is read at each of these places (below 0: none) until one reads.
+ static bool Answers(SafeFileHandle h,IntPtr buf,int piece,long[] places){
+  foreach(long p in places){if(p>=0&&ReadAt(h,buf,p,piece)==0)return true;}
+  return false;
+ }
  static string N(double v){return v.ToString("0.###",CultureInfo.InvariantCulture);}
  public static void KeepAwake(bool on){SetThreadExecutionState(on?0x80000001u:0x80000000u);}
  static int ReadAt(SafeFileHandle h,IntPtr buf,long pos,int n){
@@ -394,10 +436,21 @@ public static class BackupDriveScanner {
  // A stop request is looked for before every chunk and every piece, so a stretch on a failing drive,
  // where one read can take many seconds, does not have to finish first. Bytes then ends at the last
  // whole chunk, and nothing of the chunk that was cut short is counted.
+ // Disconnected: a chunk in which pieces failed with one of the two unclear errors (31, 1117), on a
+ // drive that then answers nowhere any more: not at the last place that read, not at its start, not
+ // further on. That is a drive that went away, not thousands of bad areas. The scan ends there like
+ // a stop: Bytes ends before that chunk, nothing of it is recorded as bad (it is read again when the
+ // scan continues), and DisconnectCode holds the error. The same when, after nothing but such errors
+ // in the chunk, Windows says outright that the drive is gone. A drive that still answers elsewhere
+ // has a damaged place there, or had a short break. Where only some pieces failed, they are recorded
+ // as bad areas, whatever the error. Where the whole chunk failed with nothing but unclear errors,
+ // the pieces are read once more, and what fails again while the drive again answers elsewhere is
+ // recorded as bad areas, so that a scan can get past a damaged stretch instead of ending at it every
+ // time it is continued.
  public static string Read(string device,long start,long length,int sector,double verySlowMs,string stopFile,long stopSince){
   const int chunk=4*1024*1024;int piece=Math.Max(sector,64*1024);
   IntPtr buf=VirtualAlloc(IntPtr.Zero,(UIntPtr)chunk,0x3000,4);if(buf==IntPtr.Zero)throw new Win32Exception();
-  var times=new List<double>();var where=new List<long>();var bad=new StringBuilder();var again=new StringBuilder();int badCount=0,againCount=0;long done=0;bool stopped=false;var total=Stopwatch.StartNew();
+  var times=new List<double>();var where=new List<long>();var bad=new StringBuilder();var again=new StringBuilder();int badCount=0,againCount=0,cutCode=0;long done=0;bool stopped=false,cut=false;var total=Stopwatch.StartNew();
   try{
    using(var h=CreateFile(device,0x80000000,3,IntPtr.Zero,3,0x20000000,IntPtr.Zero)){
     if(h.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -409,13 +462,28 @@ public static class BackupDriveScanner {
      else{
       if(Array.IndexOf(Gone,err)>=0)throw new Win32Exception(err,"The drive stopped answering ("+err+"). Check that it is still connected.");
       var found=new List<string>();
-      for(long p=pos;p<pos+n;p+=piece){
-       if(StopAsked(stopFile,stopSince)){stopped=true;break;}
-       int m=(int)Math.Min(piece,pos+n-p);int e=ReadAt(h,buf,p,m);if(e==0)continue;
-       if(Array.IndexOf(Gone,e)>=0)throw new Win32Exception(e,"The drive stopped answering ("+e+"). Check that it is still connected.");
-       found.Add("{\"Offset\":"+p+",\"Length\":"+m+",\"Code\":"+e+"}");
+      for(int look=0;look<2;look++){
+       found.Clear();int pieces=0,unclear=0,first=0;long good=-1;
+       for(long p=pos;p<pos+n;p+=piece){
+        if(StopAsked(stopFile,stopSince)){stopped=true;break;}
+        int m=(int)Math.Min(piece,pos+n-p);int e=ReadAt(h,buf,p,m);pieces++;if(e==0){if(m==piece)good=p;continue;}
+        if(Array.IndexOf(Gone,e)>=0){
+         // Gone after nothing but unclear errors in this chunk: the drive went away while it was read.
+         if(found.Count==pieces-1&&unclear==found.Count&&(unclear>0||Array.IndexOf(Unclear,err)>=0)){cut=true;cutCode=e;break;}
+         throw new Win32Exception(e,"The drive stopped answering ("+e+"). Check that it is still connected.");
+        }
+        if(Array.IndexOf(Unclear,e)>=0){unclear++;if(first==0)first=e;}
+        found.Add("{\"Offset\":"+p+",\"Length\":"+m+",\"Code\":"+e+"}");
+       }
+       if(stopped||cut||unclear==0)break;
+       // A piece failed with an unclear error. Does the drive still answer anywhere: at the last
+       // piece of this chunk that read, at the last chunk that read, at its start, further on?
+       long[] places={good,where.Count>0?where[where.Count-1]:-1,pos>=chunk?0:-1,pos+n+piece<=end?pos+n:-1};
+       if(!Answers(h,buf,piece,places)){cut=true;cutCode=first;break;}
+       // It does. Only a chunk that failed whole, with nothing but such errors, is read once more.
+       if(found.Count<pieces||unclear<pieces)break;
       }
-      if(stopped)break;
+      if(stopped||cut)break;
       if(found.Count==0){if(againCount<200){if(again.Length>0)again.Append(',');again.Append("{\"Offset\":"+pos+",\"Code\":"+err+"}");}againCount++;}
       foreach(string f in found){if(badCount<200){if(bad.Length>0)bad.Append(',');bad.Append(f);}badCount++;}
      }
@@ -429,7 +497,7 @@ public static class BackupDriveScanner {
    bool very=times[i]>=verySlowMs;if(very)verySlow++;
    if(very||times[i]>=slowMs){if(slowCount<200){if(slow.Length>0)slow.Append(',');slow.Append("{\"Offset\":"+where[i]+",\"Ms\":"+N(times[i])+"}");}slowCount++;}
   }
-  return "{\"Bytes\":"+done+",\"Stopped\":"+(stopped?"true":"false")+",\"Seconds\":"+N(total.Elapsed.TotalSeconds)+",\"MedianMs\":"+N(median)+",\"MaxMs\":"+N(max)+",\"BadCount\":"+badCount+",\"Bad\":["+bad+"],\"RecoveredCount\":"+againCount+",\"Recovered\":["+again+"],\"SlowCount\":"+slowCount+",\"VerySlowCount\":"+verySlow+",\"Slow\":["+slow+"]}";
+  return "{\"Bytes\":"+done+",\"Stopped\":"+(stopped?"true":"false")+",\"Disconnected\":"+(cut?"true":"false")+",\"DisconnectCode\":"+cutCode+",\"Seconds\":"+N(total.Elapsed.TotalSeconds)+",\"MedianMs\":"+N(median)+",\"MaxMs\":"+N(max)+",\"BadCount\":"+badCount+",\"Bad\":["+bad+"],\"RecoveredCount\":"+againCount+",\"Recovered\":["+again+"],\"SlowCount\":"+slowCount+",\"VerySlowCount\":"+verySlow+",\"Slow\":["+slow+"]}";
  }
 }
 '@
@@ -474,8 +542,15 @@ function Open-DriveCheckSmartTool([string]$Path,[string]$ToolHash=(Get-DriveChec
 # SHA-256 of bin\smartctl.exe (64-bit) inside the official smartmontools 7.5 installer, whose own
 # hash Install-DriveTools.ps1 checks before it runs it.
 function Get-DriveCheckSmartToolHash {'B5DB94E5082C042BE44994B7A4FA8F7B5C8E713B2AB1C9A560D8F7A7995EA27D'}
-# SHA-256 of bin\drivedb.h as the same installer puts it beside smartctl.exe. A database updated
-# later (update-smart-drivedb) no longer matches, and the health report then asks for a reinstall.
+# SHA-256 of bin\drivedb.h as the 7.5 Windows installer puts it beside smartctl.exe. The hash was
+# taken from an installation made by that installer (the one whose own hash Install-DriveTools.ps1
+# checks); it was not derived again by unpacking the installer. The content of that file was compared
+# with drivedb.h in the official source archive (smartmontools-7.5.tar.gz from the project's GitHub
+# release, SHA-256 690B83CA331378DA9EA0D9D61008C4B22DDE391387B9BBAD7F29387F2595F76E): all 6,941 lines
+# are the same except the version line, where the Windows file has an unexpanded "$Id$" and the source
+# has the expanded revision text, and the Windows file has CRLF line ends. So this hash is not the
+# hash of the source file. A database updated later (update-smart-drivedb) no longer matches, and the
+# health report then asks for a reinstall.
 function Get-DriveCheckDatabaseHash {'DD39C6A520D38895DA61923FE26FE7C9C5EB3F42325F2E4477A06ED7A61966D0'}
 
 function Get-DriveCheckPathRisks($Items,[string]$UserSid) {
@@ -527,4 +602,4 @@ function Format-DriveAge($When) {
  if($span.TotalMinutes -lt 2){'just now'}elseif($span.TotalHours -lt 1){'{0:N0} minutes ago' -f $span.TotalMinutes}elseif($span.TotalHours -lt 36){'{0:N0} hours ago' -f $span.TotalHours}else{'{0:N0} days ago' -f $span.TotalDays}
 }
 
-Export-ModuleMember -Function Get-Field,New-DriveGroup,Get-WorstStatus,Test-DriveSmartAnswer,Get-DriveSelfTest,Get-DriveHealthFindings,Get-DriveSurfaceFindings,Get-DriveConnectionKey,Get-DriveEventFindings,Get-DriveConnectionFindings,Get-DriveFileSystemFindings,Merge-DriveEvents,Get-DriveCheckView,Format-DriveOffset,Format-DriveAge,Test-DriveSmartFlagOnly,Test-DriveScanRecord,New-DriveScanState,Read-DriveScanState,Test-DriveStopRequest,Add-DriveScannerType,Open-DriveCheckSmartTool,Get-DriveCheckSmartToolHash,Get-DriveCheckDatabaseHash,Get-DriveCheckPathRisks,Read-DriveCheckPathAccess
+Export-ModuleMember -Function Get-Field,New-DriveGroup,Get-WorstStatus,Test-DriveSmartAnswer,Get-DriveSelfTest,Get-DriveHealthFindings,Get-DriveSurfaceFindings,Get-DriveConnectionKey,Get-DriveEventFindings,Get-DriveConnectionFindings,Get-DriveFileSystemFindings,Merge-DriveEvents,Get-DriveCheckView,Format-DriveOffset,Format-DriveAge,Test-DriveSmartFlagOnly,Test-DriveScanRecord,New-DriveScanState,Update-DriveScanState,Read-DriveScanState,Test-DriveStopRequest,Add-DriveScannerType,Open-DriveCheckSmartTool,Get-DriveCheckSmartToolHash,Get-DriveCheckDatabaseHash,Get-DriveCheckPathRisks,Read-DriveCheckPathAccess

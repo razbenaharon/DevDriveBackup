@@ -6,6 +6,9 @@
 #  Surface       reads every part of the disk; stops on request and later continues from there
 #  LongSelfTest  asks the drive to read itself completely. The drive works alone for hours;
 #                the next quick check shows the result.
+# A full scan the drive drops out of (a whole chunk fails with I/O device errors and the drive answers
+# nowhere else) ends as not completed: the place is kept, nothing there is recorded as damaged, and
+# run.json and surface.json say that the drive may have been disconnected.
 # Only reads. Nothing on the drive is written, moved or repaired. smartctl (the bundled copy, or
 # one given with -SmartTool) runs only when its SHA-256 matches the official 7.5 build.
 # Into -OutputDirectory it writes progress.json while it runs and run.json at the end, plus
@@ -104,30 +107,34 @@ try{
   $saved=Read-DriveScanState $statePath $identity
   $state=if($saved.State){$saved.State}else{New-DriveScanState $identity $size $saved.Previous}
   $from=[long]$state.NextOffset;$session=[Diagnostics.Stopwatch]::StartNew()
+  # Whether this run ended because the drive stopped answering (the record keeps that from an earlier run too).
+  $cut=$false
   [BackupDriveScanner]::KeepAwake($true)
   try{
    while([long]$state.NextOffset -lt $size -and -not (Test-StopRequested)){
     $pos=[long]$state.NextOffset;$len=[math]::Min([long]512MB,$size-$pos)
     $r=Read-DiskRegion $pos $len
-    $state.BadCount+=$r.BadCount;$state.SlowCount+=$r.SlowCount;$state.VerySlowCount+=$r.VerySlowCount;$state.RecoveredCount+=$r.RecoveredCount;$state.Seconds=[double]$state.Seconds+[double]$r.Seconds
-    $state.Bad=@(@($state.Bad)+@($r.Bad)|Where-Object {$_}|Select-Object -First 200)
-    $state.Slow=@(@($state.Slow)+@($r.Slow)|Where-Object {$_}|Select-Object -First 200)
-    $state.Recovered=@(@($state.Recovered)+@($r.Recovered)|Where-Object {$_}|Select-Object -First 200)
-    # A stretch cut short by a stop request ends at its last whole chunk; the scan goes on from there.
-    $state.NextOffset=$pos+[long]$r.Bytes
+    # A stretch cut short, by a stop request or by a drive that stopped answering, ends at its last
+    # whole chunk; the scan goes on from there.
+    Update-DriveScanState $state $r $pos
+    $cut=[bool]$state.Disconnected
     [void](Write-BackupStatus $state $statePath)
     $readNow=[long]$state.NextOffset-$from;$rate=$readNow/[math]::Max(1,$session.Elapsed.TotalSeconds)
     $left=[TimeSpan]::FromSeconds(($size-[long]$state.NextOffset)/[math]::Max(1,$rate))
     $found=if($state.BadCount){"$($state.BadCount) unreadable areas so far"}else{'no unreadable areas so far'}
     Set-CheckProgress ('Full scan: {0:N0} of {1:N0} GiB read, {2:N0} MB/s, about {3}h {4:D2}m left. {5}.' -f ([long]$state.NextOffset/1GB),($size/1GB),($rate/1e6),[int][math]::Floor($left.TotalHours),$left.Minutes,$found) (100*[double]$state.NextOffset/$size)
-    if($r.Stopped){break}
+    if($r.Stopped -or $cut){break}
    }
   }finally{[BackupDriveScanner]::KeepAwake($false)}
   if([long]$state.NextOffset -ge $size){$state.Complete=$true;$state.Finished=(Get-Date).ToString('o');$state.Previous=$null}
   [void](Write-BackupStatus $state $statePath)
-  $msg=if($state.Complete){if($state.BadCount){"Full scan finished: $($state.BadCount) areas could not be read."}else{'Full scan finished: every part of the drive could be read.'}}else{'Full scan stopped at {0:N0}%. It continues from there next time.' -f (100*[double]$state.NextOffset/$size)}
+  # A scan the drive dropped out of is not completed and not a finding: the place is kept, nothing
+  # there is recorded as damaged, and the run ends as not finished, with the likely reason.
+  $msg=if($state.Complete){if($state.BadCount){"Full scan finished: $($state.BadCount) areas could not be read."}else{'Full scan finished: every part of the drive could be read.'}}
+   elseif($cut){'The full scan was not completed: the drive stopped answering at {0:N0}% (error {1}). It may have been disconnected (cable, USB box, power). Nothing was recorded as damaged there. Check the connection, then continue the scan; it goes on from that place.' -f (100*[double]$state.NextOffset/$size),$state.DisconnectCode}
+   else{'Full scan stopped at {0:N0}%. It continues from there next time.' -f (100*[double]$state.NextOffset/$size)}
   if($saved.SetAside){$msg+=" The saved position of an earlier scan could not be read, so this scan started from the beginning; that file was kept as $(Split-Path -Leaf $saved.SetAside)."}
-  Complete-Check $true $msg
+  Complete-Check ($state.Complete -or -not $cut) $msg
   return
  }
 
@@ -140,6 +147,8 @@ try{
  $regions=foreach($r in @(@('start',[long]0),@('middle',[long]([math]::Floor($size/2/$chunk)*$chunk)),@('end',[long]($size-$len)))){
   if(Test-StopRequested){break}
   $x=Read-DiskRegion $r[1] $len
+  # A drive that stopped answering in the middle of a sample gives no sample: the check ends, and the previous result is kept.
+  if($x.Disconnected){throw "The drive stopped answering while its $($r[0]) was read (error $($x.DisconnectCode)). It may have been disconnected (cable, USB box, power). Check the connection, then check again."}
   if($x.Stopped){break}
   [pscustomobject]@{Name=$r[0];Offset=$r[1];MBps=[math]::Round([double]$x.Bytes/[math]::Max(0.001,[double]$x.Seconds)/1e6);BadCount=[int]$x.BadCount;VerySlowCount=[int]$x.VerySlowCount;RecoveredCount=[int]$x.RecoveredCount;Bad=@($x.Bad)}
  }
