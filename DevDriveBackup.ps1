@@ -325,6 +325,17 @@ function Show-Choice([string]$Title,[string]$Text,[string[]]$Choices,[switch]$Ca
   # long path, which measuring the text beside it gets wrong (the last paragraph was cut off).
   $label=New-Control Label $f 16 16 $inner 20 $body
   $h=$label.GetPreferredSize([Drawing.Size]::new($inner,0)).Height+4;$label.Height=$h
+  # A text taller than the screen would push the buttons off it (a long clean-up list, long folder
+  # names): the text then scrolls in a box of the height that fits, and the buttons stay in view.
+  $screen=if($owner){[Windows.Forms.Screen]::FromControl($owner)}else{[Windows.Forms.Screen]::PrimaryScreen}
+  $room=[Math]::Max(120,$screen.WorkingArea.Height-80-(16+14+46*$Choices.Count+4+32+16))
+  if($h -gt $room){
+   $f.Controls.Remove($label);$label.Dispose()
+   $label=New-Control TextBox $f 16 16 $inner $room
+   $label.Multiline=$true;$label.WordWrap=$true;$label.ReadOnly=$true;$label.ScrollBars='Vertical';$label.BorderStyle='None';$label.BackColor=$f.BackColor;$label.ForeColor=$f.ForeColor
+   $label.Text=$body;$label.SelectionStart=0;$label.SelectionLength=0;$h=$room
+   $script:testLog.ChoiceScrolls=$true
+  }
   $y=16+$h+14;$buttons=@()
   for($i=0;$i -lt $Choices.Count;$i++){
    $b=New-Control Button $f 16 $y $inner 38 $Choices[$i];$b.Tag=$i;$b.Add_Click({param($s,$e)$f.Tag=[int]$s.Tag;$f.Close()}.GetNewClosure());$buttons+=$b;$y+=46
