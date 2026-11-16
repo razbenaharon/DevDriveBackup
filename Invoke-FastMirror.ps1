@@ -6,27 +6,65 @@
 # not listed. Each run compares every file by size and modification time (no content read)
 # and copies only new or changed files. Files that disappeared from the source are not
 # deleted: with -MoveExtras they are moved to a dated recovery folder beside the mirror, and
-# -KeepRecovery N then deletes all but the newest N recovery folders; otherwise they are only reported. Folders that are no longer selected keep their old copy
+# -KeepRecovery N then deletes all but the newest N recovery folders (with -RecoveryApproved only those of them that were approved); otherwise they are only reported. Folders that are no longer selected keep their old copy
 # in the mirror and are listed in the summary. -Verify (default on the first run) re-reads
 # both copies and compares SHA-256 for every selected file; a selected source file missing from
 # the mirror is a difference. A selected folder that is missing or became a link fails the run.
 # DevDriveBackup's own password, key and state folders are never copied, even when one of them is
 # selected itself; an older copy of one found on the backup drive is reported.
+#
+# A folder in the source where the copy holds a file of the same name (or the reverse) heals itself
+# in a backup: the old item is moved out of the copy into this run's dated recovery folder, with or
+# without -MoveExtras, and the new one is copied in the same run (TypeSwapsHealed in the summary).
+#
+# Every content check also writes last-check-<drive>-<folder>.json beside the run folders: when it
+# ran, for which source, and the lines of verify-differences.txt that name a file of the source
+# (CONTENT, SIZE, MISSING-IN-MIRROR, ERROR). -Repair reads that file and copies only those files
+# again; see the Repair part below. It copies nothing else, deletes nothing and is not a backup.
+#
+# The summary also warns about names robocopy treats differently from what the lists say
+# (SkippedByShortName, CaseCollisions); see the last part before the summary is written.
+#
+# A file robocopy could not copy because another program was using it is named in the summary
+# (LockedFiles). Such a run stays a failed run and is never recorded as a complete copy. A full content
+# check that found no difference in any other file is remembered on its own (first-check-<drive>-
+# <folder>.json, FirstCheckDone), so the first full check is not repeated on every run only because
+# one file is always in use. See "Files in use" and the content check below.
 param(
  [string]$ConfigPath=(Join-Path $PSScriptRoot 'backup.local.json'),
  [string]$Source,
  [Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$DestinationDrive,
  # One folder name, or two separated by a backslash (for example Drive-C-Mirror\Projects).
  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}(\\[A-Za-z0-9][A-Za-z0-9._-]{0,79})?$')][string]$Folder='DevDrive-Mirror',
- [ValidateRange(1,64)][int]$Threads=16,
+ # Files copied at once (robocopy takes up to 128); the window calls it CopyThreads.
+ [ValidateRange(1,128)][Alias('CopyThreads')][int]$Threads=16,
  [switch]$MoveExtras,
  # With -MoveExtras: keep only this many dated recovery folders (the newest) and delete older
  # ones from the backup drive. 0 keeps every recovery folder.
  [ValidateRange(0,100)][int]$KeepRecovery=0,
+ # With -KeepRecovery: delete no recovery folder, only name the ones the rule would delete
+ # (RecoveryWouldRemove). The window uses it until the first clean-up has been approved.
+ [switch]$PreviewRecovery,
+ # With -KeepRecovery: the recovery folders whose deletion was approved, by name (20261106-173100).
+ # Only a folder that the rule chooses now and that is named here is deleted; the others the rule
+ # chooses are left and named (RecoveryDeferred). A name the rule does not choose, or that does not
+ # exist, deletes nothing. Given but empty: nothing is deleted. Not given: the rule deletes what it
+ # chooses. Run with -File, the names are one argument with commas between them, and an empty
+ # argument is the empty list. -PreviewRecovery wins over it.
+ [string[]]$RecoveryApproved,
  [switch]$Verify,
  [switch]$SkipVerify,
  # Compare the mirror with the source without copying anything.
- [switch]$VerifyOnly
+ [switch]$VerifyOnly,
+ # Copy again the files the last content check of this copy found different, unreadable or missing
+ # in the copy, and nothing else. The old version of each is first moved to this run's dated
+ # recovery folder, and the new copy is compared with the source by SHA-256. Not a backup: the
+ # copy is not recorded as complete, and no recovery folder is cleaned up.
+ [switch]$Repair,
+ # For the tests only: copy into this folder instead of onto a drive and keep the run records there.
+ # It must lie below the temporary folder, so it can never stand in for a backup drive; the drive
+ # checks, which need two real disks, are skipped. -DestinationDrive is then not used.
+ [Parameter(DontShow)][string]$TestRoot
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -47,16 +85,21 @@ $skipPaths=@();$personalNames=@()
 # Personal skips come from the configuration's Exclude list, which the versioned backup also uses:
 # a bare name (wildcards allowed) skips that folder name anywhere; a path skips one folder, given
 # relative to the source root or as a full path below it (for example E:/Projects/app/build/cache).
+# A path may hold wildcards, as the versioned backup allows (*/dist, logs/*.tmp, ** for any number of
+# folders): robocopy refuses wildcards inside a path, so such a path is matched here against the
+# names really in the source, and every match is skipped as a path of its own.
 $srcRoot=[IO.Path]::GetFullPath($(if($Source){$Source}else{[string]$config.Source})).TrimEnd('\')+'\'
 foreach($entry in @(if($config.PSObject.Properties['Exclude']){$config.Exclude})){
  $e=([string]$entry).Trim();if(-not $e){continue}
- if($e -notmatch '[\\/]'){if($e -notin $skipNames){$skipNames+=$e;$personalNames+=$e};continue}
+ if($e -match '^\*\*[\\/]([^\\/]+)$'){$e=$Matches[1]}   # **/name is a name at any depth
+ if($e -notmatch '[\\/]'){if(-not @($skipNames|Where-Object {[string]::Equals($_,$e,[StringComparison]::OrdinalIgnoreCase)}).Count){$skipNames+=$e;$personalNames+=$e};continue}
  $e=$e.Replace('/','\').TrimEnd('\')
  if($e -match '^[A-Za-z]:\\'){
   if(-not $e.StartsWith($srcRoot,[StringComparison]::OrdinalIgnoreCase)){continue}  # belongs to another source
   $e=$e.Substring($srcRoot.Length)
  }
- if($e){$skipPaths+=$e.TrimStart('\')}
+ $e=$e.TrimStart('\');if(-not $e){continue}
+ if($e -match '[*?]'){$skipPaths+=@(Resolve-BackupExcludePath $srcRoot $e)}else{$skipPaths+=$e}
 }
 # DevDriveBackup's private folders (protected passwords, run state, plaintext recovery keys) are never
 # copied, whatever the selection: the copy would not keep their private permissions. The job's own key
@@ -70,30 +113,74 @@ foreach($p in $privateRoots){
 }
 
 $src=[IO.Path]::GetFullPath($Source).TrimEnd('\')+'\'
-$srcVolume=Get-Volume -DriveLetter $src.Substring(0,1)
-$dstVolume=Get-Volume -DriveLetter $DestinationDrive
-if($srcVolume.UniqueId -eq $dstVolume.UniqueId){throw 'Destination is the source volume'}
-# The copy goes only to the backup drive this configuration was made for, not another drive that took its letter.
-if($config.PSObject.Properties['DestinationVolumeId'] -and $config.DestinationVolumeId -and $dstVolume.UniqueId -ne $config.DestinationVolumeId){throw "Drive $($DestinationDrive.ToUpperInvariant()): is not the backup drive this configuration was made for (its volume identity differs). Check which drive has this letter now."}
-# The configured source must still be the same volume, not another drive that took its letter.
-$configured=if($config.PSObject.Properties['Source'] -and $config.Source){[IO.Path]::GetFullPath([string]$config.Source).TrimEnd('\')+'\'}else{''}
-if($config.PSObject.Properties['SourceVolumeId'] -and $config.SourceVolumeId -and $configured -and $src.StartsWith($configured,[StringComparison]::OrdinalIgnoreCase) -and $srcVolume.UniqueId -ne $config.SourceVolumeId){throw 'The source drive is not the one this configuration was made for (its volume identity changed). Check which drive has this letter now.'}
-$sourceDisk=Get-Partition -DriveLetter $src.Substring(0,1)|Get-Disk
-$destDisk=Get-Partition -DriveLetter $DestinationDrive|Get-Disk
-if($sourceDisk.Number -eq $destDisk.Number){throw 'Destination is on the same physical disk as the source'}
-if($sourceDisk.BusType -eq 'File Backed Virtual' -and $sourceDisk.Location -match '^([A-Za-z]):\\'){
- if((Get-Partition -DriveLetter $Matches[1]|Get-Disk).Number -eq $destDisk.Number){throw 'Destination is on the disk that holds the Dev Drive file'}
+if($TestRoot){
+ $temp=[IO.Path]::GetTempPath().TrimEnd('\');$TestRoot=[IO.Path]::GetFullPath($TestRoot).TrimEnd('\')
+ if(-not $TestRoot.StartsWith($temp+'\',[StringComparison]::OrdinalIgnoreCase)){throw '-TestRoot is for the tests only and must be a folder below the temporary folder'}
+ # A link on the way could lead out of the temporary folder, onto a real drive.
+ for($p=$TestRoot;$p.Length -gt $temp.Length;$p=[IO.Path]::GetDirectoryName($p)){
+  if((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw '-TestRoot is for the tests only and must not lie behind a link or junction'}
+ }
+ $volumeKey='test';$dst=Join-Path $TestRoot $Folder;$stateRoot=Join-Path $TestRoot 'state'
+ # The same for the folders written below it: a link standing in for one of them leads out as well.
+ foreach($inner in @($dst,($dst+'-recovery'),$stateRoot)){
+  for($p=[IO.Path]::GetFullPath($inner).TrimEnd('\');$p.Length -gt $TestRoot.Length;$p=[IO.Path]::GetDirectoryName($p)){
+   if((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw '-TestRoot is for the tests only and must not hold a link or junction where the copy is written'}
+  }
+ }
+}else{
+ $srcVolume=Get-Volume -DriveLetter $src.Substring(0,1)
+ $dstVolume=Get-Volume -DriveLetter $DestinationDrive
+ if($srcVolume.UniqueId -eq $dstVolume.UniqueId){throw 'Destination is the source volume'}
+ # The copy goes only to the backup drive this configuration was made for, not another drive that took its letter.
+ if($config.PSObject.Properties['DestinationVolumeId'] -and $config.DestinationVolumeId -and $dstVolume.UniqueId -ne $config.DestinationVolumeId){throw "Drive $($DestinationDrive.ToUpperInvariant()): is not the backup drive this configuration was made for (its volume identity differs). Check which drive has this letter now."}
+ # The configured source must still be the same volume, not another drive that took its letter.
+ $configured=if($config.PSObject.Properties['Source'] -and $config.Source){[IO.Path]::GetFullPath([string]$config.Source).TrimEnd('\')+'\'}else{''}
+ if($config.PSObject.Properties['SourceVolumeId'] -and $config.SourceVolumeId -and $configured -and $src.StartsWith($configured,[StringComparison]::OrdinalIgnoreCase) -and $srcVolume.UniqueId -ne $config.SourceVolumeId){throw 'The source drive is not the one this configuration was made for (its volume identity changed). Check which drive has this letter now.'}
+ # Never onto the disk the source lies on, in either direction: a Dev Drive is a file on another
+ # disk, and so is a destination that is a virtual disk.
+ $diskOf={param($letter)Get-Partition -DriveLetter $letter|Get-Disk}
+ $sameDisk=Get-BackupSameDiskReason (& $diskOf $src.Substring(0,1)) (& $diskOf $DestinationDrive) $diskOf
+ if($sameDisk){throw $sameDisk}
+ $dst=$DestinationDrive.ToUpperInvariant()+':\'+$Folder
+ # Keyed by the drive's volume identity, so another drive that takes this letter still gets its first full check.
+ $volumeKey=($dstVolume.UniqueId -replace '[^A-Za-z0-9-]+','_').Trim('_');$stateRoot=Join-Path $env:LOCALAPPDATA 'DevDriveMirror\fast-mirror'
 }
-$dst=$DestinationDrive.ToUpperInvariant()+':\'+$Folder
-$recoveryRoot=$DestinationDrive.ToUpperInvariant()+':\'+$Folder+'-recovery'
-$run=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
+$recoveryRoot=$dst+'-recovery'
+$lastSuccess=Join-Path $stateRoot ('last-success-'+$volumeKey+'-'+($Folder -replace '\\','_')+'.json')
+# What the last content check of this copy found; -Repair works from it.
+$lastCheck=Join-Path $stateRoot ('last-check-'+$volumeKey+'-'+($Folder -replace '\\','_')+'.json')
+# That a full content check of this copy found no difference, apart from files that were in use. It is
+# kept apart from $lastSuccess, which only a complete backup writes.
+$firstCheck=Join-Path $stateRoot ('first-check-'+$volumeKey+'-'+($Folder -replace '\\','_')+'.json')
+if($Repair -and $VerifyOnly){throw 'Give one of -Repair and -VerifyOnly, not both'}
+# A content check and a repair work on an existing copy: they never create one, never run robocopy
+# and never count as a backup.
+$noCopy=$VerifyOnly -or $Repair
+if($noCopy -and -not(Test-Path -LiteralPath $dst -PathType Container)){throw "There is no plain copy at $dst to $(if($Repair){'repair'}else{'check'}). Back up first."}
+$check=$null
+if($Repair){
+ if(-not(Test-Path -LiteralPath $lastCheck)){throw "There is no earlier content check of the plain copy at $dst to repair from. Check the content first, then repair."}
+ $check=Get-Content -LiteralPath $lastCheck -Raw|ConvertFrom-Json
+ if(-not [string]::Equals([string]$check.Source,$src,[StringComparison]::OrdinalIgnoreCase)){throw "The last content check of the plain copy at $dst was made for another source ($($check.Source)). Check the content first, then repair."}
+}
+# Named to the second; a run that starts in the same second as another gets a folder of its own.
+$run=Join-Path $stateRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
+for($n=2;Test-Path -LiteralPath $run;$n++){$run=(Join-Path $stateRoot (Get-Date -Format 'yyyyMMdd-HHmmss'))+'-'+$n}
 New-Item -ItemType Directory -Path $run -Force|Out-Null
-# A content check compares an existing copy; it never creates one.
-if($VerifyOnly){if(-not(Test-Path -LiteralPath $dst -PathType Container)){throw "There is no plain copy at $dst to check. Back up first."}}else{New-Item -ItemType Directory -Path $dst -Force|Out-Null}
-# Keyed by the drive's volume identity, so another drive that takes this letter still gets its first full check.
-$lastSuccess=Join-Path $env:LOCALAPPDATA ('DevDriveMirror\fast-mirror\last-success-'+($dstVolume.UniqueId -replace '[^A-Za-z0-9-]+','_').Trim('_')+'-'+($Folder -replace '\\','_')+'.json')
+$copyExisted=Test-Path -LiteralPath $dst -PathType Container
+if(-not $noCopy){New-Item -ItemType Directory -Path $dst -Force|Out-Null}
 $firstRun=-not(Test-Path -LiteralPath $lastSuccess)
-if(($firstRun -and -not $SkipVerify) -or $VerifyOnly){$Verify=$true}
+# The first full check counts as done only for this very copy: a copy folder that is made now, or one
+# checked for another source, is checked again. A record that cannot be read is no record.
+$firstCheckDone=$false
+if($copyExisted -and (Test-Path -LiteralPath $firstCheck)){
+ try{$firstCheckDone=[string]::Equals([string](Get-Content -LiteralPath $firstCheck -Raw|ConvertFrom-Json).Source,$src,[StringComparison]::OrdinalIgnoreCase)}catch{}
+}
+# The first run checks in full by itself, until a run was complete or a full check passed. A check
+# that is asked for (-Verify, -VerifyOnly) always runs.
+if(($firstRun -and -not $firstCheckDone -and -not $SkipVerify) -or $VerifyOnly){$Verify=$true}
+# A repair compares each file it copies; the check of the whole copy is a run of its own.
+if($Repair){$Verify=$false}
 
 function Join-Rel([string]$Root,[string]$Relative){if($Relative){Join-Path $Root $Relative}else{$Root.TrimEnd('\')}}
 # 'E:' alone means the current directory on E:, and 'E:\' would escape the closing quote; use 'E:\.' for a root.
@@ -110,27 +197,68 @@ function Get-RoboArgs([string]$From,[string]$To,[string]$Log,[string[]]$Excluded
 function Invoke-Robo([string[]]$RoboArgs,[string]$Label){
  # 8 means some files could not be copied (for example a file another program keeps locked); the
  # run goes on and they are counted below. 16 and above means robocopy could not work at all.
+ # Windows starts no program with a command line of more than about 32,000 characters, and every
+ # path skipped below this folder is on it four times.
+ if((($RoboArgs|Measure-Object -Property Length -Sum).Sum+3*$RoboArgs.Count) -gt 30000){throw "Too many folders are skipped by path for one copy of $Label. In Exclude, use a folder name instead of a path pattern, or skip a folder higher up."}
  & robocopy.exe @RoboArgs|Out-Null
  $code=$LASTEXITCODE
  if($code -ge 16){throw "robocopy $Label failed with exit code $code. See $($RoboArgs|Where-Object {$_ -like '/UNILOG:*'})"}
  $code
 }
-function Get-RoboTotals([string]$Log){
- # The summary rows (directories, files, bytes) each hold six numbers: total, copied, skipped,
- # mismatch, failed, extras. Reading the numbers rather than the labels also works on Windows
- # in other languages.
- $rows=@(Get-Content -LiteralPath $Log -Encoding Unicode -Tail 14|ForEach-Object {
-  $m=[regex]::Match($_,'^\s*[^\d\s][^:]*:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$')
-  if($m.Success){,@(1..6|ForEach-Object {[long]$m.Groups[$_].Value})}
- })
- if($rows.Count -lt 3){return $null}
- [pscustomobject]@{Dirs=$rows[0];Files=$rows[1];Bytes=$rows[2]}
+# A folder in the source where the copy has a file of the same name, or the reverse. robocopy copies
+# nothing there and names at most one side, so each one found is kept with both paths. A backup then
+# moves the item in the copy aside (Move-TypeSwap); what could not be moved stays on this list and is
+# reported. Returns the pair, or nothing.
+$conflicts=[Collections.Generic.List[object]]::new()
+function Test-TypeConflict([string]$Relative){
+ $s=Join-Rel $src $Relative;$m=Join-Rel $dst $Relative;$folder=[IO.Directory]::Exists($s)
+ if(-not(($folder -and [IO.File]::Exists($m)) -or ([IO.File]::Exists($s) -and [IO.Directory]::Exists($m)))){return}
+ $known=@($conflicts|Where-Object {[string]::Equals($_.Copy,$m,[StringComparison]::OrdinalIgnoreCase)})
+ if($known.Count){return $known[0]}
+ $pair=[pscustomobject]@{Source=$s;Copy=$m;Relative=$Relative;SourceIsFolder=$folder};$conflicts.Add($pair);$pair
 }
-function Get-LogName([string]$Relative){'copy-'+$(if($Relative){$Relative -replace '[\\/:*?"<>|]','_'}else{'main'})+'.log'}
+# The dated recovery folder of this run, beside the copy. Whatever a run moves out of the copy goes
+# there under its own path, and nothing is ever deleted: files gone from the source (-MoveExtras), an
+# item that changed between file and folder, the old version of a repaired file. It is named to the
+# second, when the first item is about to be moved. A folder of that name left by a run a moment ago
+# is not shared: this run waits for the next second, so the folder is this run's alone.
+$script:recovery='';$script:recoveryMoves=0
+function Get-RunRecovery{
+ while(-not $script:recovery){
+  $p=Join-Path $recoveryRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
+  if(Test-Path -LiteralPath $p){Start-Sleep -Milliseconds 200}else{$script:recovery=$p}
+ }
+ $script:recovery
+}
+# Heals one such pair in a backup: the item in the copy is moved to the recovery folder, so the next
+# copy of that folder brings the new item. Never in a content check or a repair. Whether it was moved.
+$healed=[Collections.Generic.List[object]]::new()
+function Move-TypeSwap($Pair){
+ if($noCopy -or -not $Pair -or -not $Pair.Relative){return $false}
+ # A folder in the copy can hold the old copy of a folder that is no longer selected. Such a copy
+ # stays where it is (as when its parent folder is deleted from the source), so the folder is not moved.
+ if([IO.Directory]::Exists($Pair.Copy) -and @($selection.Entries|Where-Object {-not(Test-BackupModeIncludes $_.Mode 'Mirror') -and $_.Path.StartsWith($Pair.Relative+'\',[StringComparison]::OrdinalIgnoreCase)}).Count){return $false}
+ # Nor anything that lies behind a link or junction, on either side.
+ if((Test-BackupLinkOnPath $src $Pair.Relative) -or (Test-BackupLinkOnPath $dst $Pair.Relative)){return $false}
+ $target=(Get-RunRecovery)+'\'+$Pair.Relative
+ if(-not(Move-BackupTypeSwap $Pair.Source $Pair.Copy $target)){return $false}
+ $script:recoveryMoves++;[void]$conflicts.Remove($Pair)
+ $healed.Add([ordered]@{Source=$Pair.Source;Copy=$Pair.Copy;MovedTo=$target});$true
+}
 
 $started=Get-Date
 $summary=[ordered]@{Source=$src;Destination=$dst;Started=$started.ToString('o');DefaultMode=$selection.DefaultMode;Selected=@($regions|ForEach-Object {if($_.Path){$_.Path}else{'(source root)'}});Runs=@();SelectionsMissing=@();SelectionsSkippedAsLinks=@();SelectionsSkippedAsPrivate=@()}
-$copied=@()
+$copied=@();$rootConflicts=0
+$logNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+function Invoke-CopyRun([string[]]$RoboArgs,[string]$Part,[string]$Log){
+ # One robocopy run, added to the summary. The totals are read as soon as the run ends, from the log
+ # of this run alone. Repeated marks a run whose folder was copied again after a file-or-folder swap
+ # in it was healed: the later run tells what is left uncopied there.
+ $code=Invoke-Robo $RoboArgs $Part;$result=Get-RoboRunResult $Log $code;$t=$result.Totals
+ $entry=[ordered]@{Part=$Part;ExitCode=$code;Log=$Log;Files=$(if($t){'Files : '+($t.Files -join ' ')}else{''});Bytes=$(if($t){'Bytes : '+($t.Bytes -join ' ')}else{''});NotCopied=$result.NotCopied;Complete=$result.Complete;Repeated=$false}
+ $summary.Runs+=$entry
+ [pscustomobject]@{Entry=$entry;Mismatch=([bool]($code -band 4) -or ($t -and ($t.Files[3]+$t.Dirs[3]) -gt 0))}
+}
 foreach($region in $regions){
  $from=Join-Rel $src $region.Path;$to=Join-Rel $dst $region.Path
  # /XD only skips folders below the one robocopy copies, never that folder itself, and a file selected
@@ -140,16 +268,34 @@ foreach($region in $regions){
  if(-not(Test-Path -LiteralPath $from)){$summary.SelectionsMissing+=$region.Path;continue}
  $item=Get-Item -LiteralPath $from -Force
  if($region.Path -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){$summary.SelectionsSkippedAsLinks+=$region.Path;continue}
- $log=Join-Path $run (Get-LogName $region.Path)
+ # A selected folder whose place in the copy is taken by a file: robocopy cannot even start there.
+ # A backup moves that file aside first. Where it cannot (or in a content check), the folder counts
+ # as one item not copied, and the other selections are still copied. (A selected file whose place
+ # is still taken by a folder is only noted here; robocopy reports that mismatch itself.)
+ $pair=Test-TypeConflict $region.Path
+ if($pair -and -not(Move-TypeSwap $pair) -and $item.PSIsContainer){$rootConflicts++;continue}
+ $log=Join-Path $run (Get-MirrorLogName $region.Path $logNames)
  if($item.PSIsContainer){$a=@(Get-RoboArgs $from $to $log $region.Excluded)}
  else{
   # A single file selected on its own (for example README.md at the drive root).
   $a=@((Format-RoboDir (Split-Path -LiteralPath $from)),(Split-Path -LiteralPath $to),$item.Name,'/COPY:DAT','/R:1','/W:1','/NP','/FP','/BYTES',('/UNILOG:'+$log))
  }
  $part=if($region.Path){$region.Path}else{'main'}
- if(-not $VerifyOnly){$summary.Runs+=[ordered]@{Part=$part;ExitCode=(Invoke-Robo $a $part);Log=$log}}
- $copied+=[pscustomobject]@{Region=$region;IsFolder=$item.PSIsContainer}
+ $copied+=[pscustomobject]@{Region=$region;IsFolder=$item.PSIsContainer;Log=$log;Part=$part;Args=$a;Run=$(if(-not $noCopy){Invoke-CopyRun $a $part $log})}
 }
+# A choice inside a copied folder is left out by robocopy without a word when its own name, or a
+# folder name on the way to it, is on the always-skipped list (a folder called venv, say). Such a
+# choice is named, so a folder shown as selected is never missing from the copy unnoticed.
+$rootPaths=@($copied|ForEach-Object {$_.Region.Path})
+$summary.SelectionsSkippedByName=@(foreach($e in $selection.Entries){
+ if(-not(Test-BackupModeIncludes $e.Mode 'Mirror')){continue}
+ $root=$null
+ foreach($r in $rootPaths){if(($r.Length -eq 0 -or [string]::Equals($r,$e.Path,[StringComparison]::OrdinalIgnoreCase) -or $e.Path.StartsWith($r+'\',[StringComparison]::OrdinalIgnoreCase)) -and ($null -eq $root -or $r.Length -gt $root.Length)){$root=$r}}
+ if($null -eq $root -or $root.Length -eq $e.Path.Length){continue}   # not in a copied folder, or copied on its own
+ $full=Join-Rel $src $e.Path;if(-not(Test-Path -LiteralPath $full)){continue}
+ $below=if($root){$e.Path.Substring($root.Length+1)}else{$e.Path}
+ if(Get-BackupSkippedName $below $skipNames $personalNames (Test-Path -LiteralPath $full -PathType Container)){$e.Path}
+})
 # An earlier version could copy a private folder. Such a copy holds readable recovery keys; it is
 # reported so it can be deleted by hand, never deleted here.
 $summary.PrivateCopiesOnDrive=@($privateInSource|Where-Object {$_ -and (Test-Path -LiteralPath (Join-Rel $dst $_))})
@@ -157,54 +303,148 @@ if($copied.Count -eq 0 -and $summary.SelectionsSkippedAsPrivate.Count){
  $old=if($summary.PrivateCopiesOnDrive.Count){' An older copy of one is still on the backup drive and holds readable recovery keys; delete it: '+(@($summary.PrivateCopiesOnDrive|ForEach-Object {Join-Rel $dst $_}) -join ', ')+'.'}else{''}
  throw ("Everything selected is one of DevDriveBackup's private folders, which hold passwords and recovery keys and are never copied: "+($summary.SelectionsSkippedAsPrivate -join ', ')+'.'+$old)
 }
-if($copied.Count -eq 0){throw ('None of the selected paths exist under '+$src+': '+($summary.Selected -join ', '))}
+if($copied.Count -eq 0 -and -not $rootConflicts){throw ('None of the selected paths exist under '+$src+': '+($summary.Selected -join ', '))}
 # robocopy gives a folder copied from a drive root the root's hidden/system attributes.
-if(-not $VerifyOnly){& attrib.exe -s -h $dst|Out-Null}
+if(-not $noCopy){& attrib.exe -s -h $dst|Out-Null}
 
 # Files in the mirror that are gone from the source: list them, and optionally move them aside.
-$extras=@()
-foreach($c in @($copied|Where-Object {$_.IsFolder -and -not $VerifyOnly})){
- $extrasLog=Join-Path $run ('extras-'+(Get-LogName $c.Region.Path).Substring(5))
+# Kept in the order Windows compares names, not a dictionary's: two paths that differ by an invisible
+# character are two paths, and a folder always comes before what is inside it.
+$listed=[Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach($c in @($copied|Where-Object {$_.IsFolder -and -not $noCopy})){
+ $extrasLog=Join-Path $run ('extras-'+[IO.Path]::GetFileName($c.Log).Substring(5))
  # Directory names must be listed here (no /NDL) so extra directories are reported too.
- & robocopy.exe @(@(Get-RoboArgs (Join-Rel $src $c.Region.Path) (Join-Rel $dst $c.Region.Path) $extrasLog $c.Region.Excluded @('/L','/PURGE','/NJH','/NJS'))|Where-Object {$_ -ne '/NDL'})|Out-Null
  # With /MT, robocopy's records can be split over lines or share one; see Get-RoboExtraPaths.
- $extras+=@(Get-RoboExtraPaths (Get-Content -LiteralPath $extrasLog -Encoding Unicode) $dst)
+ $list={
+  & robocopy.exe @(@(Get-RoboArgs (Join-Rel $src $c.Region.Path) (Join-Rel $dst $c.Region.Path) $extrasLog $c.Region.Excluded @('/L','/PURGE','/NJH','/NJS'))|Where-Object {$_ -ne '/NDL'})|Out-Null
+  Get-Content -LiteralPath $extrasLog -Encoding Unicode
+ }
+ $lines=@(& $list)
+ # Where the copy run reported a mismatch, the listing shows which names: it holds every folder of
+ # the source and every file that differs. Each is looked up on both sides, so only a real
+ # folder-against-file pair counts.
+ $swaps={foreach($p in @(Get-RoboExtraPaths $lines $src $dst)){Test-TypeConflict $p.Substring($src.Length).Trim('\')}}
+ if($c.Run.Mismatch -and @(& $swaps|Where-Object {Move-TypeSwap $_}).Count){
+  # The old items are out of the way now, so the folder is copied once more, which brings the new
+  # ones, and listed again. What is still a mismatch after that is reported.
+  $c.Run.Entry.Repeated=$true
+  $again=Join-Path $run (Get-MirrorLogName ($c.Part+' again') $logNames)
+  $c.Run=Invoke-CopyRun @($c.Args|ForEach-Object {if($_ -like '/UNILOG:*'){'/UNILOG:'+$again}else{$_}}) $c.Part $again
+  $lines=@(& $list)
+ }
+ if($c.Run.Mismatch){& $swaps|Out-Null}
+ foreach($p in @(Get-RoboExtraPaths $lines $dst $src)){[void]$listed.Add($p)}
 }
 # Only selected paths count as extras; old copies of unselected folders are reported separately below.
 # A path that still exists in the source is never an extra, whatever the log seems to say.
-$extras=@($extras|Sort-Object -Unique|Where-Object {
+$extras=@($listed|Where-Object {
  $rel=$_.Substring($dst.Length).Trim('\')
  $rel -and (Test-BackupModeIncludes (Get-BackupMode $selection $rel) 'Mirror') -and -not(Test-Path -LiteralPath (Join-Rel $src $rel))
 })
-$summary.ExtrasFound=$extras.Count
-# Files are moved aside only after a copy that could read the source: a run where robocopy failed
-# (exit code 8 or more) may have missed files that still exist, so its extras are only reported.
-$copyFailed=@($summary.Runs|Where-Object {$_.ExitCode -ge 8}).Count -gt 0
-if($MoveExtras -and $copyFailed){$summary.ExtrasNotMovedReason='Some files could not be copied in this run, so nothing was moved aside'}
-if($MoveExtras -and $extras.Count -and -not $VerifyOnly -and -not $copyFailed){
- $stamp=Join-Path $recoveryRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
+# Counted as files: the listing names a deleted folder and every file in it.
+$summary.ExtrasFound=@($extras|Where-Object {-not $_.EndsWith('\')}).Count
+# Files are moved aside only after a copy that read the whole source: a run where robocopy failed
+# (exit code 8 or more) or did not finish may have missed files that still exist, so its extras are
+# only reported.
+$copyFailed=@($summary.Runs|Where-Object {-not $_.Repeated -and -not $_.Complete}).Count -gt 0
+if($MoveExtras -and $copyFailed -and -not $noCopy){$summary.ExtrasNotMovedReason='Some files could not be copied in this run, so nothing was moved aside'}
+if($MoveExtras -and $extras.Count -and -not $noCopy -and -not $copyFailed){
+ $stamp=Get-RunRecovery
+ $moved=0;$movedItems=0;$notMoved=@()
  foreach($item in $extras){
   if(-not(Test-Path -LiteralPath $item)){continue}
   $relative=$item.Substring($dst.Length).TrimStart('\')
   # Checked again here: a file put back in the source while earlier items were moved stays in the copy.
   if(Test-Path -LiteralPath (Join-Rel $src $relative.TrimEnd('\'))){continue}
+  # A deleted folder can still hold, in the copy, the old copy of a sub-folder that is no longer
+  # selected. Such a copy is kept, so the folder is not moved whole; its own files follow in the list.
+  if($item.EndsWith('\') -and @($selection.Entries|Where-Object {-not(Test-BackupModeIncludes $_.Mode 'Mirror') -and $_.Path.StartsWith($relative,[StringComparison]::OrdinalIgnoreCase)}).Count){continue}
   $target=Join-Path $stamp $relative
-  New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target.TrimEnd('\'))) -Force|Out-Null
-  Move-Item -LiteralPath $item -Destination $target
+  # A file another program holds open cannot be moved. It stays in the copy and is named, and the
+  # run goes on. A folder that cannot be moved whole is left to its files, which follow in the list.
+  try{
+   $count=if($item.EndsWith('\')){@(Get-ChildItem -LiteralPath $item -Recurse -File -Force).Count}else{1}
+   New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target.TrimEnd('\'))) -Force|Out-Null
+   Move-Item -LiteralPath $item -Destination $target
+   $moved+=$count;$movedItems++;$script:recoveryMoves++
+  }catch{if(-not $item.EndsWith('\')){$notMoved+=$item}}
  }
- $summary.ExtrasMovedTo=$stamp
- $summary.ExtrasMoved=$extras.Count
+ if($movedItems){$summary.ExtrasMovedTo=$stamp}
+ # Files really moved; a folder moved whole counts by the files in it.
+ $summary.ExtrasMoved=$moved
+ $summary.ExtrasNotMoved=$notMoved
 }
+
+# The rules of the copy, as the content check, the repair and the look at names below take them: the
+# same skips as the copy (names, personal names for files too, Exclude paths, the private folders).
+# They apply below each folder robocopy copied, as with robocopy, so the copied folders are passed too.
+# ForEach-Object rather than $selection.Entries.Path: under strict mode an empty list (a source
+# with no subfolders listed) has no Path property.
+$rulePaths=[string[]]@($selection.Entries|ForEach-Object {$_.Path})
+$ruleOn=[bool[]]@($selection.Entries|ForEach-Object {Test-BackupModeIncludes $_.Mode 'Mirror'})
+$ruleDefault=Test-BackupModeIncludes $selection.DefaultMode 'Mirror'
+$ruleRoots=[string[]]@($copied|ForEach-Object {$_.Region.Path})
+
+# --- Repair -----------------------------------------------------------------------------------------
+# The files the last content check found different, unreadable or missing in the copy are looked at
+# again and, where the copy still differs, copied again (MirrorVerifier.Repair: the new copy is
+# compared with the source by SHA-256 before the old version is moved to the recovery folder and the
+# new one takes its name). Files only in the copy are not on the list; a file that is no longer
+# selected, or gone from the source, is left alone; a file that changed in the source since the
+# check is simply copied as it is now. What could not be put right counts as a copy error and stays
+# in the record of the check, so the next repair tries it again; what was put right leaves the record.
+if($Repair){
+ Add-Type -Path (Join-Path $PSScriptRoot 'Backup.MirrorVerifier.cs')
+ $wanted=[string[]]@(@($check.Files)|ForEach-Object {$f=([string]$_).Split("`t");if($f.Count -ge 2 -and $f[1] -and $f[0] -cin 'CONTENT','SIZE','MISSING-IN-MIRROR','ERROR'){$f[1]}})
+ $done=[string[]]@(if($wanted.Count){[MirrorVerifier]::Repair($dst,$src,(Get-RunRecovery),[math]::Min(8,$Threads),$wanted,$rulePaths,$ruleOn,$ruleDefault,[string[]]$skipNames,[string[]]$personalNames,[string[]]$skipPaths,$ruleRoots)})
+ [IO.File]::WriteAllLines((Join-Path $run 'repair.txt'),$done)
+ $count={param($what)@($done|Where-Object {$_.StartsWith($what+"`t")}).Count}
+ $script:recoveryMoves+=@($done|Where-Object {$_.Split("`t")[2]}).Count
+ $when=$check.Checked;if($when -is [datetime]){$when=$when.ToString('o')}
+ $summary.Repair=[ordered]@{Requested=$done.Count;Repaired=(& $count 'REPAIRED');StillDifferent=(& $count 'STILL-DIFFERENT');Failed=(& $count 'FAILED');MovedTo=''
+  AlreadyMatching=(& $count 'MATCHES');Skipped=(& $count 'SKIPPED');CheckedAt=[string]$when;Details=(Join-Path $run 'repair.txt')}
+ $left=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+ foreach($line in $done){if($line -cmatch "^(STILL-DIFFERENT|FAILED)`t"){[void]$left.Add($line.Split("`t")[1])}}
+ [ordered]@{Checked=[string]$when;Source=$src;Destination=$dst;RunFolder=[string]$check.RunFolder;Repaired=(Get-Date).ToString('o')
+  Files=@(@($check.Files)|Where-Object {$f=([string]$_).Split("`t");$f.Count -ge 2 -and $left.Contains($f[1])})}|ConvertTo-Json -Depth 3|Set-Content -LiteralPath $lastCheck
+}
+# A run that could move nothing made no recovery folder. The empty folders prepared for it are
+# removed, or they would count as this run's folder and push an earlier one out of the kept ones.
+if($script:recovery -and -not $script:recoveryMoves){
+ if((Test-Path -LiteralPath $script:recovery) -and -not @(Get-ChildItem -LiteralPath $script:recovery -Recurse -File -Force).Count){Remove-Item -LiteralPath $script:recovery -Recurse -Force}
+ $script:recovery=''
+}
+# What was healed, and where this run moved things to ('' when it moved nothing).
+$summary.TypeSwapsHealed=@($healed);$summary.RecoveryFolder=$script:recovery
+if($Repair){$summary.Repair.MovedTo=$script:recovery}
 # Old recovery folders: keep the newest KeepRecovery, delete the rest. Only folders this script
-# names (yyyyMMdd-HHmmss) directly inside the recovery root are touched.
-$summary.RecoveryRemoved=@()
-if($MoveExtras -and $KeepRecovery -gt 0 -and -not $VerifyOnly -and (Test-Path -LiteralPath $recoveryRoot -PathType Container)){
- $dated=@(Get-ChildItem -LiteralPath $recoveryRoot -Directory -Force|Where-Object {$_.Name -match '^\d{8}-\d{6}$' -and -not($_.Attributes -band [IO.FileAttributes]::ReparsePoint)}|Sort-Object Name -Descending)
- foreach($old in @($dated|Select-Object -Skip $KeepRecovery)){
-  Remove-Item -LiteralPath $old.FullName -Recurse -Force
-  $summary.RecoveryRemoved+=$old.Name
+# names (yyyyMMdd-HHmmss) directly inside the recovery root are touched, and never the one this run
+# made, whether it holds files gone from the source or an item moved aside by healing. Only a backup
+# with -MoveExtras and a number to keep deletes anything; healing alone and a repair never do.
+# RecoveryRemoved lists only folders that were really deleted; with -PreviewRecovery the same choice
+# is listed in RecoveryWouldRemove and nothing is deleted. With -RecoveryApproved only the chosen
+# folders that are also named there are deleted, and the rest of the choice is listed in
+# RecoveryDeferred: a folder that became old since the clean-up was approved waits for its own approval.
+$summary.RecoveryRemoved=@();$summary.RecoveryWouldRemove=@();$summary.RecoveryDeferred=@()
+$approvedGiven=$PSBoundParameters.ContainsKey('RecoveryApproved')
+$approved=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach($given in @($RecoveryApproved)){foreach($name in ([string]$given).Split(',')){if($name.Trim()){[void]$approved.Add($name.Trim())}}}
+# The dated recovery folders beside the copy, by name; a link is never one of them.
+function Get-DatedRecoveryFolders{
+ if(Test-Path -LiteralPath $recoveryRoot -PathType Container){Get-ChildItem -LiteralPath $recoveryRoot -Directory -Force|Where-Object {$_.Name -match '^\d{8}-\d{6}$' -and -not($_.Attributes -band [IO.FileAttributes]::ReparsePoint)}|ForEach-Object {$_.Name}}
+}
+if($MoveExtras -and $KeepRecovery -gt 0 -and -not $noCopy -and (Test-Path -LiteralPath $recoveryRoot -PathType Container)){
+ $dated=@(Get-DatedRecoveryFolders)
+ foreach($old in @(Get-RecoveryFoldersToRemove $dated $KeepRecovery $(if($script:recovery){[IO.Path]::GetFileName($script:recovery)}else{''}))){
+  if($PreviewRecovery){$summary.RecoveryWouldRemove+=$old;continue}
+  if($approvedGiven -and -not $approved.Contains($old)){$summary.RecoveryDeferred+=$old;continue}
+  Remove-Item -LiteralPath (Join-Path $recoveryRoot $old) -Recurse -Force
+  $summary.RecoveryRemoved+=$old
  }
 }
+# How many dated recovery folders are beside the copy now, after any clean-up. The window uses the
+# number to suggest a keep rule when they pile up; nothing is deleted because of it.
+$summary.RecoveryFolderCount=try{@(Get-DatedRecoveryFolders).Count}catch{0}
 
 # Old copies in the mirror of folders that are no longer selected. They are kept, never deleted.
 $notSelected=[Collections.Generic.List[string]]::new()
@@ -220,45 +460,132 @@ $summary.NotSelectedButInMirror=@($notSelected)
 
 # Files that still failed after the retry are counted from robocopy's totals; the ERROR lines
 # (one per attempt) are kept in copy-errors.txt for details.
-$errors=@($summary.Runs|ForEach-Object {Get-Content -LiteralPath $_.Log -Encoding Unicode|Where-Object {$_ -match '\sERROR \d+ ' -or $_ -match '\*MISMATCH'}})
+# A run that was repeated after healing is left out: the later run of that folder tells what is left.
+$lastRuns=@($summary.Runs|Where-Object {-not $_.Repeated})
+# Each log is read once: the lines for copy-errors.txt, and every error record (a number with its
+# hexadecimal twin, whatever the Windows language) for the files in use below.
+$logLines=@($lastRuns|Where-Object {Test-Path -LiteralPath $_.Log}|ForEach-Object {Get-Content -LiteralPath $_.Log -Encoding Unicode|Where-Object {$_ -match '\sERROR \d+ ' -or $_ -match '\*MISMATCH' -or $_ -match '\s\d+ \(0x[0-9A-Fa-f]{8}\) '}})
+$errors=@($logLines|Where-Object {$_ -match '\sERROR \d+ ' -or $_ -match '\*MISMATCH'})
+# A run without totals was ended or crashed; robocopy wrote no line about that itself.
+$errors+=@($lastRuns|Where-Object {$_.Files -eq ''}|ForEach-Object {"NOT FINISHED`trobocopy ended before it finished copying $($_.Part) (exit code $($_.ExitCode)), so this copy is incomplete. Back up again. Log: $($_.Log)"})
+# The same name is a folder on one side and a file on the other: both paths, and what to do.
+$errors+=@($conflicts|ForEach-Object {
+ $todo=if($noCopy){'The next backup moves it aside and copies the new one.'}else{'It could not be moved aside: a program may be using it, or it holds the old copy of a folder that is no longer selected. Move it yourself, then back up again.'}
+ if($_.SourceIsFolder){"TYPE CONFLICT`tThe source has a folder where the copy has a file of the same name, so nothing in that folder is copied. Source: $($_.Source)  Copy: $($_.Copy)  $todo"}
+ else{"TYPE CONFLICT`tThe source has a file where the copy has a folder of the same name, so the file is not copied. Source: $($_.Source)  Copy: $($_.Copy)  $todo"}
+})
 [IO.File]::WriteAllLines((Join-Path $run 'copy-errors.txt'),[string[]]$errors)
-$failed=[long]0
-foreach($r in $summary.Runs){
- $t=Get-RoboTotals $r.Log
- if($t){
-  $r.Files='Files : '+($t.Files -join ' ');$r.Bytes='Bytes : '+($t.Bytes -join ' ')
-  # Mismatch (a folder in the source where the copy has a file of that name, or the reverse): robocopy
-  # copies nothing there and still exits below 8, so it counts as not copied, like a failed file.
-  $failed+=$t.Files[3]+$t.Files[4]+$t.Dirs[3]+$t.Dirs[4]
- }else{$r.Files='';$r.Bytes='';if($r.ExitCode -ge 8 -or ($r.ExitCode -band 4)){$failed+=1}}
-}
-$summary.CopyErrors=$failed
+$summary.TypeConflicts=@($conflicts|ForEach-Object {$_.Copy})
+# What each run left uncopied (see Get-RoboRunResult), plus each selected folder that could not be
+# started because a file has its place in the copy. In a repair: each file it could not put right,
+# and nothing else, so a repair fails only for what it was asked to do.
+$summary.CopyErrors=if($Repair){[long]($summary.Repair.StillDifferent+$summary.Repair.Failed)}else{[long](@($lastRuns|ForEach-Object {$_.NotCopied})|Measure-Object -Sum).Sum+$rootConflicts}
 
+# --- Files in use ---------------------------------------------------------------------------------------
+# The source files robocopy could not copy because another program was using them, taken from its
+# error records: 32 (the file is in use) and 33 (a part of it is locked) as they stand. 5 (access is
+# denied) is written for the source file whichever side refused, so it counts only when the source
+# file itself still cannot be opened for reading; when it can, the backup drive refused the file, which
+# is a problem of that drive and stays an ordinary copy error. Only a file that is still in the source
+# counts. This is a report and changes nothing: every such file is already in CopyErrors, the run is
+# a failed run and the copy is not recorded as complete. The summary holds the first 100 and the count
+# of all; every one is in locked-files.txt in the run folder, with its error code.
+$locked=[Collections.Generic.List[object]]::new()
+# Compared exactly, letter case included: in a folder that keeps case apart, a.txt in use must not
+# excuse a difference in A.txt. robocopy and the content check both write a name as the folder holds it.
+$lockedPaths=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+if(-not $noCopy){
+ foreach($f in @(Get-RoboLockedFiles $logLines $src|Sort-Object {$_.Path})){
+  $full='\\?\'+$src+$f.Path
+  if(-not [IO.File]::Exists($full)){continue}
+  if($f.Code -eq 5){try{[IO.File]::Open($full,'Open','Read','ReadWrite,Delete').Dispose();continue}catch{}}
+  $locked.Add($f);[void]$lockedPaths.Add($f.Path)
+ }
+}
+if($locked.Count){[IO.File]::WriteAllLines((Join-Path $run 'locked-files.txt'),[string[]]@($locked|ForEach-Object {$_.Path+"`t"+$_.Code}))}
+$summary.LockedFiles=@($locked|Select-Object -First 100|ForEach-Object {$_.Path});$summary.LockedFilesCount=$locked.Count
+
+# Whether a full content check in this run found no difference apart from the files in use.
+$checkPassed=$false
 if($Verify){
  Add-Type -Path (Join-Path $PSScriptRoot 'Backup.MirrorVerifier.cs')
  $vf=[long]0;$vb=[long]0
- # ForEach-Object rather than $selection.Entries.Path: under strict mode an empty list (a source
- # with no subfolders listed) has no Path property.
- $paths=[string[]]@($selection.Entries|ForEach-Object {$_.Path})
- $on=[bool[]]@($selection.Entries|ForEach-Object {Test-BackupModeIncludes $_.Mode 'Mirror'})
- # The same skips as the copy: names, personal names (files too), Exclude paths and the private folders.
- $bad=[MirrorVerifier]::Compare($dst,$src,[math]::Min(8,[Environment]::ProcessorCount),$paths,$on,(Test-BackupModeIncludes $selection.DefaultMode 'Mirror'),[string[]]$skipNames,[string[]]$personalNames,[string[]]$skipPaths,[ref]$vf,[ref]$vb)
+ $bad=[MirrorVerifier]::Compare($dst,$src,[math]::Min(8,[Environment]::ProcessorCount),$rulePaths,$ruleOn,$ruleDefault,[string[]]$skipNames,[string[]]$personalNames,[string[]]$skipPaths,$ruleRoots,[ref]$vf,[ref]$vb)
  [IO.File]::WriteAllLines((Join-Path $run 'verify-differences.txt'),[string[]]$bad)
  # Files only in the mirror (deleted from the source, or now skipped) are expected in a copy that
  # never deletes; they are reported, but are not differences. Selected files missing from the mirror are.
  $onlyInMirror=@($bad|Where-Object {$_.StartsWith("MISSING-IN-SOURCE`t")}).Count
- $summary.Verify=[ordered]@{FilesMatched=$vf;GiBMatched=[math]::Round($vb/1GB,2);Differences=($bad.Count-$onlyInMirror);MissingInMirror=@($bad|Where-Object {$_.StartsWith("MISSING-IN-MIRROR`t")}).Count;OnlyInMirror=$onlyInMirror}
+ # A file in use is compared like any other, so it shows as what it is: missing in the copy, not
+ # readable, or different. It is a difference (LockedDifferences says how many of them are such
+ # files) and is never counted as matched unless both sides were really read and are the same.
+ $lockedDifferences=@($bad|Where-Object {$f=$_.Split("`t");-not $_.StartsWith("MISSING-IN-SOURCE`t") -and $f.Count -ge 2 -and $lockedPaths.Contains($f[1])}).Count
+ $checkPassed=($bad.Count-$onlyInMirror-$lockedDifferences) -eq 0
+ $summary.Verify=[ordered]@{FilesMatched=$vf;GiBMatched=[math]::Round($vb/1GB,2);Differences=($bad.Count-$onlyInMirror);MissingInMirror=@($bad|Where-Object {$_.StartsWith("MISSING-IN-MIRROR`t")}).Count;OnlyInMirror=$onlyInMirror;LockedDifferences=$lockedDifferences}
+ # What a later -Repair works from: the lines that name a file of the source. Files only in the
+ # copy are left out; a repair never touches them. Each check replaces the record of the one before.
+ [ordered]@{Checked=(Get-Date).ToString('o');Source=$src;Destination=$dst;RunFolder=$run;Files=@($bad|Where-Object {-not $_.StartsWith("MISSING-IN-SOURCE`t")})}|ConvertTo-Json -Depth 3|Set-Content -LiteralPath $lastCheck
 }
+
+# --- Names robocopy treats differently from what the lists say -----------------------------------------
+# Two warnings; nothing is copied differently because of them, and neither is a copy error.
+# SkippedByShortName: robocopy compares a wildcard name with the short (8.3) name of a file or folder
+# too, so *.htm from Exclude also skips page.html, whose short name is PAGE~1.HTM. Only the personal
+# names can do that (no short name fits a built-in one), and only where the drive gives short names:
+# NTFS and FAT do, a Dev Drive (ReFS) does not.
+# CaseCollisions: a folder that keeps letter case apart can hold Makefile and makefile; the backup
+# drive holds one file for both, so one of them is not really in the copy.
+# Both come from one pass over the names in the selected folders (no file is read), after a backup
+# and in a content check. The summary holds the first 100 of each and the count of all; every one is
+# in a file in the run folder.
+$summary.SkippedByShortName=@();$summary.SkippedByShortNameCount=0;$summary.CaseCollisions=@();$summary.CaseCollisionsCount=0
+if(-not $Repair){
+ Add-Type -Path (Join-Path $PSScriptRoot 'Backup.MirrorVerifier.cs')
+ $shortFs=try{[IO.DriveInfo]::new($src.Substring(0,3)).DriveFormat -in 'NTFS','FAT','FAT32'}catch{$true}
+ $shortNames=[string[]]@(if($shortFs){$personalNames|Where-Object {$_ -match '[*?~]'}})
+ $seen=@([MirrorVerifier]::Survey($src,$rulePaths,$ruleOn,$ruleDefault,[string[]]$skipNames,[string[]]$personalNames,[string[]]$skipPaths,$ruleRoots,$shortNames))
+ $short=@($seen|Where-Object {$_.StartsWith("SHORT`t")}|ForEach-Object {$_.Substring(6)})
+ $case=@($seen|Where-Object {$_.StartsWith("CASE`t")}|ForEach-Object {$_.Substring(5).Replace("`t",' | ')})
+ if($short.Count){[IO.File]::WriteAllLines((Join-Path $run 'skipped-by-short-name.txt'),[string[]]$short)}
+ if($case.Count){[IO.File]::WriteAllLines((Join-Path $run 'case-collisions.txt'),[string[]]$case)}
+ $summary.SkippedByShortName=@($short|Select-Object -First 100|ForEach-Object {$_.Split("`t")[0]});$summary.SkippedByShortNameCount=$short.Count
+ $summary.CaseCollisions=@($case|Select-Object -First 100);$summary.CaseCollisionsCount=$case.Count
+}
+
+# A selected folder that is missing or became a link was not copied, so the run fails, as the versioned
+# backup does. A content check only reads, and a repair copies single files; neither marks the copy
+# as complete.
+$notCopied=@(@($summary.SelectionsMissing|ForEach-Object {"$_ (missing)"})+@($summary.SelectionsSkippedAsLinks|ForEach-Object {"$_ (now a link or junction)"}))
+# The first full check is done when a full check of this run found no difference in any file that
+# was copied: every difference left is a file that was in use (and is named as one). That is not a
+# complete backup, and is remembered apart from one, so the next run does not read both copies in
+# full again only because a file is always in use. A backup whose check finds any other difference
+# or a content check on its own that finds any other difference, forgets it again: the next backup
+# then checks in full, so a real difference is never left standing behind an earlier check.
+$recordCheck=$Verify -and $checkPassed -and -not $notCopied.Count
+if($Verify -and -not $Repair -and -not $checkPassed){
+ # A check on its own copies nothing, so it names no file in use. The files that were in use when the
+ # first check passed (kept with it) are excused here as they were then; any other difference is real.
+ $other=$bad.Count-$onlyInMirror-$lockedDifferences
+ if($noCopy -and $firstCheckDone){
+  $known=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  try{foreach($p in @((Get-Content -LiteralPath $firstCheck -Raw|ConvertFrom-Json).LockedFiles)){if($p){[void]$known.Add([string]$p)}}}catch{}
+  $other=@($bad|Where-Object {$f=$_.Split("`t");-not $_.StartsWith("MISSING-IN-SOURCE`t") -and -not ($f.Count -ge 2 -and $known.Contains($f[1]))}).Count
+ }
+ if($other -gt 0){$firstCheckDone=$false}
+}
+$summary.FirstCheckDone=[bool]($firstCheckDone -or $recordCheck)
 
 $summary.Finished=(Get-Date).ToString('o')
 $summary.Minutes=[math]::Round(((Get-Date)-$started).TotalMinutes,1)
 $summary.RunFolder=$run
 $summary|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $run 'summary.json')
-# A selected folder that is missing or became a link was not copied, so the run fails, as the versioned
-# backup does. A content check only reads; it never marks the copy as complete.
-$notCopied=@(@($summary.SelectionsMissing|ForEach-Object {"$_ (missing)"})+@($summary.SelectionsSkippedAsLinks|ForEach-Object {"$_ (now a link or junction)"}))
-if(-not $VerifyOnly -and $summary.CopyErrors -eq 0 -and -not $notCopied.Count -and (-not $Verify -or $summary.Verify.Differences -eq 0)){
+if($recordCheck){
+ [ordered]@{Checked=(Get-Date).ToString('o');Source=$src;Destination=$dst;RunFolder=$run;FilesMatched=$summary.Verify.FilesMatched;LockedFiles=@($summary.LockedFiles)}|ConvertTo-Json -Depth 3|Set-Content -LiteralPath $firstCheck
+}elseif(-not $summary.FirstCheckDone -and (Test-Path -LiteralPath $firstCheck)){Remove-Item -LiteralPath $firstCheck -Force}
+if(-not $noCopy -and $summary.CopyErrors -eq 0 -and -not $notCopied.Count -and (-not $Verify -or $summary.Verify.Differences -eq 0)){
  Copy-Item -LiteralPath (Join-Path $run 'summary.json') -Destination $lastSuccess -Force
 }
 if($notCopied.Count){throw ('Selected folders were not copied: '+($notCopied -join ', ')+'. Choose them again on What to back up, or set them to Skip. Details: '+(Join-Path $run 'summary.json'))}
 $summary|ConvertTo-Json -Depth 6
+# A repair that left a file unrepaired ends with an error code, after the summary, so the caller sees both.
+if($Repair -and $summary.CopyErrors -gt 0){exit 1}

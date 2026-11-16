@@ -28,4 +28,20 @@ function Assert-PrivateExportPath([string]$Path,[string[]]$ForbiddenRoots,[strin
 function Get-RecoveryKeyText([string]$Repository,[string]$Password) {
  "Restic repository recovery key`r`nRepository: $Repository`r`nPassword: $Password`r`nKeep this file in a password manager or separate offline location. Anyone with this password can decrypt the backup.`r`n"
 }
-Export-ModuleMember -Function New-PrivateTextFile,Set-PrivateTextFile,Assert-NewBackupPassword,Assert-PrivateExportPath,Get-RecoveryKeyText
+function Assert-RotationJournalTarget($Journal,[string]$VolumeId,[string]$Folder,[string]$Repository) {
+ # A pending password change belongs to one repository. The backup drive can come back under another
+ # letter between the interruption and the resume, so the repository is recognised by its volume and
+ # folder. A journal written before those were recorded holds only the path: the same path, or the
+ # same path under another drive letter, is accepted (the old password in the journal must still open
+ # the repository before anything changes).
+ $p=$Journal.PSObject.Properties
+ if($p['DestinationVolumeId'] -and $p['RepositoryFolder'] -and $Journal.DestinationVolumeId -and $Journal.RepositoryFolder){
+  if([string]$Journal.DestinationVolumeId -cne $VolumeId -or [string]$Journal.RepositoryFolder -ine $Folder){throw 'Password-change journal belongs to another configuration or repository'}
+  return
+ }
+ $old=[string]$Journal.Repository
+ if($old -and $old -ieq $Repository){return}
+ if($old -match '^[A-Za-z]:\\.' -and $Repository -match '^[A-Za-z]:\\.' -and $old.Substring(1) -ieq $Repository.Substring(1)){return}
+ throw 'Password-change journal belongs to another configuration or repository'
+}
+Export-ModuleMember -Function New-PrivateTextFile,Set-PrivateTextFile,Assert-NewBackupPassword,Assert-PrivateExportPath,Assert-RotationJournalTarget,Get-RecoveryKeyText

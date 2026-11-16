@@ -7,9 +7,30 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Every commit being pushed is checked, not only the newest: a detail added and removed again
+      # would otherwise stay in the history.
       - name: Check for private backup details
         shell: pwsh
-        run: ./Test-PrivacyGuard.ps1
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          # A new branch is compared with the default branch. The first push of the default branch itself
+          # (a new repository or fork) has nothing to compare with, so its whole history is checked.
+          $range = if ($env:BASE) { "$env:BASE..HEAD" } elseif ($env:BEFORE -and $env:BEFORE -notmatch '^0+$') { "$env:BEFORE..HEAD" } elseif ($env:BRANCH -eq $env:DEFAULT) { 'HEAD' } else { "origin/$env:DEFAULT..HEAD" }
+          ./Test-PrivacyGuard.ps1 -Range $range
+      - name: Verify the privacy check itself
+        shell: pwsh
+        run: pwsh -NoProfile -File ./Test-PrivacyGuardRules.ps1
+      - name: Check that no built-in variable is assigned to
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+          pwsh -NoProfile -File ./Test-BackupStyle.ps1
       - name: Parse all PowerShell sources
         shell: pwsh
         run: |
@@ -36,28 +57,62 @@ jobs:
           if ($config.MemoryMiB -lt 512 -or $config.Include.Count -eq 0) { throw 'Invalid example' }
       - name: Verify concurrent status access
         shell: pwsh
-        run: ./Test-BackupStatus.ps1
+        run: pwsh -NoProfile -File ./Test-BackupStatus.ps1
       - name: Verify drive check rules
         shell: pwsh
-        run: ./Test-BackupDriveCheck.ps1
+        run: pwsh -NoProfile -File ./Test-BackupDriveCheck.ps1
       - name: Verify the AI session activity rule
         shell: pwsh
-        run: ./Test-BackupActivity.ps1
+        run: pwsh -NoProfile -File ./Test-BackupActivity.ps1
       - name: Verify colour themes and contrast
         shell: pwsh
-        run: ./Test-BackupTheme.ps1
-      - name: Verify the clean-up of old versions
-        shell: pwsh
-        run: ./Test-BackupRetention.ps1
+        run: pwsh -NoProfile -File ./Test-BackupTheme.ps1
       - name: Verify history selection safeguards
         shell: pwsh
-        run: ./Test-BackupHistory.ps1
+        run: pwsh -NoProfile -File ./Test-BackupHistory.ps1
       - name: Verify private credential file safeguards
         shell: pwsh
-        run: ./Test-BackupSecuritySafety.ps1
+        run: pwsh -NoProfile -File ./Test-BackupSecuritySafety.ps1
       - name: Verify plain copy rules
         shell: pwsh
-        run: ./Test-BackupCopyRules.ps1
+        run: pwsh -NoProfile -File ./Test-BackupCopyRules.ps1
+      - name: Verify plain copy runs, failures and recovery folders
+        shell: pwsh
+        run: pwsh -NoProfile -File ./Test-BackupMirror.ps1
+      - name: Verify the rules for versions
+        shell: pwsh
+        run: pwsh -NoProfile -File ./Test-BackupVersionsRules.ps1
+      - name: Verify versions and the clean-up of old versions against a disposable repository
+        shell: pwsh
+        run: |
+          ./Install-BackupEngine.ps1
+          # Without the engine the test would skip its real part and still pass.
+          if (-not (Test-Path -LiteralPath ./bin/restic_0.19.1_windows_amd64.exe)) { throw 'The versions engine was not installed, so the test would not run.' }
+          pwsh -NoProfile -File ./Test-BackupVersions.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File ./Test-BackupRetention.ps1
+      - name: Verify the window's data and run results
+        shell: pwsh
+        run: pwsh -NoProfile -File ./Test-BackupData.ps1
+      # Windows cuts a window down to the screen it is on, and the runner's screen (1024 x 768) is smaller
+      # than the window at full size, so the test would measure the runner instead of the window.
+      - name: Give the window tests a screen with room for the window
+        shell: powershell
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
+          Add-Type -AssemblyName System.Windows.Forms
+          $largest = [Windows.Forms.SystemInformation]::MaxWindowTrackSize
+          "Largest window Windows allows now: $($largest.Width) x $($largest.Height)"
+          if ($largest.Width -lt 1216 -or $largest.Height -lt 839) { throw 'The screen is still too small for the window at full size.' }
+      - name: Verify the window opens on every page
+        shell: pwsh
+        run: pwsh -NoProfile -File ./Test-BackupWindow.ps1
+      - name: Verify drive tools and the report generator
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File ./Test-BackupTools.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }   # a failing first test must not be hidden by the next command
+          python ./Test-BackupToolsReport.py
       - name: Verify the hard memory limit
         shell: pwsh
-        run: ./Test-BackupResourceControls.ps1
+        run: pwsh -NoProfile -File ./Test-BackupResourceControls.ps1

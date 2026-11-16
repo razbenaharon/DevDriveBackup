@@ -15,9 +15,10 @@ $script:Themes=[ordered]@{
  'Ocean'      =[ordered]@{Dark=$true; Paper='#0F1724';Surface='#172233';Ink='#E4ECF5';Muted='#A2B3C7';Line='#2E3E54';Select='#22324A';Accent='#4C9BE8';OnAccent='#06111E';AccentHover='#6AAFF0'}
  'High contrast'=[ordered]@{Dark=$true;Paper='#000000';Surface='#101010';Ink='#FFFFFF';Muted='#D6D6D6';Line='#9A9A9A';Select='#2E2E2E';Accent='#FFD400';OnAccent='#000000';AccentHover='#FFE34D'}
 }
-# Status colours: Color for stripes and the large age number, Ink for small status text.
+# Status colours: Color for stripes and large text (the age number, the drive check summary: at least
+# 3:1 on panels), Ink for small status text (at least 4.5:1).
 $script:States=@{
- Light=@{Color=@{Fresh='#2E8B57';OK='#5C7C8F';Stale='#C7822A';Never='#9AA3A8';Error='#B22222'};Ink=@{Fresh='#1E6E42';OK='#425E6E';Stale='#8A520A';Never='#5A6469';Error='#B22222'}}
+ Light=@{Color=@{Fresh='#2E8B57';OK='#5C7C8F';Stale='#C7822A';Never='#8B9499';Error='#B22222'};Ink=@{Fresh='#1E6E42';OK='#425E6E';Stale='#8A520A';Never='#5A6469';Error='#B22222'}}
  Dark =@{Color=@{Fresh='#3FB37A';OK='#7FA6BD';Stale='#E0A040';Never='#7E8B90';Error='#E5534B'};Ink=@{Fresh='#6BD19B';OK='#A7C4D6';Stale='#F2BC66';Never='#AEB9BD';Error='#FF8A80'}}
 }
 
@@ -69,7 +70,11 @@ function New-CenterCustomTheme {
   if((Get-CenterContrast $m $Panels) -ge 4.6 -and (Get-CenterContrast $m $Background) -ge 4.6 -and (Get-CenterContrast $m $select) -ge 4.6){$muted=$m;break}
  }
  $onAccent=if((Get-CenterContrast '#FFFFFF' $Accent) -ge (Get-CenterContrast '#000000' $Accent)){'#FFFFFF'}else{'#000000'}
- $hover=Join-CenterColor $Accent $(if($dark){'#FFFFFF'}else{'#000000'}) 0.15
+ # Under the mouse the button moves away from its text colour. Moving by the theme (lighter on dark,
+ # darker on light) took a green button with black text toward black: 3.8:1 under the mouse.
+ # A pure black or white button cannot move further away; it moves toward the text, where it has room.
+ $hover=Join-CenterColor $Accent $(if($onAccent -eq '#FFFFFF'){'#000000'}else{'#FFFFFF'}) 0.15
+ if($hover -eq $Accent){$hover=Join-CenterColor $Accent $onAccent 0.15}
  $t=[ordered]@{Dark=$dark;Paper=$Background;Surface=$Panels;Ink=$Text;Muted=$muted;Line=(Join-CenterColor $Panels $Text 0.22);Select=$select;Accent=$Accent;OnAccent=$onAccent;AccentHover=$hover}
  Resolve-CenterThemeClash $t
 }
@@ -93,7 +98,12 @@ function Test-CenterTheme($Theme) {
   @('Secondary text on panels',$Theme.Muted,$Theme.Surface,4.5),@('Secondary text on background',$Theme.Muted,$Theme.Paper,4.5),@('Secondary text on selection',$Theme.Muted,$Theme.Select,4.5)
   @('Button text',$Theme.OnAccent,$Theme.Accent,4.5),@('Button text, mouse over',$Theme.OnAccent,$Theme.AccentHover,4.5),@('Main button against panels',$Theme.Accent,$Theme.Surface,3)
  )
- foreach($k in 'Fresh','OK','Stale','Never','Error'){$pairs+=,@("Status '$k' text on panels",$s.Ink[$k],$Theme.Surface,4.5);$pairs+=,@("Status '$k' text on selection",$s.Ink[$k],$Theme.Select,4.5)}
+ # Status words are drawn on panels, on selected rows and on the cards of the drive check page (window
+ # background). The age readout and the drive check summary are large text in the status colour itself.
+ foreach($k in 'Fresh','OK','Stale','Never','Error'){
+  $pairs+=,@("Status '$k' text on panels",$s.Ink[$k],$Theme.Surface,4.5);$pairs+=,@("Status '$k' text on selection",$s.Ink[$k],$Theme.Select,4.5);$pairs+=,@("Status '$k' text on background",$s.Ink[$k],$Theme.Paper,4.5)
+  $pairs+=,@("Large status '$k' on panels",$s.Color[$k],$Theme.Surface,3)
+ }
  foreach($p in $pairs){$r=Get-CenterContrast $p[1] $p[2];[pscustomobject]@{Pair=$p[0];Ratio=[math]::Round($r,2);Needs=$p[3];Pass=($r -ge $p[3])}}
 }
 
@@ -101,6 +111,9 @@ function Read-CenterAppearance([string]$Path) {
  $default=[pscustomobject]@{Theme='Light';Custom=[pscustomobject]@{Background='#ECF0EF';Panels='#FFFFFF';Text='#1F2A2E';Accent='#2E8B57'}}
  if(-not $Path -or -not(Test-Path -LiteralPath $Path)){return $default}
  try{$a=Get-Content -LiteralPath $Path -Raw|ConvertFrom-Json}catch{return $default}
+ # An empty file, "null" or anything else that is not a set of choices: the default look. The file is
+ # only written again when the user picks a look.
+ if($a -isnot [pscustomobject]){return $default}
  $theme=if($a.PSObject.Properties['Theme'] -and ([string]$a.Theme) -in (Get-CenterThemeNames)){[string]$a.Theme}else{'Light'}
  $custom=$default.Custom
  if($a.PSObject.Properties['Custom'] -and $a.Custom){

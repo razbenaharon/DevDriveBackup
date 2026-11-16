@@ -25,8 +25,10 @@ public static class CenterTaskbar
         public uint PropertyId;
     }
 
-    // Only the two kinds used here: empty (clears a value) and a wide string.
-    [StructLayout(LayoutKind.Explicit, Size = 16)]
+    // Only the two kinds used here: empty (clears a value) and a wide string. The size is the full
+    // PROPVARIANT of 64-bit Windows (24 bytes; 16 on 32-bit): Windows reads the whole value, so a
+    // shorter one would have it read past the end.
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
     private struct PropVariant
     {
         [FieldOffset(0)] public ushort Type;

@@ -31,7 +31,7 @@ try{
  Assert ((Get-CenterFreshness ([pscustomobject]@{ReminderDays=7;Sources=@()}) $empty).State -eq 'Nothing selected') 'an empty history does not break freshness'
  Set-StrictMode -Off
  $hw=Get-CenterHardware;$levels=Get-CenterLoadPresets $hw
- Assert ($levels.Light.CpuThreads -le $levels.Balanced.CpuThreads -and $levels.Balanced.CpuThreads -le $levels.Maximum.CpuThreads -and $levels.Maximum.CpuThreads -le $hw.Threads) 'load levels grow and never use more threads than this computer has'
+ Assert ($levels.Light.CpuThreads -le $levels.Balanced.CpuThreads -and $levels.Balanced.CpuThreads -le $levels.Strong.CpuThreads -and $levels.Strong.CpuThreads -le $levels.Maximum.CpuThreads -and $levels.Maximum.CpuThreads -le $hw.Threads) 'load levels grow and never use more threads than this computer has'
  $custom=Get-CenterLoad ([pscustomobject]@{Load='Custom';CustomLoad=[pscustomobject]@{CpuThreads=999;MemoryMiB=1;CopyThreads=0;Priority='Normal'}}) $hw
  Assert ($custom.CpuThreads -eq $hw.Threads -and $custom.MemoryMiB -eq 512 -and $custom.CopyThreads -eq 1) 'custom load values are kept within safe limits'
  $p=New-CenterProfile $data 'Test drive' $dest.UniqueId 'Test model' 100
@@ -75,12 +75,12 @@ try{
 
  Sync-CenterJob $p $s
  $versionArgs={param($Purpose)@((@(Get-CenterSteps $p @() $Purpose)|Where-Object {$_.Kind -eq 'Versioned'})[0].Arguments)}
- Assert (-not (Get-CenterVersionRetention $p).Enabled -and '-KeepDays' -notin (& $versionArgs 'Backup')) 'by default every version is kept'
- $p|Add-Member -NotePropertyName VersionRetention -NotePropertyValue ([pscustomobject]@{Days=7;Weeks=4;Months=3}) -Force
+ Assert (-not (Get-CenterVersionRetention $p).Enabled -and '-KeepLast' -notin (& $versionArgs 'Backup') -and '-KeepMonths' -notin (& $versionArgs 'Backup')) 'by default every version is kept'
+ $p|Add-Member -NotePropertyName VersionRetention -NotePropertyValue ([pscustomobject]@{Last=10;Months=6}) -Force
  $va=& $versionArgs 'Backup'
- Assert ($va[[array]::IndexOf($va,'-KeepDays')+1] -eq '7' -and $va[[array]::IndexOf($va,'-KeepWeeks')+1] -eq '4' -and $va[[array]::IndexOf($va,'-KeepMonths')+1] -eq '3' -and '-KeepDays' -notin (& $versionArgs 'Verify')) 'Keep versions passes 7 days / 4 weeks / 3 months to a versioned backup, never to a check'
- Assert ((Format-CenterVersionRetention (Get-CenterVersionRetention $p)) -eq '7 d / 4 w / 3 m') 'the overview shows the rule briefly'
- $p.VersionRetention=[pscustomobject]@{Days=0;Weeks=0;Months=0}
+ Assert ($va[[array]::IndexOf($va,'-KeepLast')+1] -eq '10' -and $va[[array]::IndexOf($va,'-KeepMonths')+1] -eq '6' -and '-KeepDays' -notin $va -and '-KeepWeeks' -notin $va -and '-RetentionPreview' -in $va -and '-KeepLast' -notin (& $versionArgs 'Verify')) 'Keep versions passes 10 newest / 6 months to a versioned backup, as a preview until the first clean-up is approved, and never to a check'
+ Assert ((Format-CenterVersionRetention (Get-CenterVersionRetention $p)) -eq '10 newest + 6 months') 'the overview shows the rule briefly'
+ $p.VersionRetention=[pscustomobject]@{Last=0;Months=0}
  function Invoke-All([string]$Purpose){
   $results=@()
   foreach($step in @(Get-CenterSteps $p @() $Purpose)){
@@ -115,7 +115,7 @@ try{
  Assert ((Get-CenterKeepDeleted $p) -eq 0 -and '-MoveExtras' -notin $plain) 'by default deleted files stay in the plain copy'
  $p|Add-Member -NotePropertyName KeepDeleted -NotePropertyValue 5 -Force
  $plain=@((Get-CenterSteps $p @() 'Backup')[0].Arguments);$checkArgs=@((Get-CenterSteps $p @() 'Verify')[0].Arguments)
- Assert ('-MoveExtras' -in $plain -and $plain[[array]::IndexOf($plain,'-KeepRecovery')+1] -eq '5' -and '-MoveExtras' -notin $checkArgs) 'Keep deleted moves deleted files aside on a backup, never on a content check'
+ Assert ('-MoveExtras' -in $plain -and $plain[[array]::IndexOf($plain,'-KeepRecovery')+1] -eq '5' -and '-PreviewRecovery' -in $plain -and '-MoveExtras' -notin $checkArgs) 'Keep deleted moves deleted files aside on a backup (old recovery folders are only listed until the first clean-up is approved), never on a content check'
  $p.KeepDeleted=0
 
  Remove-CenterSource $data $p.Id $s.Id

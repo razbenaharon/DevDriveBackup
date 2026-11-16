@@ -3,11 +3,14 @@
 # a small plain mirror (Invoke-FastMirror.ps1) and a small versioned backup (Backup-Worker.ps1)
 # of a disposable source. Everything it creates carries one random id and is removed at the
 # end unless -KeepArtifacts is given. The configured real mirror and repository are never used.
-param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$DestinationDrive,[switch]$KeepArtifacts)
+# Without -DestinationDrive only the rules are checked: that part touches no disk and needs no drive.
+param([ValidatePattern('^[A-Za-z]$')][string]$DestinationDrive,[switch]$KeepArtifacts)
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Backup.Selection.psm1') -Force
 function Assert($ok,$message){if(-not $ok){throw "FAIL $message"};Write-Output ('PASS '+$message)}
-function Throws([scriptblock]$Block,[string]$Pattern){try{& $Block;$false}catch{$_.Exception.Message -match $Pattern}}
+# The block's own output is thrown away: a block that returned something instead of failing would
+# otherwise hand Assert that output together with False, and a list of two counts as true.
+function Throws([scriptblock]$Block,[string]$Pattern){try{& $Block|Out-Null;$false}catch{$_.Exception.Message -match $Pattern}}
 function Config($default,[object[]]$choices){[pscustomobject]@{DefaultMode=$default;NeverBackUp=@('credentials-folder');Choices=@($choices|ForEach-Object {[pscustomobject]@{Path=$_[0];Mode=$_[1];Reason='test'}})}}
 
 # --- Rules, without touching any disk -------------------------------------------------
@@ -42,6 +45,7 @@ Assert (-not @(@(Get-BackupRegions $nested 'Mirror')+@(Get-BackupRegions $nested
  Assert ($empty.HasModes -and $roots.Count -eq 1 -and $roots[0].Path -eq '' -and @($roots[0].Excluded).Count -eq 0 -and (Get-BackupMode $empty 'any\folder') -eq 'Mirror') 'an empty Choices list mirrors the whole source'
  Assert (@($empty.Entries|ForEach-Object {$_.Path}).Count -eq 0 -and @(Get-BackupRegions $empty 'Versioned').Count -eq 0) 'an empty Choices list gives the check an empty list, not an error'
 }
+if(-not $DestinationDrive){Write-Output 'SKIP the plain mirror and the versioned backup of a disposable source: they need -DestinationDrive';return}
 $real=Join-Path $PSScriptRoot 'backup.local.json'
 if(Test-Path -LiteralPath $real){
  $realConfig=Get-Content -LiteralPath $real -Raw|ConvertFrom-Json

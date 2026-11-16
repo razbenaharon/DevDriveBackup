@@ -8,35 +8,84 @@ import hashlib
 import json
 from pathlib import Path
 
-parser = argparse.ArgumentParser(description=__doc__)
-for name in ('audit', 'hardware', 'config', 'chartjs', 'output'):
-    parser.add_argument('--' + name, type=Path, required=True)
-args = parser.parse_args()
-rows = list(csv.DictReader((args.audit / 'folder-summary.csv').open(encoding='utf-8-sig')))
-for row in rows:
-    for key in row:
-        if key not in ('Path', 'LatestUtc'):
-            row[key] = int(row[key])
-hardware = json.loads(args.hardware.read_text(encoding='utf-8-sig'))
-current = json.loads((args.audit / 'disk-benchmark.json').read_text(encoding='utf-8-sig'))
-# An earlier measurement to compare with is optional.
-baseline_path = args.audit / 'disk-benchmark-usb2.json'
-baseline = json.loads(baseline_path.read_text(encoding='utf-8-sig')) if baseline_path.exists() else None
-usb = json.loads((args.audit / 'usb-speed.json').read_text(encoding='utf-8-sig'))
-config = json.loads(args.config.read_text(encoding='utf-8-sig'))
-bundle = args.chartjs.read_bytes()
-expected = 'jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ'
-if base64.b64encode(hashlib.sha384(bundle).digest()).decode() != expected:
-    raise ValueError('Chart.js checksum mismatch')
-data = {
-    'rows': rows, 'cpu': hardware['CPU']['Name'],
-    'ram': round(hardware['System']['TotalPhysicalMemory'] / 2**30),
-    'disk': current['Disk'], 'benchmark': current['Benchmark'],
-    'old': baseline['Benchmark'] if baseline else None, 'usb': usb,
-    'choices': config['Choices'], 'notes': config.get('ReportNotes', []),
-    # .NET writes up to 7 fractional digits; Python before 3.11 accepts at most 6.
-    'date': datetime.fromisoformat(re.sub(r'(\.\d{6})\d+', r'\1', current['Utc']).replace('Z', '+00:00')).astimezone().strftime('%Y-%m-%d'),
-}
+CHARTJS_SHA384 = 'jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ'
+
+
+def check_bundle(bundle):
+    if base64.b64encode(hashlib.sha384(bundle).digest()).decode() != CHARTJS_SHA384:
+        raise ValueError('Chart.js checksum mismatch')
+
+
+def cpu_name(cpu):
+    # Get-BackupHardware.ps1 writes one object for one processor and a list for several.
+    names = [str(item['Name']).strip() for item in (cpu if isinstance(cpu, list) else [cpu])]
+    unique = list(dict.fromkeys(names))
+    return '%d × %s' % (len(names), unique[0]) if len(names) > 1 and len(unique) == 1 else ', '.join(unique)
+
+
+def link_text(usb):
+    # Without a measured speed (not a USB drive, or the query failed) say so instead of a blank.
+    if usb.get('Speed'):
+        return str(usb['Speed'])
+    return 'USB link speed not measured' + (': ' + str(usb['Error']) if usb.get('Error') else '')
+
+
+def is_temporary(path):
+    # A top-level Temp or tmp folder, also "temp-old" or "tmp_1"; not Templates or Temperature.
+    return re.match(r'(?i)te?mp([\\ ._-]|$)', path) is not None
+
+
+def embed(data):
+    # The data sits inside a script element. Any "<" could end that element early ("</script>") or
+    # make the browser skip its real end ("<!--<script"), so none is written as itself.
+    return json.dumps(data, ensure_ascii=False).replace('<', '\\u003c')
+
+
+def read_json(path):
+    return json.loads(path.read_text(encoding='utf-8-sig'))
+
+
+def build(audit, hardware_path, config_path):
+    with (audit / 'folder-summary.csv').open(encoding='utf-8-sig', newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        for key in row:
+            if key not in ('Path', 'LatestUtc'):
+                row[key] = int(row[key])
+        row['Temp'] = is_temporary(row['Path'])
+    hardware = read_json(hardware_path)
+    current = read_json(audit / 'disk-benchmark.json')
+    # An earlier measurement to compare with is optional.
+    baseline_path = audit / 'disk-benchmark-usb2.json'
+    baseline = read_json(baseline_path) if baseline_path.exists() else None
+    config = read_json(config_path)
+    return {
+        'rows': rows, 'cpu': cpu_name(hardware['CPU']),
+        'ram': round(hardware['System']['TotalPhysicalMemory'] / 2**30),
+        'disk': current['Disk'], 'benchmark': current['Benchmark'],
+        'old': baseline['Benchmark'] if baseline else None, 'link': link_text(read_json(audit / 'usb-speed.json')),
+        'choices': config['Choices'], 'notes': config.get('ReportNotes', []),
+        # .NET writes up to 7 fractional digits; Python before 3.11 accepts at most 6.
+        'date': datetime.fromisoformat(re.sub(r'(\.\d{6})\d+', r'\1', current['Utc']).replace('Z', '+00:00')).astimezone().strftime('%Y-%m-%d'),
+    }
+
+
+def render(data, chartjs):
+    return template.replace('__CHARTJS__', chartjs).replace('__DATA__', embed(data))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ('audit', 'hardware', 'config', 'chartjs', 'output'):
+        parser.add_argument('--' + name, type=Path, required=True)
+    args = parser.parse_args()
+    bundle = args.chartjs.read_bytes()
+    check_bundle(bundle)
+    html = render(build(args.audit, args.hardware, args.config), bundle.decode())
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(html, encoding='utf-8')
+    print(args.output)
+
 
 template = r'''<!doctype html>
 <html lang="en" dir="ltr">
@@ -89,7 +138,7 @@ const D=__DATA__, fmt=new Intl.NumberFormat('en-US'), gib=n=>(n/1073741824).toFi
 const el=id=>document.getElementById(id), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const all=D.rows.find(r=>r.Path==='(all)'), roots=D.rows.filter(r=>!r.Path.includes('\\')&&r.Path!=='(all)').sort((a,b)=>b.Bytes-a.Bytes);
 el('date').textContent=D.date;el('total').textContent=gib(all.Bytes)+' GiB';el('files').textContent=fmt.format(all.Files);el('caches').textContent=gib(all.CacheBytes)+' GiB';el('gain').textContent=D.old?(D.benchmark.WriteMBps/D.old.WriteMBps).toFixed(2)+'×':'—';
-el('hardware').innerHTML='<p>'+esc(D.cpu)+'<br>'+D.ram+' GiB RAM · '+esc(D.disk)+'<br>'+esc(D.usb.Speed)+'</p>';
+el('hardware').innerHTML='<p>'+esc(D.cpu)+'<br>'+D.ram+' GiB RAM · '+esc(D.disk)+'<br>'+esc(D.link)+'</p>';
 el('speed').innerHTML=[['Baseline',D.old],['Current connection',D.benchmark]].filter(([,b])=>b).map(([name,b])=>'<tr><td>'+name+'</td><td>'+b.WriteMBps.toFixed(1)+'</td><td>'+b.ReadMBps.toFixed(1)+'</td></tr>').join('');
 el('benchmark-note').textContent='Short test: '+fmt.format(D.benchmark.Bytes/1048576)+' MiB, '+(D.benchmark.BlockBytes/1048576)+' MiB blocks, unbuffered I/O and write-through writes. This is a point-in-time measurement, not a sustained-speed guarantee or a small-file transfer benchmark. Drive/controller caches may still affect it.';
 el('limits').textContent=fmt.format(all.Errors)+' access or metadata errors were recorded. '+fmt.format(all.Links)+' links were not followed. '+fmt.format(all.Directories)+' directories were identified.';
@@ -99,7 +148,7 @@ D.rows.filter(r=>r.Path!=='(all)'&&r.Path.split('\\').length<3&&D.rows.some(c=>c
 function advice(r){
  const p=r.Path.toLowerCase();
  if(/(^|\\)(node_modules|\.venv|venv|__pycache__|\.pytest_cache|\.pnpm-store)(\\|$)/.test(p)||p==='packages')return ['low','Low','Dependencies or cache; rebuildable if packages and pinned versions remain available.'];
- if(p.startsWith('temp')||p==='tmp')return ['review','Review','Temporary or reinstallable software; check for unique data and configuration.'];
+ if(r.Temp)return ['review','Review','Temporary or reinstallable software; check for unique data and configuration.'];
  if(p.includes('test-results')||p.includes('builds'))return ['review','Review','Evidence, artifacts and experiment results may be unique; preserve initially.'];
  const choice=D.choices.find(c=>r.Path===c.Path||r.Path.startsWith(c.Path+'\\'));
  return ['high','Recommended',choice?choice.Reason:'Preserve source, data, configuration, assets, history and local changes.'];
@@ -119,7 +168,6 @@ el('csv').addEventListener('click',()=>{
  const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'}));link.download='devdrive-folder-summary.csv';link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);
 });render();
 </script></html>'''
-html = template.replace('__CHARTJS__', bundle.decode()).replace('__DATA__', json.dumps(data, ensure_ascii=False).replace('</', '<\\/'))
-args.output.parent.mkdir(parents=True, exist_ok=True)
-args.output.write_text(html, encoding='utf-8')
-print(args.output)
+
+if __name__ == '__main__':
+    main()
