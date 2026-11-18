@@ -57,6 +57,47 @@ try{
  Check 'an old entry of a long run still shows its speed' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=[long]50e9;Minutes=60})) -eq '14 MB/s'}
  Check 'no speed for small amounts, checks, or versions without the amount read' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=5e6;Seconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='MirrorCheck';CopiedBytes=[long]9e9;Seconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='Versioned';CopiedBytes=[long]9e9;Seconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=$null;Seconds=60})) -eq ''}
  Check 'versions show the speed of what was read' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Versioned';CopiedBytes=1000;ProcessedBytes=[long]6e9;Seconds=60})) -eq '100 MB/s'}
+
+ # --- Progress of a running step ---
+ $log="`t  *EXTRA File `t`t     360`tG:\M\a.txt`r`n`t    New File  `t`t    1000`tE:\a.txt`r`n`t    Newer     `t`t     500`tE:\b.txt`t    Changed   `t`t      20`tE:\c.txt`r`n               Total    Copied`r`n    Bytes :   99999   1520`r`n"
+ Check 'copied files are counted from robocopy records, two on one line included; extras and totals are not' {$m=Measure-CenterCopyLog $log;$m.Files -eq 3 -and $m.Bytes -eq 1520}
+ Check 'a running copy log is read in parts: a line still being written waits for the next look' {
+  $fm=Join-Path $root 'fast-mirror';$run=Join-Path $fm '20261118-083353';New-Item -ItemType Directory -Path $run -Force|Out-Null
+  $f=Join-Path $run 'copy-main.log';$enc=[Text.Encoding]::Unicode
+  $first="`t    New File  `t`t    1000`tE:\a.txt`r`n`t    Newer     `t`t     5"
+  [IO.File]::WriteAllBytes($f,$enc.GetPreamble()+$enc.GetBytes($first))
+  $st=New-CenterCopyProgress (Get-Date).AddSeconds(-2) $fm;[void](Update-CenterCopyProgress $st);$a=$st.Bytes
+  $fs=[IO.File]::Open($f,'Append');$b=$enc.GetBytes("00`tE:\b.txt`r`n");$fs.Write($b,0,$b.Length);$fs.Dispose()
+  [void](Update-CenterCopyProgress $st);[void](Update-CenterCopyProgress $st)
+  $a -eq 1000 -and $st.Bytes -eq 1500 -and $st.Files -eq 2 -and $st.Folder -eq $run
+ }
+ Check 'no run folder made since the step started: nothing is read' {$st=New-CenterCopyProgress (Get-Date).AddMinutes(5) (Join-Path $root 'fast-mirror');[void](Update-CenterCopyProgress $st);$null -eq $st.Folder -and $st.Bytes -eq 0}
+ Check 'speed is over the last ten seconds, and nothing until two seconds have passed' {
+  $st=New-CenterCopyProgress $now;$t=$now
+  $r0=Add-CenterRateSample $st $t 0;$r1=Add-CenterRateSample $st $t.AddSeconds(1) 100e6;$r2=Add-CenterRateSample $st $t.AddSeconds(2) 200e6
+  for($i=3;$i -le 20;$i++){$last=Add-CenterRateSample $st $t.AddSeconds($i) 200e6}   # copying stopped at 2 s
+  $null -eq $r0 -and $null -eq $r1 -and $r2 -eq 100e6 -and $last -eq 0
+ }
+ $hist=@(
+  [pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Backup';Finished=$now.AddDays(-9);Success=$true;Minutes=25.2}
+  [pscustomobject]@{SourceId='s';Kind='Mirror';Finished=$now.AddDays(-6);Success=$true;Minutes=2.5}
+  [pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Backup';Finished=$now.AddDays(-5);Success=$true;Seconds=192;Minutes=3.2}
+  [pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Backup';Finished=$now.AddDays(-4);Success=$false;Seconds=5}
+  [pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Backup';Finished=$now.AddDays(-3);Success=$true;Stopped=$true;Seconds=7}
+  [pscustomobject]@{SourceId='s';Kind='MirrorCheck';Purpose='Verify';Finished=$now.AddDays(-2);Success=$true;Seconds=900}
+  [pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Backup';Finished=$now.AddDays(-1);Success=$true;Seconds=204}
+ )
+ Check 'usual length: the middle of the last three runs that went through, of the same kind and purpose' {(Get-CenterUsualSeconds $hist ([pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Backup'})) -eq 192}
+ Check 'a content check goes by earlier content checks, which the history names MirrorCheck' {(Get-CenterUsualSeconds $hist ([pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Verify'})) -eq 900}
+ Check 'the run folder of the step before is not taken for this one' {
+  $fm=Join-Path $root 'fast-mirror-before';$old=Join-Path $fm '20261118-090000';New-Item -ItemType Directory -Path $old -Force|Out-Null
+  $st=New-CenterCopyProgress ((Get-Item -LiteralPath $old).CreationTime.AddSeconds(1)) $fm;[void](Update-CenterCopyProgress $st);$null -eq $st.Folder
+ }
+ Check 'no usual length for a step that never went through' {$null -eq (Get-CenterUsualSeconds $hist ([pscustomobject]@{SourceId='s';Kind='Versioned';Purpose='Backup'})) -and $null -eq (Get-CenterUsualSeconds @() ([pscustomobject]@{SourceId='s';Kind='Mirror';Purpose='Backup'}))}
+ Check 'time left: the usual length minus what passed, weighted with the tool''s own guess by how far the tool is' {(Get-CenterStepLeft 60 200 $null $null) -eq 140 -and (Get-CenterStepLeft 10 30 0.25 40) -eq 25 -and (Get-CenterStepLeft 10 $null 0.25 40) -eq 40}
+ Check 'time left: nothing to go by once a step takes longer than usual and the tool says nothing' {$null -eq (Get-CenterStepLeft 250 200 $null $null) -and $null -eq (Get-CenterStepLeft 10 $null $null $null) -and (Get-CenterStepLeft 250 200 0.9 12) -eq 12}
+ Check 'time left reads in whole minutes, and under a minute is not counted in seconds' {(Format-CenterTimeLeft 20) -eq 'Less than a minute left.' -and (Format-CenterTimeLeft 61) -eq 'About 1 min left.' -and (Format-CenterTimeLeft 222) -eq 'About 4 min left.' -and (Format-CenterTimeLeft 7380) -eq 'About 2 h 3 min left.'}
+ Check 'amounts copied are in MB and GB of a million and a billion bytes' {(Format-CenterBytes 1387789076) -eq '1.4 GB' -and (Format-CenterBytes 52e6) -eq '52 MB'}
  Check 'duration: exact for new entries, minutes for old ones' {(Format-CenterRunDuration ([pscustomobject]@{Seconds=100.4;Minutes=1.7})) -eq '1 min 40 s' -and (Format-CenterRunDuration ([pscustomobject]@{Minutes=1.7})) -eq '1.7 min' -and (Format-CenterRunDuration ([pscustomobject]@{Seconds=24.9;Minutes=0.4})) -eq '24 s'}
 
  # --- Load levels ---

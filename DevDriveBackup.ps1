@@ -619,12 +619,12 @@ function Save-Settings {Save-CenterProfiles $script:data;Show-SaveNote}
 # The detailed output of tool runs older than 30 days is deleted; the run history is kept.
 try{[void](Remove-CenterOldStepLogs)}catch{}
 $script:queue=[Collections.Generic.Queue[object]]::new();$script:current=$null;$script:runResults=@();$script:runProfile=$null;$script:totalSteps=0;$script:waiting=$null
-$script:lastFree=$null;$script:lastTick=$null;$script:loadingModes=$false;$script:meterRatio=0;$script:shown=$false;$script:zoomedFor=$null
+$script:copyProgress=$null;$script:copyTick=$null;$script:copyText='';$script:stepUsual=$null;$script:queuedUsual=$null;$script:loadingModes=$false;$script:meterRatio=0;$script:shown=$false;$script:zoomedFor=$null
 $script:check=$null;$script:install=$null;$script:adminRiskAccepted=$false;$script:speedRun=$null;$script:speedProfile=$null
 # What the pages show now, so a refresh can keep the user's place: the profile, the source whose folder
 # choices are in the grid, and whether those choices were changed and not saved yet.
 $script:detailsProfileId=$null;$script:modesSourceId=$null;$script:modesDirty=$false;$script:suppressModes=$false
-$script:autoRefresh=$false;$script:refreshing=$false;$script:lastRefresh=[datetime]::MinValue;$script:rateText=''
+$script:autoRefresh=$false;$script:refreshing=$false;$script:lastRefresh=[datetime]::MinValue
 # The reason last written to the status line for buttons that are off, the history the overview was
 # filled from, and whether a repair could start now (see Update-Details).
 $script:shownReason=$null;$script:history=@();$script:canRepair=$false;$script:hardware=$null;$script:testLog=[ordered]@{};$script:saveNote=''
@@ -994,7 +994,15 @@ function Start-NextStep {
   $script:runResults+=[pscustomobject]@{SourceId=$step.SourceId;Label=$step.Label;Kind=$step.Kind;Started=(Get-Date).ToString('o');Success=$false;Error='Could not start: '+$_.Exception.Message}
   Start-NextStep;return
  }
- $script:lastFree=$null;$script:lastTick=$null;$script:rateText=''
+ # What the status line goes by for this step: the copy logs of a plain copy, and how long this step
+ # and those still waiting took in recent runs. The history is read once per step, not every second.
+ $script:copyProgress=if($step.Kind -eq 'Mirror'){New-CenterCopyProgress $script:current.Started}else{$null};$script:copyTick=$null;$script:copyText=''
+ $script:stepUsual=$null;$script:queuedUsual=$null
+ try{
+  $h=@(Get-CenterHistory);$script:stepUsual=Get-CenterUsualSeconds $h $step
+  $rest=@(foreach($q in $script:queue.ToArray()){Get-CenterUsualSeconds $h $q})
+  if($rest.Count -eq $script:queue.Count -and $null -notin $rest){$script:queuedUsual=[double](($rest|Measure-Object -Sum).Sum)}
+ }catch{}
  $timer.Start();Update-Details
 }
 function Update-RunStatus {
@@ -1002,23 +1010,45 @@ function Update-RunStatus {
  $n=$script:totalSteps-$script:queue.Count
  $what=if($c.Step.Kind -eq 'Mirror'){'plain copy'}else{'versions'}
  if($c.Step.Purpose -eq 'Verify'){$what='checking '+$what}elseif($c.Step.Purpose -eq 'Repair'){$what='repairing files in the '+$what}
- $line="Step $n of $($script:totalSteps): $($c.Step.Label) - $what. Running for $(Format-CenterElapsed ((Get-Date)-$c.Started))."
- # This runs every second on the window's own thread, so it must not ask Windows for the list of
- # volumes (a second or more each time). The drive is looked up from the kept list and its free space
- # is read directly, every 5 seconds: the writing speed is how fast the free space shrinks.
- $d=Get-CenterDrive $script:runProfile.DestinationVolumeId;$now=Get-Date
- if($d.Connected -and (-not $script:lastTick -or ($now-$script:lastTick).TotalSeconds -ge 5)){
-  $free=Get-CenterFreeBytes $d.Letter
-  if($null -ne $free){
-   if($null -ne $script:lastFree -and $script:lastTick){$rate=($script:lastFree-$free)/1e6/($now-$script:lastTick).TotalSeconds;$script:rateText=if($rate -ge 0){"  Writing about {0:N0} MB/s." -f $rate}else{''}}
-   $script:lastFree=$free;$script:lastTick=$now
-  }
+ $now=Get-Date;$elapsed=($now-$c.Started).TotalSeconds
+ $line="Step $n of $($script:totalSteps): $($c.Step.Label) - $what. Running for $(Format-CenterElapsed ($now-$c.Started))."
+ # This runs every second on the window's own thread: only what the tools added since the last look is
+ # read. Speed and time left come from what the tools report (see Measure-CenterCopyLog), not from the
+ # free space of the backup drive.
+ $fraction=$null;$toolLeft=$null
+ if($c.Step.Kind -eq 'Mirror' -and $c.Step.Purpose -eq 'Backup' -and $script:copyProgress -and (-not $script:copyTick -or ($now-$script:copyTick).TotalSeconds -ge 2)){
+  $script:copyTick=$now
+  $cp=Update-CenterCopyProgress $script:copyProgress;$rate=Add-CenterRateSample $cp $now $cp.Bytes
+  $script:copyText=if($cp.Files -eq 0){if($null -ne $rate){'  Looking for new and changed files.'}else{''}}
+   else{
+    $t="  Copied $(Format-CenterBytes $cp.Bytes) ($('{0:N0}' -f $cp.Files) $(if($cp.Files -eq 1){'file'}else{'files'})) so far"
+    if($null -eq $rate){"$t."}elseif($rate -ge 1e6){"$t, about {0:N0} MB/s now." -f ($rate/1e6)}else{"$t; checking the files that did not change."}
+   }
  }
- if($d.Connected){$line+=$script:rateText}
+ if($c.Step.Kind -eq 'Mirror'){$line+=$script:copyText}
  if($c.Step.Kind -eq 'Versioned' -and $c.Step.RunDirectory){
   $st=Join-Path $c.Step.RunDirectory 'status.json'
-  if(Test-Path -LiteralPath $st){try{$s=Get-Content -LiteralPath $st -Raw|ConvertFrom-Json;if($s.Progress -and $s.Progress.PSObject.Properties['percent_done']){$line+="  {0:P0} done." -f [double]$s.Progress.percent_done;if($s.Progress.PSObject.Properties['seconds_remaining']){$line+=' About {0} min left.' -f [math]::Ceiling([double]$s.Progress.seconds_remaining/60)}}}catch{}}
+  if(Test-Path -LiteralPath $st){try{
+   $s=Get-Content -LiteralPath $st -Raw|ConvertFrom-Json;$p=$s.Progress
+   if($p -and $p.PSObject.Properties['percent_done'] -and [string]$p.message_type -eq 'status'){
+    $has={param($k)$p.PSObject.Properties[$k] -and $null -ne $p.$k}
+    $pd=[double]$p.percent_done
+    if([string]$s.State -eq 'BackingUp' -and (& $has 'total_files')){
+     # Until restic has counted every file, its total grows and its share done jumps (29% then 11%).
+     # It gives a time left only once the count is complete.
+     if((& $has 'seconds_remaining') -or $pd -ge 1){$line+="  {0:N0} of {1:N0} files checked ({2:P0})." -f [double]$p.files_done,[double]$p.total_files,$pd;$fraction=$pd;if(& $has 'seconds_remaining'){$toolLeft=[double]$p.seconds_remaining}}
+     else{$line+="  Counting files: {0:N0} so far." -f [double]$p.total_files}
+    }else{$line+="  {0:P0} done." -f $pd;$fraction=$pd;if(& $has 'seconds_remaining'){$toolLeft=[double]$p.seconds_remaining}}
+   }
+  }catch{}}
  }
+ # Time left for the whole run: this step, then the usual length of each step still waiting. When one
+ # of them has never run before, only this step's time is given.
+ $left=Get-CenterStepLeft $elapsed $script:stepUsual $fraction $toolLeft
+ if($null -ne $left){
+  if($null -ne $script:queuedUsual){$line+='  '+(Format-CenterTimeLeft ($left+$script:queuedUsual))}
+  else{$line+='  '+((Format-CenterTimeLeft $left) -replace ' left\.$',' left in this step.')}
+ }elseif($null -ne $script:stepUsual -and $elapsed -ge $script:stepUsual){$line+='  Taking longer than usual.'}
  $runStatus.Text=$line
 }
 function Finish-Run {

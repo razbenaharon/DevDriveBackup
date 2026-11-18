@@ -616,6 +616,109 @@ function Get-CenterRunSpeed($Entry) {
  if($null -eq $bytes -or $bytes -lt 100e6 -or $null -eq $seconds -or $seconds -lt 1){return ''}
  '{0:N0} MB/s' -f ($bytes/1e6/$seconds)
 }
+# --- Progress of a running step ---------------------------------------------------------------
+# The status line of a running backup says how fast files are being copied and how long is left. Both
+# come from what the tools themselves report, never from the free space of the backup drive: that
+# shrinks when robocopy sets a file's size (before the data is written), stays still while unchanged
+# files are compared or deleted files are moved aside, and a versioned backup writes only compressed
+# new data while it reads far more.
+function Measure-CenterCopyLog([string]$Text) {
+ # Files and bytes robocopy names as copied in a piece of its log (/FP /BYTES /NP, without /V): one
+ # record "<tab>  New File  <tabs>  1234<tab>E:\path" per copied file. Extras, skipped files and the
+ # totals at the end do not count. With /MT two records can share a line, so records are not anchored
+ # to the start of a line.
+ $files=0;$bytes=[long]0
+ foreach($m in [regex]::Matches($Text,'\t[ ]*(?:New File|Newer|Older|Changed|Modified|Tweaked)[ ]*\t+[ ]*(\d+)\t')){$files++;$bytes+=[long]$m.Groups[1].Value}
+ [pscustomobject]@{Files=$files;Bytes=$bytes}
+}
+function New-CenterCopyProgress([datetime]$Started,[string]$Root=(Join-Path $env:LOCALAPPDATA 'DevDriveMirror\fast-mirror')) {
+ # What the window keeps about one running plain copy: where its run folder is (found once it exists),
+ # how far each copy log was read, and what was copied so far.
+ @{Started=$Started;Root=$Root;Folder=$null;Logs=@{};Files=0;Bytes=[long]0;Samples=[Collections.Generic.List[object]]::new()}
+}
+function Update-CenterCopyProgress($State) {
+ # Reads what robocopy added to the copy logs of the running plain copy since the last call. Only the
+ # new part is read (every few seconds, on the window's thread), and a line still being written waits
+ # for the next call. The run folder is the newest one the tool made after the step started (the tool
+ # is started first, so its folder is never older than the step; the folder of the step before is).
+ if(-not $State.Folder){
+  if(-not (Test-Path -LiteralPath $State.Root)){return $State}
+  $d=Get-ChildItem -LiteralPath $State.Root -Directory -ErrorAction SilentlyContinue|Where-Object {$_.CreationTime -ge $State.Started}|Sort-Object CreationTime -Descending|Select-Object -First 1
+  if(-not $d){return $State};$State.Folder=$d.FullName
+ }
+ foreach($f in @(try{[IO.Directory]::GetFiles($State.Folder,'copy-*.log')}catch{})){
+  $k=$State.Logs[$f];if(-not $k){$k=@{Offset=[long]0;Rest=''};$State.Logs[$f]=$k}
+  try{
+   $fs=[IO.FileStream]::new($f,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+   try{
+    $n=[long][math]::Min($fs.Length-$k.Offset,16MB);$n-=$n%2   # UTF-16: whole characters only
+    if($n -le 0){continue}
+    $buf=[byte[]]::new($n);$fs.Position=$k.Offset;$got=0
+    while($got -lt $n){$r=$fs.Read($buf,$got,$n-$got);if($r -le 0){break};$got+=$r}
+    $got-=$got%2;$k.Offset+=$got
+    $text=$k.Rest+[Text.Encoding]::Unicode.GetString($buf,0,$got)
+   }finally{$fs.Dispose()}
+  }catch{continue}
+  $cut=$text.LastIndexOf("`n")
+  if($cut -lt 0){$k.Rest=$text;continue}
+  $k.Rest=$text.Substring($cut+1)
+  $m=Measure-CenterCopyLog $text.Substring(0,$cut+1);$State.Files+=$m.Files;$State.Bytes+=$m.Bytes
+ }
+ $State
+}
+function Add-CenterRateSample($State,[datetime]$Now,[long]$Bytes,[double]$WindowSeconds=10) {
+ # Bytes a second over about the last $WindowSeconds, or nothing until two readings at least two
+ # seconds apart exist. A file is counted when robocopy names it, which is when its copy starts, so a
+ # short window would jump; the average over the whole step would hide that copying stopped.
+ $s=$State.Samples;$s.Add([pscustomobject]@{T=$Now;Bytes=$Bytes})
+ while($s.Count -gt 2 -and ($Now-$s[1].T).TotalSeconds -ge $WindowSeconds){$s.RemoveAt(0)}
+ $dt=($Now-$s[0].T).TotalSeconds
+ if($dt -lt 2){return $null}
+ [math]::Max([double]0,($Bytes-$s[0].Bytes)/$dt)
+}
+function Get-CenterUsualSeconds($History,$Step) {
+ # How long this step usually takes: of the last three runs of the same source, kind and purpose that
+ # went through (not failed, not stopped), the middle one; nothing when there is none. A plain copy
+ # spends most of its time comparing files that did not change, so its length repeats from one run to
+ # the next much better than the amount of new data does.
+ # A content check or repair is recorded as MirrorCheck, VersionedRepair... (Complete-CenterStep).
+ $purpose=if($Step.PSObject.Properties['Purpose'] -and $Step.Purpose){[string]$Step.Purpose}else{'Backup'}
+ $kind=[string]$Step.Kind+$(switch($purpose){'Verify'{'Check'}'Repair'{'Repair'}default{''}})
+ $runs=@(@($History)|Where-Object {
+   $_ -and [string]$_.SourceId -eq [string]$Step.SourceId -and [string]$_.Kind -eq $kind -and $_.Success -eq $true -and
+   -not ($_.PSObject.Properties['Stopped'] -and $_.Stopped) -and
+   $(if($_.PSObject.Properties['Purpose'] -and $_.Purpose){[string]$_.Purpose}else{'Backup'}) -eq $purpose -and (ConvertTo-CenterTime $_.Finished)
+  }|Sort-Object {(ConvertTo-CenterTime $_.Finished).ToUniversalTime()} -Descending|ForEach-Object {
+   if($_.PSObject.Properties['Seconds'] -and $null -ne $_.Seconds){[double]$_.Seconds}elseif($_.PSObject.Properties['Minutes'] -and $null -ne $_.Minutes){[double]$_.Minutes*60}
+  }|Where-Object {$_ -gt 0}|Select-Object -First 3)
+ if(-not $runs.Count){return $null}
+ $sorted=@($runs|Sort-Object);$sorted[[int][math]::Floor($sorted.Count/2)]
+}
+function Get-CenterStepLeft([double]$Elapsed,$Usual,$Fraction,$ToolLeft) {
+ # Seconds left in the running step, or nothing when it cannot be said. $Usual: how long the step
+ # usually takes (Get-CenterUsualSeconds); $Fraction (0..1) and $ToolLeft: how far the tool says it is
+ # and what it expects, when it says so. A tool's own guess assumes the rest goes as fast as the start,
+ # which is far off when the new files come first and the unchanged ones go fast (restic said a minute
+ # when 20 seconds were left); so it is weighted by how far the tool is, the usual length by the rest.
+ # A step that already took longer than usual has no usual length left to go by.
+ $byUsual=if($null -ne $Usual -and $Elapsed -lt [double]$Usual){[double]$Usual-$Elapsed}else{$null}
+ $byTool=if($null -ne $ToolLeft -and [double]$ToolLeft -ge 0){[double]$ToolLeft}else{$null}
+ # [double] 0 and 1: with whole numbers [math]::Max would round the fraction to a whole number too.
+ if($null -ne $byTool -and $null -ne $byUsual){$w=if($null -ne $Fraction){[math]::Min([double]1,[math]::Max([double]0,[double]$Fraction))}else{0.5};return $w*$byTool+(1-$w)*$byUsual}
+ if($null -ne $byTool){return $byTool}
+ $byUsual
+}
+function Format-CenterTimeLeft([double]$Seconds) {
+ # "About 3 min left." Under a minute is not counted down in seconds: no estimate is that exact.
+ if($Seconds -lt 50){return 'Less than a minute left.'}
+ $m=[int][math]::Round($Seconds/60,[MidpointRounding]::AwayFromZero)
+ if($m -lt 60){return "About $m min left."}
+ 'About {0} h {1} min left.' -f [int][math]::Floor($m/60),($m%60)
+}
+function Format-CenterBytes([double]$Bytes) {
+ # Millions of bytes, as the speeds are given and drives are sold.
+ if($Bytes -ge 1e9){'{0:N1} GB' -f ($Bytes/1e9)}else{'{0:N0} MB' -f ($Bytes/1e6)}
+}
 function ConvertFrom-CenterToolJson([string]$Text,[string]$Require) {
  # The result a tool printed as JSON, found among its other output: warnings before it, error text
  # after it, lines that merely contain a brace. A result starts with "{" at the start of a line; of
@@ -1453,6 +1556,7 @@ function Get-CenterStaleProfiles([datetime]$Now=(Get-Date)) {
 Export-ModuleMember -Function Get-CenterHardware,Get-CenterLoadPresets,Get-CenterLoad,Set-CenterRunPriority,Set-CenterPaths,Get-CenterPaths,Read-CenterProfiles,Save-CenterProfiles,Get-CenterProfile,Get-CenterKeepDeleted,Get-CenterVersionRetention,Format-CenterVersionRetention,Set-CenterVersionRetention,Get-CenterRetentionPoints,Test-CenterRetentionConfirmed,Get-CenterRetentionState,Confirm-CenterRetention,Get-CenterRetentionPreview,Get-CenterRetentionExpected,Test-CenterRetentionPreviewWhole,Format-CenterRetentionPreview,Format-CenterRetentionList,Get-CenterDrive,Get-CenterCandidateDrives,
  New-CenterProfile,Remove-CenterProfile,Add-CenterSource,Remove-CenterSource,Read-CenterJob,Save-CenterJob,Get-CenterSourceKinds,Sync-CenterJob,
  Add-CenterHistory,Get-CenterHistory,Get-LastSuccess,Get-FreshnessState,Format-CenterAge,Get-CenterFreshness,ConvertTo-CenterTime,Format-CenterElapsed,Format-CenterRunDuration,Get-CenterRunSpeed,ConvertFrom-CenterToolJson,
+ Measure-CenterCopyLog,New-CenterCopyProgress,Update-CenterCopyProgress,Add-CenterRateSample,Get-CenterUsualSeconds,Get-CenterStepLeft,Format-CenterTimeLeft,Format-CenterBytes,
  Get-CenterBusyReason,Get-CenterFreeBytes,Get-CenterVolumeQueryCount,
  Get-CenterSaveReport,Find-CenterEarlierSource,Get-CenterWindowFit,Get-CenterRetentionApproved,Set-CenterRetentionApproved,Remove-CenterRetentionApproved,Set-CenterKeepDeleted,Complete-CenterRetentionRun,
  Get-CenterRecoveryAdvice,Get-CenterLockedOffer,Format-CenterLockedOffer,Set-CenterLockedAsked,Add-CenterLockedExclude,Get-CenterPersonalExcludes,Get-CenterMissingRepositories,
