@@ -603,16 +603,17 @@ function Format-CenterRunDuration($Entry) {
  ''
 }
 function Get-CenterRunSpeed($Entry) {
- # Average speed of a finished run in MB/s (millions of bytes, as drives are sold and as the speed test
- # reports), or '' when it cannot be said honestly: a content check copies nothing; a run under 100 MB
- # is mostly waiting; an old entry knows its time only to a tenth of a minute, too rough below a minute;
- # and versions store only what is new after compression, so their speed is what was read
- # (ProcessedBytes), when the worker reported it.
+ # Copy speed of a finished plain copy in MB/s (millions of bytes, as drives are sold and as the speed
+ # test reports): what was copied, divided by how long robocopy ran in the parts that copied something
+ # (CopySeconds). The length of the whole run is not used: most of it is comparing files that did not
+ # change and moving deleted ones aside, which showed 7 MB/s for a copy made at 140 MB/s.
+ # '' when it cannot be said honestly: an entry from before CopySeconds was recorded; a run under 100 MB
+ # or under a second; content checks and repairs; and versions, because restic passes most files by
+ # their size and date without reading them, so neither what it went through (shown as 397 MB/s) nor
+ # what it stored is a speed.
  $get={param($n)if($Entry.PSObject.Properties[$n] -and $null -ne $Entry.$n){[double]$Entry.$n}else{$null}}
- if([string]$Entry.Kind -like '*Check'){return ''}
- $bytes=if([string]$Entry.Kind -eq 'Versioned'){& $get 'ProcessedBytes'}else{& $get 'CopiedBytes'}
- $seconds=& $get 'Seconds'
- if($null -eq $seconds){$m=& $get 'Minutes';if($null -ne $m -and $m -ge 1){$seconds=$m*60}}
+ if([string]$Entry.Kind -ne 'Mirror'){return ''}
+ $bytes=& $get 'CopiedBytes';$seconds=& $get 'CopySeconds'
  if($null -eq $bytes -or $bytes -lt 100e6 -or $null -eq $seconds -or $seconds -lt 1){return ''}
  '{0:N0} MB/s' -f ($bytes/1e6/$seconds)
 }
@@ -1386,7 +1387,7 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
  # Seconds is exact; Minutes (a tenth of a minute) stays for older readers. ProcessedBytes: what a
  # versioned backup read, where CopiedBytes is only what it had to store.
  $e=[ordered]@{ProfileId=$ProfileId;SourceId=$s.SourceId;Label=$s.Label;Kind=$s.Kind;Purpose=$s.Purpose;Started=$Running.Started.ToString('o');Finished=(Get-Date).ToString('o')
-  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Seconds=[math]::Round(((Get-Date)-$Running.Started).TotalSeconds,1);Success=$false;Stopped=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;ProcessedBytes=$null;CheckedFiles=$null;Differences=$null;Details=$null;Note=$null;RetentionPreview=$null;RetentionPlanFailed=$false
+  Minutes=[math]::Round(((Get-Date)-$Running.Started).TotalMinutes,1);Seconds=[math]::Round(((Get-Date)-$Running.Started).TotalSeconds,1);Success=$false;Stopped=$false;Error=$null;CopiedFiles=$null;CopiedBytes=$null;CopySeconds=$null;ProcessedBytes=$null;CheckedFiles=$null;Differences=$null;Details=$null;Note=$null;RetentionPreview=$null;RetentionPlanFailed=$false
   RetentionPhase=$null;RecoveryFolderCount=$null;LockedFiles=$null;RepositoryMissing=$false}
  # What Get-CenterSteps noted on the step beside its arguments; a step built elsewhere has none of it.
  $noted={param($n)if($s.PSObject.Properties[$n]){$s.$n}else{$null}}
@@ -1399,12 +1400,18 @@ function Complete-CenterStep($Running,[string]$ProfileId,[switch]$Stopped) {
    $e.Details=$r.RunFolder
    # Files and bytes copied are the second number of each robocopy total. A total that was not read
    # (the tool could not find it in the log) leaves both unknown: 0 would claim that nothing was copied.
+   # CopySeconds: how long robocopy ran in the runs that copied something, the time the speed of the
+   # copy is measured over; unknown when a run's bytes or time were not reported (an older tool).
    $files=[long]0;$bytes=[long]0;$known=[bool]@($r.Runs).Count   # no run listed: nothing was read either
+   $copySeconds=[double]0;$timeKnown=$true
    foreach($run in @($r.Runs)){
     if([string]$run.Files -match '^Files : \d+ (\d+)'){$files+=[long]$Matches[1]}else{$known=$false}
-    if([string]$run.Bytes -match '^Bytes : \d+ (\d+)'){$bytes+=[long]$Matches[1]}else{$known=$false}
+    if([string]$run.Bytes -match '^Bytes : \d+ (\d+)'){
+     $b=[long]$Matches[1];$bytes+=$b
+     if($b -gt 0){if($run.PSObject.Properties['Seconds'] -and $null -ne $run.Seconds){$copySeconds+=[double]$run.Seconds}else{$timeKnown=$false}}
+    }else{$known=$false}
    }
-   if($known){$e.CopiedFiles=$files;$e.CopiedBytes=$bytes}
+   if($known){$e.CopiedFiles=$files;$e.CopiedBytes=$bytes;if($timeKnown -and $bytes -gt 0){$e.CopySeconds=[math]::Round($copySeconds,1)}}
    $verifyOk=$true
    # Differences is kept as a number of its own: "Repair differing files" is offered from it, also when
    # the error text below names something else.

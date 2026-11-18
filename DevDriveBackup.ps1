@@ -115,6 +115,8 @@ You can change the load while a backup runs. The priority changes at once; threa
 Speed test writes one temporary file (2 GB) to the backup drive, reads it back and deletes it. It also shows how the drive is connected: USB 2 is slow (about 40 MB/s), 5 Gbit/s USB reaches about 450 MB/s, 10 Gbit/s USB and Thunderbolt more.
 
 Many small files are limited by the drive they are read from, not by the backup drive. A low MB/s during a backup of a code folder is normal.
+
+Speed in "Recent runs" is the average while a plain copy was copying: what was copied, divided by the time the copy tool ran in the parts of the drive where it copied something. The time spent only comparing unchanged files is left out. Versions show no speed: most files are passed by their size and date without being read, so there is no honest number.
 '@
  DriveCheck=@'
 Quick check (a few minutes) asks the drive for its own health report and runs its two-minute self-test, reads samples at the start, middle and end of the drive, looks in the Windows log for disk and connection errors of the last 30 days, checks the connection speed and scans the file system.

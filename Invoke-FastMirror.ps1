@@ -254,8 +254,11 @@ function Invoke-CopyRun([string[]]$RoboArgs,[string]$Part,[string]$Log){
  # One robocopy run, added to the summary. The totals are read as soon as the run ends, from the log
  # of this run alone. Repeated marks a run whose folder was copied again after a file-or-folder swap
  # in it was healed: the later run tells what is left uncopied there.
- $code=Invoke-Robo $RoboArgs $Part;$result=Get-RoboRunResult $Log $code;$t=$result.Totals
- $entry=[ordered]@{Part=$Part;ExitCode=$code;Log=$Log;Files=$(if($t){'Files : '+($t.Files -join ' ')}else{''});Bytes=$(if($t){'Bytes : '+($t.Bytes -join ' ')}else{''});NotCopied=$result.NotCopied;Complete=$result.Complete;Repeated=$false}
+ # Seconds: how long robocopy ran, the time the window divides the copied bytes by for the speed of
+ # the copy (robocopy's own Times add up the time of every thread under /MT).
+ $clock=[Diagnostics.Stopwatch]::StartNew();$code=Invoke-Robo $RoboArgs $Part;$clock.Stop()
+ $result=Get-RoboRunResult $Log $code;$t=$result.Totals
+ $entry=[ordered]@{Part=$Part;ExitCode=$code;Log=$Log;Files=$(if($t){'Files : '+($t.Files -join ' ')}else{''});Bytes=$(if($t){'Bytes : '+($t.Bytes -join ' ')}else{''});NotCopied=$result.NotCopied;Complete=$result.Complete;Repeated=$false;Seconds=[math]::Round($clock.Elapsed.TotalSeconds,2)}
  $summary.Runs+=$entry
  [pscustomobject]@{Entry=$entry;Mismatch=([bool]($code -band 4) -or ($t -and ($t.Files[3]+$t.Dirs[3]) -gt 0))}
 }

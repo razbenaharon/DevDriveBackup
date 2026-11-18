@@ -52,11 +52,10 @@ try{
  Remove-Item -LiteralPath $hp
 
  # --- Run numbers shown in "Recent runs" ---
- Check 'speed uses the exact seconds: 600 MiB in 3.1 s is 203 MB/s' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=629145600;Seconds=3.1;Minutes=0.1})) -eq '203 MB/s'}
- Check 'an old entry with only rounded minutes shows no speed for a short run' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=629145600;Minutes=0.1})) -eq ''}
- Check 'an old entry of a long run still shows its speed' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=[long]50e9;Minutes=60})) -eq '14 MB/s'}
- Check 'no speed for small amounts, checks, or versions without the amount read' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=5e6;Seconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='MirrorCheck';CopiedBytes=[long]9e9;Seconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='Versioned';CopiedBytes=[long]9e9;Seconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=$null;Seconds=60})) -eq ''}
- Check 'versions show the speed of what was read' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Versioned';CopiedBytes=1000;ProcessedBytes=[long]6e9;Seconds=60})) -eq '100 MB/s'}
+ Check 'speed is over the time the copy ran, not the whole run: 1.39 GB copied in 10 s of a 204 s run is 139 MB/s' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=1387789076;CopySeconds=10.0;Seconds=203.6})) -eq '139 MB/s'}
+ Check 'an entry from before the copy time was recorded shows no speed' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=[long]50e9;Seconds=3600;Minutes=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=629145600;Minutes=0.1})) -eq ''}
+ Check 'no speed for small amounts, under a second, checks or repairs' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=5e6;CopySeconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=[long]9e9;CopySeconds=0.5})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='MirrorCheck';CopiedBytes=[long]9e9;CopySeconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='MirrorRepair';CopiedBytes=[long]9e9;CopySeconds=60})) -eq '' -and (Get-CenterRunSpeed ([pscustomobject]@{Kind='Mirror';CopiedBytes=$null;CopySeconds=60})) -eq ''}
+ Check 'versions show no speed: restic passes most files without reading them' {(Get-CenterRunSpeed ([pscustomobject]@{Kind='Versioned';CopiedBytes=871093093;ProcessedBytes=12547883974;Seconds=31.6})) -eq ''}
 
  # --- Progress of a running step ---
  $log="`t  *EXTRA File `t`t     360`tG:\M\a.txt`r`n`t    New File  `t`t    1000`tE:\a.txt`r`n`t    Newer     `t`t     500`tE:\b.txt`t    Changed   `t`t      20`tE:\c.txt`r`n               Total    Copied`r`n    Bytes :   99999   1520`r`n"
@@ -361,8 +360,14 @@ try{
  Check 'a plain copy: files and bytes copied, files checked, exact seconds' {$e.Success -and $e.Kind -eq 'Mirror' -and $e.CopiedFiles -eq 3 -and $e.CopiedBytes -eq 629145600 -and $e.CheckedFiles -eq 10 -and $e.Seconds -gt 0 -and $e.Seconds -lt 60 -and $null -ne $e.Minutes}
  $e=Invoke-Fake "Write-Output 'WARNING: skipped {temp} folder';Write-Output '$json'"
  Check 'a line with a brace before the result does not fail the plain copy' {$e.Success -and $e.CopiedFiles -eq 3}
+ Check 'a result from a tool that did not time its runs records no copy time' {$null -eq $e.CopySeconds}
+ $timed='{"RunFolder":"X","CopyErrors":0,"Runs":[{"Files":"Files : 9 2 7 0 0 0","Bytes":"Bytes : 9 600000000 0 0 0 0","Seconds":8.4},{"Files":"Files : 99 0 99 0 0 0","Bytes":"Bytes : 99 0 99 0 0 0","Seconds":70},{"Files":"Files : 5 1 4 0 0 0","Bytes":"Bytes : 5 1000 4 0 0 0","Seconds":1.6}]}'
+ $e=Invoke-Fake "Write-Output '$timed'"
+ Check 'copy time is the time of the runs that copied something; a run that only compared files is left out' {$e.CopiedBytes -eq 600001000 -and $e.CopySeconds -eq 10 -and (Get-CenterRunSpeed $e) -eq '60 MB/s'}
+ $e=Invoke-Fake ("Write-Output '"+$timed.Replace(',"Seconds":1.6','')+"'")
+ Check 'a run that copied something but has no time leaves the copy time unknown' {$e.CopiedBytes -eq 600001000 -and $null -eq $e.CopySeconds -and (Get-CenterRunSpeed $e) -eq ''}
  $e=Invoke-Fake ("Write-Output '"+$json.Replace('Files : 10 3 7 0 0 0','').Replace('Bytes : 5000 629145600 0 0 0 0','')+"'")
- Check 'totals that could not be read are recorded as unknown, not as 0 files' {$e.Success -and $null -eq $e.CopiedFiles -and $null -eq $e.CopiedBytes}
+ Check 'totals that could not be read are recorded as unknown, not as 0 files' {$e.Success -and $null -eq $e.CopiedFiles -and $null -eq $e.CopiedBytes -and $null -eq $e.CopySeconds}
  $e=Invoke-Fake ("Write-Output '"+$json.Replace('Files :','Dateien:')+"'")
  Check 'totals in an unexpected form are recorded as unknown too' {$e.Success -and $null -eq $e.CopiedFiles -and $null -eq $e.CopiedBytes}
  $e=Invoke-Fake ("Write-Output '"+'{"RunFolder":"X","CopyErrors":0,"Runs":[]}'+"'")
@@ -494,7 +499,7 @@ try{
  Check 'the full list of a short preview holds what the question shows' {$t=Format-CenterRetentionList $pv;$t -like '*1 Feb 2026, 09:30, partial*E:\Projects, E:\Docs*' -and $t -like '*2026-01-02_101500*2026-01-09_101500*' -and -not (Format-CenterRetentionList $none)}
  Check 'a long version ID is shown by its first 8 characters, as the history shows it' {(Format-CenterRetentionList (Get-CenterRetentionPreview @([pscustomobject]@{Label='L';SourceId='s';RetentionPreview=[pscustomobject]@{Versions=@([pscustomobject]@{Id=('ab12'*16);Time='2026-01-05T10:00:00';Partial=$false;Host='PC';Paths=@('E:\P')});RecoveryFolders=@()}}))) -like '*(ab12ab12)*'}
  $h=@(Get-CenterHistory)
- Check 'every run above is in the history, readable, stopped ones marked' {$h.Count -eq 43 -and @($h|Where-Object {$_.PSObject.Properties['Stopped'] -and $_.Stopped}).Count -eq 3 -and @($h|Where-Object {$_.Finished -isnot [datetime]}).Count -eq 0}
+ Check 'every run above is in the history, readable, stopped ones marked' {$h.Count -eq 45 -and @($h|Where-Object {$_.PSObject.Properties['Stopped'] -and $_.Stopped}).Count -eq 3 -and @($h|Where-Object {$_.Finished -isnot [datetime]}).Count -eq 0}
 
  # --- The settings file was damaged, removed or changed on disk after this window read it ---
  # A save never writes over what it does not know: the file on disk is kept aside under a dated name,
